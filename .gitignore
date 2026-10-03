@@ -7,13 +7,12 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Node
 node_modules
 dist
 dist-ssr
 *.local
 
-# Editor
+# Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -23,42 +22,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Env
-.env
-.env.*
-!.env.example
-
-# Firebase
-.firebase
-.firebaserc
-firebase-debug.log
-firestore-debug.log
-ui-debug.log
-serviceAccount*.json
-*service-account*.json
-
-# Genkit
-.genkit
-.genkit-cache
-
-# Vite/PWA
-.vite
-dev-dist
-build
-
-# Coverage/Tests
-coverage
-.nyc_output
-
-# OS
-Thumbs.db
-
-# Temp
-.tmp
-temp
-*.tmp
-
-# Misc
-.cache
-.parcel-cache
