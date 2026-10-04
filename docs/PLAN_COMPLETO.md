@@ -496,41 +496,41 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 - [ ] Genkit init + config Gemini
 
 ### FASE 1 - Base + Datos (2-4h)
-- [ ] Modelos TypeScript (tipos Firestore)
-- [ ] Reglas Firestore (solo user)
-- [ ] CRUD básico: Cuentas, Movimientos, Deudas
-- [ ] Dashboard inicial (saldos + últimos movimientos)
+- [x] Modelos TypeScript (tipos Firestore)
+- [x] Reglas Firestore (solo user)
+- [x] CRUD básico: Cuentas, Movimientos, Deudas
+- [x] Dashboard inicial (saldos + últimos movimientos)
 
 ### FASE 2 - MVP Chat IA (Core) (4-6h)
-- [ ] Genkit flows + chat UI (shadcn)
-- [ ] Tools: createMovimiento, updateSaldo, getSaldos
-- [ ] Parser NL español (gastos/ingresos)
-- [ ] Confirmaciones IA antes guardar crítico
-- [ ] Tests manuales chat
+- [x] Genkit flows + chat UI (shadcn)
+- [x] Tools: createMovimiento, updateSaldo, getSaldos
+- [x] Parser NL español (gastos/ingresos)
+- [x] Confirmaciones IA antes guardar crítico
+- [x] Tests manuales chat
 
 ### FASE 3 - Vehículos + Investigación Colombia (3-5h)
-- [ ] CRUD Vehículos (SOAT/TM/STR)
+- [x] CRUD Vehículos (SOAT/TM/STR)
 - [ ] Tool `investigarVehiculoCO` (estimados + requiereConfirmacion)
-- [ ] UI confirmación sugeridos
-- [ ] Cálculo gastos mensuales vehículos
+- [x] UI confirmación sugeridos
+- [x] Cálculo gastos mensuales vehículos
 
 ### FASE 4 - Propiedades + Nómina + Recurrentes (3-5h)
-- [ ] Propiedades (valor patrimonial, predial)
-- [ ] Nómina: trabajadores, salarios, primas julio/diciembre
-- [ ] Gastos recurrentes automáticos
-- [ ] Cálculo mensual consolidado
+- [x] Propiedades (valor patrimonial, predial)
+- [x] Nómina: trabajadores, salarios, primas julio/diciembre
+- [x] Gastos recurrentes automáticos
+- [x] Cálculo mensual consolidado
 
 ### FASE 5 - Calendario + Google Calendar (2-4h)
-- [ ] Modelo eventos + UI calendario (mini/mes)
-- [ ] Google OAuth + Calendar API
-- [ ] Generación automática vencimientos (SOAT/TM/STR, sueldos, primas, deudas)
-- [ ] RRULE + recordatorios
+- [x] Modelo eventos + UI calendario (mini/mes)
+- [x] Google OAuth + Calendar API
+- [x] Generación automática vencimientos (SOAT/TM/STR, sueldos, primas, deudas)
+- [x] RRULE + recordatorios
 
 ### FASE 6 - PWA + Notificaciones (Push) (1-2h)
-- [ ] Vite PWA (manifest, SW)
-- [ ] FCM Web Push + VAPID
-- [ ] Notificaciones vencimientos (30/7/1 día)
-- [ ] Instalable móvil
+- [x] Vite PWA (manifest, SW)
+- [x] FCM Web Push + VAPID
+- [x] Notificaciones vencimientos (30/7/1 día)
+- [x] Instalable móvil
 
 ### FASE 7 - Despliegue + Acceso fuera casa (1-2h)
 - [ ] Firebase Hosting + Functions deploy
@@ -601,7 +601,7 @@ mkdir src\ai,src\ai\flows,src\ai\tools,src\components,src\lib,src\types,src\hook
 
 **FIN PLAN COMPLETO**. Este documento contiene toda la información necesaria para desarrollar CashMet desde cero, sin perder contexto.## 14. GIT, GITHUB Y GITFLOW (RESPONSABLEMENTE)
 
-> **Principio**: El repositorio debe mantenerse actualizado en GitHub **con cada cosa**. Cada cambio l�gico, funcional o de documentaci�n debe commitearse y subirse de forma at�mica, siguiendo GitFlow de manera responsable.
+> **Principio**: El repositorio debe mantenerse actualizado en GitHub **con cada cosa**. Cada cambio l�gico, funcional o de documentaci�n debe commitearse y subirse de forma at�mica, siguiendo GitFlow de manera responsable.
 
 ### 14.1 Estructura de ramas (GitFlow)
 
@@ -617,7 +617,7 @@ Se sigue **GitFlow** con ramas principales y de soporte:
 
 ### 14.2 Politica de commits
 
-- **Actualizar con cada cosa**: Al completar un bloque l�gico (no por cada l�nea). Commit + push frecuente.
+- **Actualizar con cada cosa**: Al completar un bloque l�gico (no por cada l�nea). Commit + push frecuente.
 - **Atomicos y descriptivos**: Un commit = un cambio conceptual claro.
 - **Convencional Commits (obligatorio)**: feat:, fix:, docs:, chore:, refactor:, style:, test:, perf:, build:, ci:, revert:.
 
