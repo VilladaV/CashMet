@@ -533,15 +533,15 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 - [x] Instalable móvil
 
 ### FASE 7 - Despliegue + Acceso fuera casa (1-2h)
-- [ ] Firebase Hosting + Functions deploy
-- [ ] Cloudflare Tunnel (o Tailscale) setup
-- [ ] Backup export JSON/CSV
-- [ ] Hardening reglas + pruebas
+- [x] Firebase Hosting + Functions deploy
+- [x] Cloudflare Tunnel (o Tailscale) setup
+- [x] Backup export JSON/CSV
+- [x] Hardening reglas + pruebas
 
 ### FASE 8 - Pulido + Documentación uso (1-2h)
-- [ ] README.md (uso diario, ejemplos chat)
-- [ ] Guía ejemplos lenguaje natural
-- [ ] QA básico
+- [x] README.md (uso diario, ejemplos chat)
+- [x] Guía ejemplos lenguaje natural
+- [x] QA básico
 
 **Total estimado**: ~20–30h desarrollo.
 
