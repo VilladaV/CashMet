@@ -11,15 +11,36 @@ export const chatFlow = defineFlow(
     outputSchema: z.object({ respuesta: z.string(), acciones: z.array(z.string()).default([]) }),
   },
   async (input) => {
-    const llm = run('getModel')
-    const system = 'Eres CashMet (Colombia COP). Responde conciso en español. Usa tools si el usuario pide registrar gasto/ingreso o consultar saldos/buscar. Antes de guardar datos críticos pide confirmación breve.'
-    const result = await run('callLLM', async () => {
-      // Placeholder básico - estructura lista para Genkit runtime
-      return { text: 'Entendido.' }
-    })
+    const msg = input.mensaje.toLowerCase()
+    const acciones: string[] = []
+
+    if (msg.includes('saldo') || msg.includes('saldos')) {
+      const r = await getSaldosTool.run({})
+      return {
+        respuesta: Saldos:  cuentas, total  COP.,
+        acciones: ['consulta_saldos'],
+      }
+    }
+
+    if (msg.includes('buscar') || msg.includes('buscar movimiento')) {
+      const r = await buscarMovimientosTool.run({ limite: 5 })
+      return {
+        respuesta: Encontrados  movimientos (muestra: ).,
+        acciones: ['busqueda_movimientos'],
+      }
+    }
+
+    if ((msg.includes('gasto') || msg.includes('ingreso') || msg.includes('registrar') || msg.includes('pagu')) && (msg.includes('cop') || msg.match(/\d+/))) {
+      acciones.push('requiere_confirmacion')
+      return {
+        respuesta: 'He detectado un posible movimiento. ¿Quieres confirmar los datos (fecha, concepto, monto, categoría, cuenta)?',
+        acciones,
+      }
+    }
+
     return {
-      respuesta: result.text || 'Listo.',
-      acciones: [],
+      respuesta: 'Entendido. Puedo registrar gastos/ingresos, consultar saldos o buscar movimientos.',
+      acciones,
     }
   }
 )
