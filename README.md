@@ -1,32 +1,45 @@
-# React + TypeScript + Vite
+﻿# CashMet
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Gestión económica personal con IA (privado, uso propio). Chat-first: escribes gastos/ingresos en lenguaje natural y la IA interpreta, clasifica y actualiza la base de datos.
 
-Currently, two official plugins are available:
+## Stack
+- Frontend: Vite + React + TypeScript + Tailwind CSS v4 + shadcn/ui
+- IA: Genkit + Google AI (Gemini Free Tier)
+- BD: Cloud Firestore
+- Auth: Firebase Authentication (Email/Password, único usuario)
+- PWA: vite-plugin-pwa + Service Worker
+- Calendario: Google Calendar API (OAuth)
+- Push: Firebase Cloud Messaging (Web Push)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Inicio rápido
+`ash
+npm install
+cp .env.example .env.local  # Rellenar Firebase + claves necesarias
+npm run dev
+`
 
-## React Compiler
+## Build
+`ash
+npm run build
+npm run preview
+`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Ejemplos de uso en chat
+- "Gasté 30.000 COP en almuerzo hoy"
+- "Pagué 450000 de cuota crédito vivienda"
+- "Ingresé 2800000 de nómina"
+- "Agrega vehículo Mazda 3 2019 placa ABC123 cilindraje 1500"
+- "Investiga SOAT Mazda 3 2019 1500cc Colombia"
+- "Genera calendario vencimientos este año"
+- "Muéstrame resumen octubre 2026"
 
-## Expanding the Oxlint configuration
+## Seguridad
+- Privado (uso propio). Sin publicación/venta.
+- Firestore Rules restrictivas (solo autenticado)
+- Nunca commitear secretos (.gitignore)
+- Colombia-first. Confirmación obligatoria antes guardar datos críticos investigados por IA
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+## Docs
+- [PLAN_COMPLETO.md](./docs/PLAN_COMPLETO.md)
+- [DEPLOY.md](./DEPLOY.md)
+- [SYSTEM_PROMPT.md](./docs/prompts/SYSTEM_PROMPT.md)
