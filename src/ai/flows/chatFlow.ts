@@ -17,29 +17,29 @@ export const chatFlow = defineFlow(
     if (msg.includes('saldo') || msg.includes('saldos')) {
       const r = await getSaldosTool.run({})
       return {
-        respuesta: Saldos:  cuentas, total  COP.,
+        respuesta: `Saldos: ${r.totalCuentas} cuentas, total ${r.totalSaldoCOP.toLocaleString('es-CO')} COP.`,
         acciones: ['consulta_saldos'],
       }
     }
 
-    if (msg.includes('buscar') || msg.includes('buscar movimiento')) {
+    if (msg.includes('buscar') && (msg.includes('movimiento') || msg.includes('gasto') || msg.includes('ingreso'))) {
       const r = await buscarMovimientosTool.run({ limite: 5 })
       return {
-        respuesta: Encontrados  movimientos (muestra: ).,
+        respuesta: `Encontrados ${r.total} movimientos. Mostrando ${r.movimientos.length}.`,
         acciones: ['busqueda_movimientos'],
       }
     }
 
-    if ((msg.includes('gasto') || msg.includes('ingreso') || msg.includes('registrar') || msg.includes('pagu')) && (msg.includes('cop') || msg.match(/\d+/))) {
+    if ((msg.includes('registrar') || msg.includes('añadir') || msg.includes('agregar')) && (msg.includes('gasto') || msg.includes('ingreso') || /\d+/.test(msg))) {
       acciones.push('requiere_confirmacion')
       return {
-        respuesta: 'He detectado un posible movimiento. ¿Quieres confirmar los datos (fecha, concepto, monto, categoría, cuenta)?',
+        respuesta: 'Detecté un posible movimiento. ¿Quieres que lo registre? Indícame: tipo (gasto/ingreso), fecha (YYYY-MM-DD), concepto, monto (COP), categoría y cuenta (si aplica).',
         acciones,
       }
     }
 
     return {
-      respuesta: 'Entendido. Puedo registrar gastos/ingresos, consultar saldos o buscar movimientos.',
+      respuesta: 'Puedo registrar gastos/ingresos, consultar saldos y buscar movimientos. También gestiono vehículos (investigación CO con confirmación), propiedades, nómina, recurrentes, calendario.',
       acciones,
     }
   }
