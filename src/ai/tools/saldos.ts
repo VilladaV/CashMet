@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { collection, getDocs, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const getSaldosTool = defineTool(
+export const getSaldosTool = ai.defineTool(
   {
     name: 'getSaldos',
     description: 'Obtiene saldos/resumen básico (cuentas banco + deudas).',
@@ -28,7 +28,7 @@ export const getSaldosTool = defineTool(
   }
 )
 
-export const updateSaldoCuentaTool = defineTool(
+export const updateSaldoCuentaTool = ai.defineTool(
   {
     name: 'updateSaldoCuenta',
     description: 'Actualiza saldo actual de una cuenta banco.',

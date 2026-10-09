@@ -1,5 +1,5 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { crearMovimiento } from '../../lib/firebase/movimientosRepo'
 
 export const CreateMovimientoInput = z.object({
@@ -21,7 +21,7 @@ export const CreateMovimientoInput = z.object({
   notasIA: z.string().max(500).optional(),
 })
 
-export const createMovimientoTool = defineTool(
+export const createMovimientoTool = ai.defineTool(
   {
     name: 'createMovimiento',
     description: 'Crea un movimiento (gasto/ingreso/pago) y actualiza saldo de cuenta si aplica.',

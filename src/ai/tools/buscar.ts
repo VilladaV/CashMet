@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { collection, getDocs, limit, orderBy, query } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const buscarMovimientosTool = defineTool(
+export const buscarMovimientosTool = ai.defineTool(
   {
     name: 'buscarMovimientos',
     description: 'Busca movimientos recientes por concepto/categoria.',

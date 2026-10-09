@@ -1,8 +1,8 @@
 ﻿import { z } from 'zod'
-import { defineFlow } from 'genkit'
+import { ai } from '../genkit'
 import { investigacionVehiculoCOTool } from '../tools/vehiculos'
 
-export const investigacionVehiculoFlow = defineFlow(
+export const investigacionVehiculoFlow = ai.defineFlow(
   {
     name: 'investigacionVehiculoFlow',
     inputSchema: z.object({
@@ -25,7 +25,7 @@ export const investigacionVehiculoFlow = defineFlow(
     }),
   },
   async (input) => {
-    const r = await investigacionVehiculoCOTool.run(input as any)
+    const r = await investigacionVehiculoCOTool(input)
     return {
       resultado: {
         requiereConfirmacion: true as const,

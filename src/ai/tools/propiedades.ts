@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const crearEditarPropiedadTool = defineTool(
+export const crearEditarPropiedadTool = ai.defineTool(
   {
     name: 'crearEditarPropiedad',
     description: 'Crea o edita propiedad (valor patrimonial, predial).',

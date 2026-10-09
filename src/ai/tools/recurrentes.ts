@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const crearEditarGastoRecurrenteTool = defineTool(
+export const crearEditarGastoRecurrenteTool = ai.defineTool(
   {
     name: 'crearEditarGastoRecurrente',
     description: 'Crea/edita gasto recurrente automático.',

@@ -1,5 +1,5 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
@@ -25,7 +25,7 @@ export const investigacionVehiculoCOOutput = z.object({
   justificacion: z.string().min(1).max(500),
 })
 
-export const investigacionVehiculoCOTool = defineTool(
+export const investigacionVehiculoCOTool = ai.defineTool(
   {
     name: 'investigacionVehiculoCO',
     description: 'Investiga estimados Colombia (SOAT, tecnicomecánica, STR). requiereConfirmacion=true.',
@@ -41,7 +41,7 @@ export const investigacionVehiculoCOTool = defineTool(
     const soatMedio = Math.round(250000 * factorCil * factorEdad)
     const tmMedio = Math.round(120000 + edad * 8000)
     const strMedio = Math.round(soatMedio * 2.2)
-    return {
+    const resultado: z.infer<typeof investigacionVehiculoCOOutput> = {
       soatAnualEstimadoCOP: soatMedio,
       tecnicomecanicaCostoEstimadoCOP: tmMedio,
       seguroTodoRiesgoAnualEstimadoCOP: strMedio,
@@ -50,12 +50,13 @@ export const investigacionVehiculoCOTool = defineTool(
       nivelConfianza: 'medio',
       requiereConfirmacion: true,
       fuente: 'Estimativo IA Colombia (referencial). Requiere verificación real.',
-      justificacion: Basado en   , cilindraje aprox cc, edad  años.,
+      justificacion: `Basado en modelo ${modelo}, cilindraje aprox ${cil} cc, edad ${edad} años. Estimación referencial.`,
     }
+    return resultado
   }
 )
 
-export const crearEditarVehiculoTool = defineTool(
+export const crearEditarVehiculoTool = ai.defineTool(
   {
     name: 'crearEditarVehiculo',
     description: 'Crea o edita vehículo con datos SOAT/TM/STR.',

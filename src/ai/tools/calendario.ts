@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { addDoc, collection } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const generarEventosCalendarioTool = defineTool(
+export const generarEventosCalendarioTool = ai.defineTool(
   {
     name: 'generarEventosCalendario',
     description: 'Genera eventos calendario (vencimientos/sueldos/primas).',

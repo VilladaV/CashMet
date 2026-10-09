@@ -1,8 +1,8 @@
 ﻿import { z } from 'zod'
-import { defineFlow } from 'genkit'
+import { ai } from '../genkit'
 import { interpretarMensaje } from '../../features/chat/engine'
 
-export const chatFlow = defineFlow(
+export const chatFlow = ai.defineFlow(
   {
     name: 'chatFlow',
     inputSchema: z.object({ mensaje: z.string().min(1).max(2000) }),

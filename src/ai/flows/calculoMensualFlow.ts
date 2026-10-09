@@ -1,8 +1,8 @@
 ﻿import { z } from 'zod'
-import { defineFlow } from 'genkit'
+import { ai } from '../genkit'
 import { calcularGastosMensualesTool } from '../tools/calculos'
 
-export const calculoMensualFlow = defineFlow(
+export const calculoMensualFlow = ai.defineFlow(
   {
     name: 'calculoMensualFlow',
     inputSchema: z.object({}),
@@ -12,7 +12,7 @@ export const calculoMensualFlow = defineFlow(
     }),
   },
   async () => {
-    const r = await calcularGastosMensualesTool.run({})
+    const r = await calcularGastosMensualesTool({})
     return { totalMensualEstimado: r.totalMensualEstimado, porCategoria: r.porCategoria }
   }
 )

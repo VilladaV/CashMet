@@ -1,10 +1,10 @@
 ﻿import { z } from 'zod'
-import { defineTool } from 'genkit'
+import { ai } from '../genkit'
 import { collection, getDocs } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
-export const calcularGastosMensualesTool = defineTool(
+export const calcularGastosMensualesTool = ai.defineTool(
   {
     name: 'calcularGastosMensuales',
     description: 'Calcula gastos mensuales consolidados (recurrentes, vehículos, propiedades).',
@@ -16,11 +16,7 @@ export const calcularGastosMensualesTool = defineTool(
     }),
   },
   async () => {
-    const [rec, veh, prop] = await Promise.all([
-      getDocs(collection(db, COLLECTIONS.GASTOS_RECURRENTES)),
-      getDocs(collection(db, COLLECTIONS.VEHICULOS)),
-      getDocs(collection(db, COLLECTIONS.PROPIEDADES)),
-    ])
+    const rec = await getDocs(collection(db, COLLECTIONS.GASTOS_RECURRENTES))
     const detalles: any[] = []
     let total = 0
     const porCat: Record<string, number> = {}
