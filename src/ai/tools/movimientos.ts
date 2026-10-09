@@ -1,8 +1,6 @@
 ﻿import { z } from 'zod'
 import { defineTool } from 'genkit'
-import { addDoc, collection, doc, updateDoc, increment } from 'firebase/firestore'
-import { db } from '../../lib/firebase/config'
-import { COLLECTIONS } from '../../lib/firebase/collections'
+import { crearMovimiento } from '../../lib/firebase/movimientosRepo'
 
 export const CreateMovimientoInput = z.object({
   fecha: z.string(),
@@ -31,18 +29,18 @@ export const createMovimientoTool = defineTool(
     outputSchema: z.object({ id: z.string(), ok: z.boolean() }),
   },
   async (input) => {
-    const ref = await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), {
-      ...input,
+    const id = await crearMovimiento({
+      fecha: input.fecha,
+      tipo: input.tipo,
+      concepto: input.concepto,
+      monto: input.monto,
+      categoria: input.categoria,
+      subcategoria: input.subcategoria,
+      descripcion: input.descripcion,
+      cuentaBancoId: input.cuentaBancoId,
+      etiquetas: input.etiquetas,
       fuente: 'chat_IA',
-      estado: 'confirmado',
-      creado: Date.now(),
-      actualizado: Date.now(),
     })
-    if (input.cuentaBancoId) {
-      const cRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId)
-      const delta = input.tipo === 'ingreso' ? input.monto : -input.monto
-      await updateDoc(cRef, { saldoActual: increment(delta), actualizado: Date.now() })
-    }
-    return { id: ref.id, ok: true }
+    return { id, ok: true }
   }
 )
