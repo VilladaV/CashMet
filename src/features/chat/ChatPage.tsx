@@ -2,16 +2,20 @@
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { interpretarMensaje } from './engine'
+import { estimadosVehiculoCO, interpretarMensaje } from './engine'
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
 import {
   crearMovimiento,
   listarCuentasBanco,
   listarMovimientos,
+  listarTodosLosMovimientos,
   obtenerResumenSaldos,
   type CuentaBanco,
 } from '@/lib/firebase/movimientosRepo'
+import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
+import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
+import { construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 
 interface Msg {
   id: number
@@ -30,7 +34,7 @@ export default function ChatPage() {
       id: 0,
       rol: 'ia',
       texto:
-        'Hola. Escríbeme por ejemplo: "gasté 50.000 en mercado", "me consignaron 3.000.000 de salario", "¿cuánto tengo?" o "muéstrame los últimos movimientos".',
+        'Hola. Escríbeme por ejemplo: "gasté 50.000 en mercado", "me consignaron 3.000.000 de salario", "¿cuánto tengo?", "pagué 450.000 de cuota del crédito", "agrega vehículo Mazda 3 2019 placa ABC123", "investiga SOAT Mazda 3 2019 1500cc", "genera el calendario" o "resumen de este mes".',
     },
   ])
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
@@ -94,6 +98,129 @@ export default function ChatPage() {
         }
       } catch {
         push({ rol: 'ia', texto: 'No pude buscar los movimientos.' })
+      }
+      return
+    }
+
+    if (interp.acciones.includes('generar_calendario')) {
+      try {
+        const eventos = await construirEventos(12)
+        if (!eventos.length) {
+          push({
+            rol: 'ia',
+            texto: 'No hay vehículos, nómina o deudas registrados para generar eventos. Regístralos en sus pestañas.',
+          })
+        } else {
+          const n = await guardarEventos(eventos)
+          push({ rol: 'ia', texto: `Se guardaron ${n} eventos en el calendario para los próximos 12 meses.` })
+        }
+      } catch {
+        push({ rol: 'ia', texto: 'No pude generar el calendario.' })
+      }
+      return
+    }
+
+    if (interp.acciones.includes('resumen_mes')) {
+      try {
+        const mes = String(interp.params?.mes ?? '')
+        const todos = await listarTodosLosMovimientos(500)
+        const delMes = todos.filter((m) => String(m.fecha).startsWith(mes))
+        if (!delMes.length) {
+          push({ rol: 'ia', texto: `No hay movimientos en ${mes}.` })
+        } else {
+          let ingresos = 0
+          let gastos = 0
+          const porCat = new Map<string, number>()
+          for (const m of delMes) {
+            const val = Number(m.monto) || 0
+            if (m.tipo === 'ingreso') ingresos += val
+            else gastos += val
+            porCat.set(m.categoria || 'Otros', (porCat.get(m.categoria || 'Otros') || 0) + val)
+          }
+          const top = [...porCat.entries()]
+            .filter(([, v]) => v > 0)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([c, v]) => `• ${c}: ${COD(v)}`)
+            .join('\n')
+          push({
+            rol: 'ia',
+            texto:
+              `Resumen ${mes}:\nIngresos: ${COD(ingresos)}\nGastos: ${COD(gastos)}\nBalance: ${COD(ingresos - gastos)}` +
+              (top ? `\n\nCategorías:\n${top}` : ''),
+          })
+        }
+      } catch {
+        push({ rol: 'ia', texto: 'No pude calcular el resumen.' })
+      }
+      return
+    }
+
+    if (interp.acciones.includes('pago_deuda')) {
+      const monto = Number(interp.params?.monto) || 0
+      const fecha = String(interp.params?.fecha ?? new Date().toISOString().slice(0, 10))
+      const nombreBuscado = String(interp.params?.deudaNombre ?? '').toLowerCase()
+      try {
+        const deudas = (await listarDeudas()).filter((d) => d.estado !== 'pagada')
+        const candidatas = nombreBuscado
+          ? deudas.filter((d) => d.nombre.toLowerCase().includes(nombreBuscado) || nombreBuscado.includes(d.nombre.toLowerCase()))
+          : deudas
+        const deuda = candidatas.length === 1 ? candidatas[0] : deudas.length === 1 ? deudas[0] : undefined
+        if (!deuda) {
+          push({
+            rol: 'ia',
+            texto:
+              deudas.length === 0
+                ? 'No tienes deudas activas registradas. Ve a la pestaña "Deudas" para crear una.'
+                : `Tengo varias deudas activas:\n${deudas.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n¿Cuál quieres pagar? Menciónala, ej: "pagué 100.000 de ${deudas[0].nombre}".`,
+          })
+          return
+        }
+        await registrarPagoDeuda(deuda.id, monto, fecha)
+        push({
+          rol: 'ia',
+          texto: `Pago registrado: ${COD(monto)} a "${deuda.nombre}". Nuevo saldo: ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
+        })
+      } catch (e: any) {
+        console.error('Error al pagar deuda:', e)
+        setError(`No se pudo registrar el pago (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (interp.acciones.includes('investigar_vehiculo')) {
+      const p = interp.params ?? {}
+      const est = estimadosVehiculoCO({ modelo: Number(p.modelo) || undefined, cilindraje: Number(p.cilindraje) || undefined })
+      push({
+        rol: 'ia',
+        texto:
+          `Estimados Colombia (${String(p.marca)} ${String(p.linea)} - modelo ${p.modelo ?? '?'}):\n` +
+          `• SOAT: ${COD(est.soatAnualEstimadoCOP)} (rango ${COD(est.soatRango.min)} - ${COD(est.soatRango.max)})\n` +
+          `• Tecnicomecánica: ~${COD(est.tecnicomecanicaCostoEstimadoCOP)}\n` +
+          `• Seguro todo riesgo: ${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} (anual, rango ${COD(est.rangoSTR.min)} - ${COD(est.rangoSTR.max)})\n` +
+          `\nNivel de confianza: medio. ${est.fuente} Registra el vehículo en la pestaña "Vehículos" para guardarlos definitivamente.`,
+      })
+      return
+    }
+
+    if (interp.acciones.includes('crear_vehiculo')) {
+      const p = interp.params ?? {}
+      try {
+        await crearVehiculo({
+          placa: String(p.placa ?? '').trim() || undefined,
+          marca: String(p.marca),
+          linea: String(p.linea),
+          modelo: Number(p.modelo) || new Date().getFullYear(),
+          tipo: String(p.tipo) as 'carro' | 'moto' | 'camion' | 'otro',
+          cilindraje: Number(p.cilindraje) || undefined,
+        })
+        push({
+          rol: 'ia',
+          texto: `Vehículo registrado: ${String(p.marca)} ${String(p.linea)} (${p.modelo}). Puedes completar SOAT, tecnicomecánica y seguro en la pestaña "Vehículos".`,
+        })
+      } catch (e: any) {
+        console.error('Error al crear vehículo:', e)
+        setError(`No se pudo registrar el vehículo (${e?.code || 'error'}).`)
       }
       return
     }
