@@ -2,6 +2,7 @@
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
+  eliminarMovimiento,
   listarMovimientos,
   obtenerResumenSaldos,
   type MovimientoDoc,
@@ -48,6 +49,16 @@ export default function DashboardPage() {
     cargar()
   }, [])
 
+  const borrar = async (id: string) => {
+    if (!confirm('¿Eliminar este movimiento? Si tenía cuenta, se ajustará su saldo.')) return
+    try {
+      await eliminarMovimiento(id)
+      cargar()
+    } catch {
+      setError('No se pudo eliminar el movimiento.')
+    }
+  }
+
   return (
     <div className="container mx-auto p-4 max-w-4xl space-y-4">
       <Card>
@@ -90,14 +101,19 @@ export default function DashboardPage() {
           ) : (
             <ul className="divide-y">
               {movs.slice(0, 15).map((m) => (
-                <li key={m.id} className="flex justify-between py-2">
+                <li key={m.id} className="flex items-center justify-between gap-2 py-2">
                   <span>
                     {m.fecha} — {m.concepto}
                     <span className="text-muted-foreground"> ({m.categoria})</span>
                   </span>
-                  <span className={m.tipo === 'ingreso' ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>
-                    {m.tipo === 'ingreso' ? '+' : '-'}
-                    {COD(Number(m.monto) || 0)}
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className={m.tipo === 'ingreso' ? 'text-green-700 font-medium' : 'text-red-600 font-medium'}>
+                      {m.tipo === 'ingreso' ? '+' : '-'}
+                      {COD(Number(m.monto) || 0)}
+                    </span>
+                    <Button size="sm" variant="outline" onClick={() => borrar(m.id)}>
+                      Eliminar
+                    </Button>
                   </span>
                 </li>
               ))}

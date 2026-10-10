@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input'
 import {
   construirEventos,
   crearEvento,
+  eliminarEvento,
   guardarEventos,
   listarEventos,
   type EventoDoc,
@@ -103,6 +104,16 @@ export default function CalendarioPage() {
       setError('No se pudo crear el evento.')
     } finally {
       setCreando(false)
+    }
+  }
+
+  const borrarEvento = async (id: string) => {
+    if (!confirm('¿Eliminar este evento?')) return
+    try {
+      await eliminarEvento(id)
+      cargar()
+    } catch {
+      setError('No se pudo eliminar el evento.')
     }
   }
 
@@ -208,11 +219,16 @@ export default function CalendarioPage() {
           ) : (
             <ul className="divide-y">
               {eventos.map((e) => (
-                <li key={e.id} className="flex justify-between py-1.5">
+                <li key={e.id} className="flex justify-between items-center gap-2 py-1.5">
                   <span>
                     {e.fechaInicio} — {e.titulo}
                   </span>
-                  <span className="text-muted-foreground">{ETIQUETA[e.tipo] ?? e.tipo}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="text-muted-foreground">{ETIQUETA[e.tipo] ?? e.tipo}</span>
+                    <Button size="sm" variant="outline" onClick={() => borrarEvento(e.id)}>
+                      Eliminar
+                    </Button>
+                  </span>
                 </li>
               ))}
             </ul>

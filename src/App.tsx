@@ -10,6 +10,7 @@ import VehiculosPage from './features/vehiculos/VehiculosPage'
 import PropiedadesPage from './features/propiedades/PropiedadesPage'
 import NominaPage from './features/nomina/NominaPage'
 import RecurrentesPage from './features/recurrentes/RecurrentesPage'
+import BackupPage from './features/backup/BackupPage'
 
 type Tab =
   | 'chat'
@@ -21,6 +22,7 @@ type Tab =
   | 'propiedades'
   | 'nomina'
   | 'recurrentes'
+  | 'backup'
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'chat', label: 'Chat IA' },
@@ -32,6 +34,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'propiedades', label: 'Propiedades' },
   { id: 'nomina', label: 'Nómina' },
   { id: 'recurrentes', label: 'Recurrentes' },
+  { id: 'backup', label: 'Backup' },
 ]
 
 export default function App() {
@@ -74,6 +77,7 @@ export default function App() {
         {tab === 'propiedades' && <PropiedadesPage />}
         {tab === 'nomina' && <NominaPage />}
         {tab === 'recurrentes' && <RecurrentesPage />}
+        {tab === 'backup' && <BackupPage />}
       </main>
     </div>
   )
