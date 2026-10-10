@@ -1,6 +1,7 @@
-import { addDoc, collection, deleteDoc, doc, getDocs } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
+import { limpio } from './repoUtils'
 
 export type TipoEvento =
   | 'pago_sueldo'
@@ -187,6 +188,12 @@ export async function crearEvento(input: EventoInput): Promise<string> {
     actualizado: Date.now(),
   })
   return ref.id
+}
+
+export type EventoUpdate = Partial<Pick<EventoInput, 'titulo' | 'descripcion' | 'tipo' | 'fechaInicio'>>
+
+export async function actualizarEvento(id: string, data: EventoUpdate): Promise<void> {
+  await updateDoc(doc(db, COLLECTIONS.CALENDARIO_EVENTOS, id), limpio({ ...data, actualizado: Date.now() }))
 }
 
 export async function listarEventos(max = 50): Promise<EventoDoc[]> {

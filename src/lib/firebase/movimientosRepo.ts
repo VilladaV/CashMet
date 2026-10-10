@@ -62,8 +62,27 @@ export interface MovimientoDoc {
   concepto: string
   monto: number
   categoria: string
+  subcategoria?: string
+  descripcion?: string
   cuentaBancoId?: string
+  deudaId?: string
+  vehiculoId?: string
+  propiedadId?: string
+  nominaId?: string
+  recurrenteId?: string
+  etiquetas?: string[]
   creado?: number
+}
+
+export interface MovimientoUpdate {
+  fecha: string
+  tipo: TipoMovimiento
+  concepto: string
+  monto: number
+  categoria: string
+  subcategoria?: string
+  descripcion?: string
+  cuentaBancoId?: string
 }
 
 export async function crearMovimiento(input: MovimientoInput): Promise<string> {
@@ -88,6 +107,33 @@ export async function crearMovimiento(input: MovimientoInput): Promise<string> {
     )
   }
   return ref.id
+}
+
+export async function actualizarMovimiento(id: string, input: MovimientoUpdate): Promise<void> {
+  const ref = doc(db, COLLECTIONS.MOVIMIENTOS, id)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) return
+  const viejo = snap.data() as Record<string, unknown>
+  const cuentaVieja = viejo.cuentaBancoId as string | undefined
+  const montoViejo = Number(viejo.monto) || 0
+  const tipoViejo = viejo.tipo as TipoMovimiento
+  if (cuentaVieja) {
+    const reverso = tipoViejo === 'ingreso' ? -montoViejo : montoViejo
+    await setDoc(
+      doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaVieja),
+      { saldoActual: increment(reverso), actualizado: Date.now() },
+      { merge: true }
+    )
+  }
+  if (input.cuentaBancoId) {
+    const delta = input.tipo === 'ingreso' ? input.monto : -input.monto
+    await setDoc(
+      doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId),
+      { saldoActual: increment(delta), actualizado: Date.now() },
+      { merge: true }
+    )
+  }
+  await updateDoc(ref, limpio({ ...input, actualizado: Date.now() }))
 }
 
 export async function listarCuentasBanco(): Promise<CuentaBanco[]> {

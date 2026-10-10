@@ -27,6 +27,15 @@ interface Msg {
 
 const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
 
+const SUGERENCIAS = [
+  '¿cuánto tengo?',
+  'gasté 50.000 en mercado',
+  'me consignaron 3.000.000 de salario',
+  'muéstrame los últimos movimientos',
+  'resumen de este mes',
+  'genera el calendario',
+]
+
 export default function ChatPage() {
   const [msg, setMsg] = useState('')
   const [msgs, setMsgs] = useState<Msg[]>([
@@ -275,30 +284,51 @@ export default function ChatPage() {
           <CardTitle>CashMet - Chat IA</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="h-96 overflow-auto border rounded-md p-3 bg-muted/20 text-sm space-y-2">
+          <div className="h-96 overflow-auto border rounded-md p-3 bg-muted/20 text-sm space-y-3">
             {msgs.map((m) => (
-              <div key={m.id}>
-                <div className={m.rol === 'user' ? 'text-right' : ''}>
-                  <span className="whitespace-pre-wrap">{m.texto}</span>
-                </div>
-                {m.borrador && m.estado === 'pendiente' && (
-                  <div className="mt-2">
-                    <ConfirmacionCard
-                      borrador={m.borrador}
-                      cuentas={cuentas}
-                      guardando={guardandoId === m.id}
-                      onConfirm={(data) => confirmar(m.id, data)}
-                      onCancel={() => cancelar(m.id)}
-                    />
+              <div key={m.id} className={`flex ${m.rol === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[85%] ${m.borrador && m.estado === 'pendiente' ? 'w-full' : ''}`}>
+                  <div
+                    className={`whitespace-pre-wrap rounded-lg px-3 py-2 ${
+                      m.rol === 'user'
+                        ? 'bg-primary text-primary-foreground rounded-br-sm'
+                        : 'bg-background border rounded-bl-sm'
+                    }`}
+                  >
+                    {m.texto}
                   </div>
-                )}
-                {m.estado === 'guardado' && <div className="text-xs text-green-700 mt-1">✔ Movimiento guardado</div>}
-                {m.estado === 'cancelado' && <div className="text-xs text-muted-foreground mt-1">Cancelado</div>}
+                  {m.borrador && m.estado === 'pendiente' && (
+                    <div className="mt-2">
+                      <ConfirmacionCard
+                        borrador={m.borrador}
+                        cuentas={cuentas}
+                        guardando={guardandoId === m.id}
+                        onConfirm={(data) => confirmar(m.id, data)}
+                        onCancel={() => cancelar(m.id)}
+                      />
+                    </div>
+                  )}
+                  {m.estado === 'guardado' && <div className="text-xs text-green-700 mt-1">✔ Movimiento guardado</div>}
+                  {m.estado === 'cancelado' && <div className="text-xs text-muted-foreground mt-1">Cancelado</div>}
+                </div>
               </div>
             ))}
             <div ref={bottomRef} />
           </div>
           {error && <div className="text-xs text-red-600">{error}</div>}
+          <div className="flex flex-wrap gap-1">
+            {SUGERENCIAS.map((s) => (
+              <Button
+                key={s}
+                size="sm"
+                variant="outline"
+                className="h-7 text-xs"
+                onClick={() => setMsg(s)}
+              >
+                {s}
+              </Button>
+            ))}
+          </div>
           <div className="flex gap-2">
             <Input
               value={msg}

@@ -12,20 +12,17 @@
 
 ### Funcional hoy
 - **Auth** email/password con registro desde la app. Reglas Firestore desplegadas.
-- **Chat IA** (motor NL propio en `src/features/chat/engine.ts`, sin LLM): registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes.
-- **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con eliminar).
+- **Chat IA** (motor NL propio en `src/features/chat/engine.ts`, sin LLM): registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes. UI con burbujas usuario/IA y chips de sugerencias.
+- **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
 - **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes.
-- **Calendario**: evento manual, generar/guardar vencimientos, listar y eliminar.
+- **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
 - **Backup**: exportar/importar todo Firestore a JSON desde la app.
 - **PWA** instalable.
 
 ### Pendiente para el 100%
-- Vista de calendario en cuadrícula mensual.
-- Editar movimientos (hoy solo eliminar).
 - Sincronización Google Calendar (OAuth) — opcional.
 - Notificaciones push FCM/VAPID — opcional.
 - Capa Genkit/Gemini real server-side: los flows/tools existen y compilan (`tsc -b`), pero el chat de producción usa el parser propio; falta ejecutarlos (Cloud Function + `GEMINI_API_KEY`).
-- Pulido visual y mensajes.
 
 ---
 
