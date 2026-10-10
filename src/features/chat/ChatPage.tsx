@@ -127,8 +127,11 @@ export default function ChatPage() {
       if (data.cuentaBancoId) {
         listarCuentasBanco().then(setCuentas).catch(() => {})
       }
-    } catch {
-      setError('No se pudo guardar el movimiento. Verifica que las reglas de Firestore estén desplegadas.')
+    } catch (e: any) {
+      console.error('Error al guardar movimiento:', e)
+      const code = e?.code || (e && e.name) || 'desconocido'
+      const msg = e?.message ? ` ${e.message}` : ''
+      setError(`No se pudo guardar el movimiento (${code}).${msg}`)
     } finally {
       setGuardandoId(null)
     }

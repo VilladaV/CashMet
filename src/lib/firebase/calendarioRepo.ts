@@ -1,4 +1,4 @@
-import { addDoc, collection, getDocs } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 
@@ -170,16 +170,23 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
 export async function guardarEventos(eventos: EventoInput[]): Promise<number> {
   let creados = 0
   for (const e of eventos) {
-    await addDoc(collection(db, COLLECTIONS.CALENDARIO_EVENTOS), {
-      ...e,
-      sincronizadoGoogle: false,
-      activo: true,
-      creado: Date.now(),
-      actualizado: Date.now(),
-    })
+    await crearEvento(e)
     creados++
   }
   return creados
+}
+
+export async function crearEvento(input: EventoInput): Promise<string> {
+  const ref = await addDoc(collection(db, COLLECTIONS.CALENDARIO_EVENTOS), {
+    ...input,
+    recordatorios: input.recordatorios ?? [{ minutosAntes: 60 }],
+    relacionado: input.relacionado ?? {},
+    sincronizadoGoogle: false,
+    activo: true,
+    creado: Date.now(),
+    actualizado: Date.now(),
+  })
+  return ref.id
 }
 
 export async function listarEventos(max = 50): Promise<EventoDoc[]> {
@@ -188,4 +195,8 @@ export async function listarEventos(max = 50): Promise<EventoDoc[]> {
     .filter((e) => e.activo !== false)
     .sort((a, b) => (a.fechaInicio || '').localeCompare(b.fechaInicio || ''))
     .slice(0, max)
+}
+
+export async function eliminarEvento(id: string): Promise<void> {
+  await deleteDoc(doc(db, COLLECTIONS.CALENDARIO_EVENTOS, id))
 }

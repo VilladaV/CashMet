@@ -1,16 +1,20 @@
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
+  getDoc,
   getDocs,
   increment,
   limit,
   orderBy,
   query,
+  setDoc,
   updateDoc,
 } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
+import { limpio } from './repoUtils'
 
 export type TipoMovimiento =
   | 'gasto'
@@ -32,6 +36,11 @@ export interface MovimientoInput {
   subcategoria?: string
   descripcion?: string
   cuentaBancoId?: string
+  deudaId?: string
+  vehiculoId?: string
+  propiedadId?: string
+  nominaId?: string
+  recurrenteId?: string
   etiquetas?: string[]
   fuente?: 'chat_IA' | 'manual' | 'automatico'
 }
@@ -58,7 +67,7 @@ export interface MovimientoDoc {
 }
 
 export async function crearMovimiento(input: MovimientoInput): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), {
+  const data = limpio({
     ...input,
     etiquetas: input.etiquetas ?? [],
     fuente: input.fuente ?? 'chat_IA',
@@ -66,12 +75,17 @@ export async function crearMovimiento(input: MovimientoInput): Promise<string> {
     creado: Date.now(),
     actualizado: Date.now(),
   })
+  const ref = await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), data)
   if (input.cuentaBancoId) {
     const delta = input.tipo === 'ingreso' ? input.monto : -input.monto
-    await updateDoc(doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId), {
-      saldoActual: increment(delta),
-      actualizado: Date.now(),
-    })
+    await setDoc(
+      doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId),
+      {
+        saldoActual: increment(delta),
+        actualizado: Date.now(),
+      },
+      { merge: true }
+    )
   }
   return ref.id
 }
@@ -114,4 +128,29 @@ export async function listarMovimientos(max = 20): Promise<MovimientoDoc[]> {
 
 export async function listarTodosLosMovimientos(max = 300): Promise<MovimientoDoc[]> {
   return listarMovimientos(max)
+}
+
+export async function actualizarCuentaBanco(id: string, data: Partial<CuentaBanco>): Promise<void> {
+  await updateDoc(doc(db, COLLECTIONS.CUENTAS_BANCO, id), limpio({ ...data, actualizado: Date.now() }))
+}
+
+export async function eliminarCuentaBanco(id: string): Promise<void> {
+  await deleteDoc(doc(db, COLLECTIONS.CUENTAS_BANCO, id))
+}
+
+export async function eliminarMovimiento(id: string): Promise<void> {
+  const documento = await getDoc(doc(db, COLLECTIONS.MOVIMIENTOS, id))
+  if (documento.exists()) {
+    const datos = documento.data() as Record<string, unknown>
+    const cuentaBancoId = datos.cuentaBancoId as string | undefined
+    if (cuentaBancoId && typeof datos.monto === 'number') {
+      const reverso = datos.tipo === 'ingreso' ? -datos.monto : datos.monto
+      await setDoc(
+        doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaBancoId),
+        { saldoActual: increment(reverso), actualizado: Date.now() },
+        { merge: true }
+      )
+    }
+  }
+  await deleteDoc(doc(db, COLLECTIONS.MOVIMIENTOS, id))
 }
