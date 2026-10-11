@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -13,6 +13,18 @@ import {
   type EventoInput,
   type TipoEvento,
 } from '@/lib/firebase/calendarioRepo'
+import {
+  Calendar as CalendarIcon,
+  ChevronLeft,
+  ChevronRight,
+  Sparkles,
+  PlusCircle,
+  Edit2,
+  Trash2,
+  CheckCircle2,
+  Clock,
+  AlertCircle,
+} from 'lucide-react'
 
 const ETIQUETA: Record<string, string> = {
   soat: 'SOAT',
@@ -32,13 +44,13 @@ const ETIQUETA: Record<string, string> = {
 const DIAS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
 
 const COLOR_TIPO: Record<string, string> = {
-  soat: 'bg-red-100 text-red-800 border-red-200',
-  tecnicomecanica: 'bg-orange-100 text-orange-800 border-orange-200',
-  seguro_tr: 'bg-amber-100 text-amber-800 border-amber-200',
-  cuota_deuda: 'bg-blue-100 text-blue-800 border-blue-200',
-  prima_julio: 'bg-green-100 text-green-800 border-green-200',
-  prima_diciembre: 'bg-green-100 text-green-800 border-green-200',
-  personal: 'bg-slate-100 text-slate-700 border-slate-200',
+  soat: 'bg-red-50 text-red-700 border-red-200',
+  tecnicomecanica: 'bg-amber-50 text-amber-800 border-amber-200',
+  seguro_tr: 'bg-orange-50 text-orange-800 border-orange-200',
+  cuota_deuda: 'bg-sky-50 text-sky-800 border-sky-200',
+  prima_julio: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+  prima_diciembre: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+  personal: 'bg-slate-50 text-slate-700 border-slate-200',
 }
 
 export default function CalendarioPage() {
@@ -68,14 +80,15 @@ export default function CalendarioPage() {
   } | null>(null)
   const [guardando, setGuardando] = useState(false)
 
-  const cargar = () =>
+  const cargar = useCallback(() => {
     listarEventos(500)
       .then(setEventos)
-      .catch(() => setError('No se pudieron cargar los eventos.'))
+      .catch(() => setError('No se pudieron cargar los eventos del calendario.'))
+  }, [])
 
   useEffect(() => {
     cargar()
-  }, [])
+  }, [cargar])
 
   const porDia = useMemo(() => {
     const mapa: Record<string, EventoDoc[]> = {}
@@ -103,8 +116,11 @@ export default function CalendarioPage() {
     return out
   }, [mesVista])
 
-  const hoyISO = new Date().toISOString().slice(0, 10)
-  const etiquetaMes = mesVista.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' })
+  const hoyISO = useMemo(() => new Date().toISOString().slice(0, 10), [])
+  const etiquetaMes = useMemo(
+    () => mesVista.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' }),
+    [mesVista]
+  )
 
   const cambiarMes = (delta: number) => {
     setMesVista((m) => new Date(m.getFullYear(), m.getMonth() + delta, 1))
@@ -118,9 +134,9 @@ export default function CalendarioPage() {
     try {
       const evs = await construirEventos(12)
       setPreview(evs)
-      setMsg(`Se generarán ${evs.length} eventos para los próximos 12 meses.`)
+      setMsg(`Se proyectaron ${evs.length} eventos para los próximos 12 meses.`)
     } catch {
-      setError('No se pudieron calcular los eventos. ¿Tienes vehículos, nómina o deudas registrados?')
+      setError('No se pudieron calcular los eventos. Verifica si tienes vehículos, nómina o deudas registrados.')
     } finally {
       setGenerando(false)
     }
@@ -132,7 +148,7 @@ export default function CalendarioPage() {
     setError('')
     try {
       const n = await guardarEventos(preview)
-      setMsg(`Se guardaron ${n} eventos.`)
+      setMsg(`¡Listo! Se guardaron ${n} eventos en Firestore.`)
       setPreview([])
       cargar()
     } catch {
@@ -158,7 +174,7 @@ export default function CalendarioPage() {
         relacionado: {},
       })
       setNuevo({ fecha: '', titulo: '', tipo: 'personal', descripcion: '' })
-      setMsg('Evento creado.')
+      setMsg('Evento añadido al calendario.')
       cargar()
     } catch {
       setError('No se pudo crear el evento.')
@@ -168,7 +184,7 @@ export default function CalendarioPage() {
   }
 
   const borrarEvento = async (id: string) => {
-    if (!confirm('¿Eliminar este evento?')) return
+    if (!confirm('¿Deseas eliminar este evento del calendario?')) return
     try {
       await eliminarEvento(id)
       if (editandoId === id) cerrarEdicion()
@@ -197,7 +213,7 @@ export default function CalendarioPage() {
   const guardarEdicion = async () => {
     if (!editandoId || !form) return
     if (!form.fecha || !form.titulo.trim()) {
-      setError('Completa fecha y título.')
+      setError('Completa la fecha y el título del evento.')
       return
     }
     setGuardando(true)
@@ -221,39 +237,86 @@ export default function CalendarioPage() {
   const eventosDia = diaSel ? porDia[diaSel] ?? [] : []
 
   return (
-    <div className="container mx-auto p-4 max-w-4xl space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>Calendario (Colombia)</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <p>
-            Genera vencimientos desde tus datos: SOAT, tecnicomecánica, seguro todo riesgo, primas de servicios
-            (julio/diciembre) y cuotas de deudas, para los próximos 12 meses.
-          </p>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" disabled={generando} onClick={previsualizar}>
-              Previsualizar eventos
+    <div className="container mx-auto p-2 sm:p-4 max-w-5xl space-y-4">
+      {/* HEADER CARD: GENERADOR INTELIGENTE */}
+      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
+        <div className="h-1.5 w-full gradient-brand-growth" />
+        <CardContent className="p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <CalendarIcon className="w-5 h-5 text-emerald-600" />
+              <h1 className="font-bold text-base text-slate-900">
+                Calendario de Vencimientos Financieros (Colombia)
+              </h1>
+            </div>
+            <p className="text-xs text-slate-500 max-w-xl">
+              Proyecta automáticamente fechas críticas: SOAT, Tecnicomecánica, Seguro Todo Riesgo, primas legales (junio/diciembre) y cuotas de préstamos.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={generando}
+              onClick={previsualizar}
+              className="text-xs h-8.5 border-slate-200 flex-1 sm:flex-initial"
+            >
+              <Clock className="w-3.5 h-3.5 text-slate-500 mr-1.5" />
+              <span>Previsualizar</span>
             </Button>
-            <Button size="sm" disabled={generando || !preview.length} onClick={guardar}>
-              Guardar {preview.length ? `(${preview.length})` : ''}
+            <Button
+              size="sm"
+              disabled={generando || !preview.length}
+              onClick={guardar}
+              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8.5 px-3.5 flex-1 sm:flex-initial shadow-xs"
+            >
+              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+              <span>Guardar {preview.length ? `(${preview.length})` : ''}</span>
             </Button>
           </div>
-          {msg && <div className="text-xs text-green-700">{msg}</div>}
-          {error && <div className="text-xs text-red-600">{error}</div>}
         </CardContent>
+
+        {(msg || error) && (
+          <div className="px-4 pb-3">
+            {msg && (
+              <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{msg}</span>
+              </div>
+            )}
+            {error && (
+              <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 font-medium flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>{error}</span>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
-      <Card>
-        <CardHeader className="flex-row items-center justify-between">
-          <CardTitle className="text-base capitalize">{etiquetaMes}</CardTitle>
-          <div className="flex gap-1">
-            <Button size="sm" variant="outline" onClick={() => cambiarMes(-1)}>
-              ‹
+      {/* CUADRÍCULA DEL CALENDARIO MENSUAL */}
+      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
+        {/* Navegación del Mes */}
+        <CardHeader className="py-3 px-4 sm:px-6 border-b border-slate-100 flex flex-row items-center justify-between">
+          <CardTitle className="text-base font-extrabold text-slate-900 capitalize flex items-center gap-2">
+            <span>{etiquetaMes}</span>
+          </CardTitle>
+
+          <div className="flex items-center gap-1">
+            <Button
+              size="icon"
+              variant="outline"
+              className="h-8 w-8 border-slate-200 text-slate-600"
+              onClick={() => cambiarMes(-1)}
+              title="Mes anterior"
+            >
+              <ChevronLeft className="w-4 h-4" />
             </Button>
             <Button
               size="sm"
               variant="outline"
+              className="h-8 px-2.5 text-xs font-semibold border-slate-200 text-slate-700"
               onClick={() => {
                 const hoy = new Date()
                 setMesVista(new Date(hoy.getFullYear(), hoy.getMonth(), 1))
@@ -262,22 +325,32 @@ export default function CalendarioPage() {
             >
               Hoy
             </Button>
-            <Button size="sm" variant="outline" onClick={() => cambiarMes(1)}>
-              ›
+            <Button
+              size="icon"
+              variant="outline"
+              className="h-8 w-8 border-slate-200 text-slate-600"
+              onClick={() => cambiarMes(1)}
+              title="Mes siguiente"
+            >
+              <ChevronRight className="w-4 h-4" />
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="grid grid-cols-7 gap-1 text-center text-xs text-muted-foreground">
+
+        <CardContent className="p-3 sm:p-5 space-y-2">
+          {/* Días de la semana */}
+          <div className="grid grid-cols-7 gap-1 text-center text-xs font-bold text-slate-500 py-1">
             {DIAS.map((d) => (
-              <div key={d} className="py-1 font-medium">
+              <div key={d} className="py-1">
                 {d}
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-7 gap-1">
+
+          {/* Días del mes */}
+          <div className="grid grid-cols-7 gap-1 sm:gap-1.5">
             {celdas.map((c, i) => {
-              if (!c) return <div key={`v${i}`} className="min-h-16 rounded-md" />
+              if (!c) return <div key={`empty-${i}`} className="min-h-16 sm:min-h-20 rounded-xl bg-slate-50/40" />
               const evs = porDia[c.clave] ?? []
               const esHoy = c.clave === hoyISO
               const seleccionado = c.clave === diaSel
@@ -286,56 +359,95 @@ export default function CalendarioPage() {
                   type="button"
                   key={c.clave}
                   onClick={() => setDiaSel(seleccionado ? null : c.clave)}
-                  className={`min-h-16 rounded-md border p-1 text-left align-top transition-colors ${
-                    seleccionado ? 'border-primary bg-primary/5' : 'hover:bg-muted/40'
+                  className={`min-h-16 sm:min-h-20 rounded-xl border p-1 sm:p-1.5 text-left align-top transition-all cursor-pointer ${
+                    seleccionado
+                      ? 'border-emerald-500 bg-emerald-50/50 shadow-2xs'
+                      : esHoy
+                      ? 'border-slate-300 bg-sky-50/30'
+                      : 'border-slate-200/80 bg-white hover:bg-slate-50'
                   }`}
                 >
-                  <div
-                    className={`text-xs mb-1 ${
-                      esHoy ? 'inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground' : 'text-muted-foreground'
-                    }`}
-                  >
-                    {c.dia}
+                  <div className="flex items-center justify-between mb-1">
+                    <span
+                      className={`text-xs font-bold ${
+                        esHoy
+                          ? 'inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#0A2540] text-emerald-400 text-[11px]'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      {c.dia}
+                    </span>
+                    {evs.length > 0 && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                    )}
                   </div>
+
                   <div className="space-y-0.5">
                     {evs.slice(0, 2).map((e) => (
                       <div
                         key={e.id}
-                        className={`truncate rounded border px-1 text-[10px] leading-4 ${
-                          COLOR_TIPO[e.tipo] ?? 'bg-muted text-foreground border-border'
+                        className={`truncate rounded-md border px-1 py-0.2 text-[9px] sm:text-[10px] font-semibold leading-tight ${
+                          COLOR_TIPO[e.tipo] ?? 'bg-slate-50 text-slate-700 border-slate-200'
                         }`}
                         title={e.titulo}
                       >
                         {e.titulo}
                       </div>
                     ))}
-                    {evs.length > 2 && <div className="text-[10px] text-muted-foreground">+{evs.length - 2} más</div>}
+                    {evs.length > 2 && (
+                      <div className="text-[9px] font-bold text-slate-400 pl-0.5">
+                        +{evs.length - 2} más
+                      </div>
+                    )}
                   </div>
                 </button>
               )
             })}
           </div>
+
+          {/* DETALLE DEL DÍA SELECCIONADO */}
           {diaSel && (
-            <div className="rounded-md border p-2">
-              <div className="text-xs font-medium mb-1">{diaSel}</div>
+            <div className="mt-3 p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 animate-in fade-in space-y-2">
+              <div className="text-xs font-bold text-emerald-950 flex items-center justify-between">
+                <span>Eventos del {diaSel}</span>
+                <span className="text-[11px] font-normal text-emerald-800">
+                  {eventosDia.length} programados
+                </span>
+              </div>
+
               {eventosDia.length === 0 ? (
-                <div className="text-xs text-muted-foreground">Sin eventos este día.</div>
+                <div className="text-xs text-slate-500 py-1">Sin eventos programados para este día.</div>
               ) : (
-                <ul className="divide-y">
+                <ul className="divide-y divide-emerald-100/70 text-xs">
                   {eventosDia.map((e) => (
-                    <li key={e.id} className="flex items-center justify-between gap-2 py-1.5">
-                      <span>
-                        {e.titulo}
-                        <span className="text-muted-foreground"> · {ETIQUETA[e.tipo] ?? e.tipo}</span>
-                      </span>
-                      <span className="flex items-center gap-1 shrink-0">
-                        <Button size="sm" variant="outline" onClick={() => abrirEdicion(e)}>
-                          Editar
+                    <li key={e.id} className="flex items-center justify-between gap-2 py-2">
+                      <div>
+                        <span className="font-bold text-slate-900">{e.titulo}</span>
+                        <span className="text-slate-500 text-[11px]"> · {ETIQUETA[e.tipo] ?? e.tipo}</span>
+                        {e.descripcion && (
+                          <div className="text-[11px] text-slate-500 mt-0.5">{e.descripcion}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 text-slate-500 hover:text-slate-900"
+                          onClick={() => abrirEdicion(e)}
+                          title="Editar"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => borrarEvento(e.id)}>
-                          Eliminar
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 text-slate-500 hover:text-red-700"
+                          onClick={() => borrarEvento(e.id)}
+                          title="Eliminar"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
                         </Button>
-                      </span>
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -345,21 +457,31 @@ export default function CalendarioPage() {
         </CardContent>
       </Card>
 
+      {/* FORMULARIO DE EDICIÓN DE EVENTO */}
       {form && (
-        <Card className="border-primary/40">
-          <CardHeader>
-            <CardTitle className="text-base">Editar evento</CardTitle>
+        <Card className="border-emerald-300 bg-emerald-50/20 shadow-md">
+          <CardHeader className="py-3 px-4 border-b border-emerald-100">
+            <CardTitle className="text-sm font-bold text-emerald-950 flex items-center gap-2">
+              <Edit2 className="w-4 h-4 text-emerald-600" />
+              <span>Modificar Evento del Calendario</span>
+            </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <div className="grid grid-cols-2 gap-2">
+          <CardContent className="p-4 space-y-3 text-xs">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-muted-foreground">Fecha</span>
-                <Input type="date" value={form.fecha} onChange={(e) => setForm({ ...form, fecha: e.target.value })} />
+                <span className="font-semibold text-slate-700">Fecha</span>
+                <Input
+                  type="date"
+                  value={form.fecha}
+                  onChange={(e) => setForm({ ...form, fecha: e.target.value })}
+                  className="h-8 text-xs bg-white border-slate-200"
+                />
               </label>
+
               <label className="flex flex-col gap-1">
-                <span className="text-xs text-muted-foreground">Tipo</span>
+                <span className="font-semibold text-slate-700">Tipo</span>
                 <select
-                  className="h-9 rounded-md border bg-background px-2 text-sm"
+                  className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
                   value={form.tipo}
                   onChange={(e) => setForm({ ...form, tipo: e.target.value as TipoEvento })}
                 >
@@ -370,20 +492,43 @@ export default function CalendarioPage() {
                   ))}
                 </select>
               </label>
-              <label className="col-span-2 flex flex-col gap-1">
-                <span className="text-xs text-muted-foreground">Título</span>
-                <Input value={form.titulo} onChange={(e) => setForm({ ...form, titulo: e.target.value })} />
+
+              <label className="sm:col-span-2 flex flex-col gap-1">
+                <span className="font-semibold text-slate-700">Título</span>
+                <Input
+                  value={form.titulo}
+                  onChange={(e) => setForm({ ...form, titulo: e.target.value })}
+                  className="h-8 text-xs bg-white border-slate-200"
+                />
               </label>
-              <label className="col-span-2 flex flex-col gap-1">
-                <span className="text-xs text-muted-foreground">Descripción (opcional)</span>
-                <Input value={form.descripcion} onChange={(e) => setForm({ ...form, descripcion: e.target.value })} />
+
+              <label className="sm:col-span-2 flex flex-col gap-1">
+                <span className="font-semibold text-slate-700">Descripción</span>
+                <Input
+                  value={form.descripcion}
+                  onChange={(e) => setForm({ ...form, descripcion: e.target.value })}
+                  className="h-8 text-xs bg-white border-slate-200"
+                />
               </label>
             </div>
-            <div className="flex gap-2">
-              <Button size="sm" disabled={guardando} onClick={guardarEdicion}>
-                {guardando ? 'Guardando...' : 'Guardar cambios'}
+
+            <div className="flex gap-2 pt-2 border-t border-slate-100">
+              <Button
+                size="sm"
+                className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8 gap-1.5"
+                disabled={guardando}
+                onClick={guardarEdicion}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>{guardando ? 'Guardando...' : 'Guardar Cambios'}</span>
               </Button>
-              <Button size="sm" variant="outline" disabled={guardando} onClick={cerrarEdicion}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-xs h-8 border-slate-200"
+                disabled={guardando}
+                onClick={cerrarEdicion}
+              >
                 Cancelar
               </Button>
             </div>
@@ -391,20 +536,30 @@ export default function CalendarioPage() {
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Crear evento manual</CardTitle>
+      {/* CREAR EVENTO MANUAL */}
+      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
+        <CardHeader className="py-3 px-4 border-b border-slate-100">
+          <CardTitle className="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <PlusCircle className="w-4 h-4 text-emerald-600" />
+            <span>Crear Evento o Recordatorio Manual</span>
+          </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <div className="grid grid-cols-2 gap-2">
+        <CardContent className="p-4 space-y-3 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Fecha</span>
-              <Input type="date" value={nuevo.fecha} onChange={(e) => setNuevo({ ...nuevo, fecha: e.target.value })} />
+              <span className="font-semibold text-slate-700">Fecha</span>
+              <Input
+                type="date"
+                value={nuevo.fecha}
+                onChange={(e) => setNuevo({ ...nuevo, fecha: e.target.value })}
+                className="h-8 text-xs bg-white border-slate-200"
+              />
             </label>
+
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Tipo</span>
+              <span className="font-semibold text-slate-700">Tipo de Evento</span>
               <select
-                className="h-9 rounded-md border bg-background px-2 text-sm"
+                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
                 value={nuevo.tipo}
                 onChange={(e) => setNuevo({ ...nuevo, tipo: e.target.value as TipoEvento })}
               >
@@ -415,81 +570,38 @@ export default function CalendarioPage() {
                 ))}
               </select>
             </label>
-            <label className="col-span-2 flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Título</span>
+
+            <label className="sm:col-span-2 flex flex-col gap-1">
+              <span className="font-semibold text-slate-700">Título del Recordatorio</span>
               <Input
                 value={nuevo.titulo}
                 onChange={(e) => setNuevo({ ...nuevo, titulo: e.target.value })}
-                placeholder="Ej: Pago seguro, Reunión, Viaje..."
+                placeholder="Ej: Pago de predial, Mantenimiento preventivo..."
+                className="h-8 text-xs bg-white border-slate-200"
               />
             </label>
-            <label className="col-span-2 flex flex-col gap-1">
-              <span className="text-xs text-muted-foreground">Descripción (opcional)</span>
+
+            <label className="sm:col-span-2 flex flex-col gap-1">
+              <span className="font-semibold text-slate-700">Descripción (opcional)</span>
               <Input
                 value={nuevo.descripcion}
                 onChange={(e) => setNuevo({ ...nuevo, descripcion: e.target.value })}
+                placeholder="Notas adicionales..."
+                className="h-8 text-xs bg-white border-slate-200"
               />
             </label>
           </div>
-          <div className="flex gap-2">
-            <Button size="sm" disabled={creando || !nuevo.fecha || !nuevo.titulo.trim()} onClick={crearManual}>
-              {creando ? 'Creando...' : 'Crear evento'}
+
+          <div className="pt-1">
+            <Button
+              size="sm"
+              disabled={creando || !nuevo.fecha || !nuevo.titulo.trim()}
+              onClick={crearManual}
+              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8 px-4 gap-1.5 shadow-xs"
+            >
+              <span>{creando ? 'Creando...' : 'Crear Recordatorio'}</span>
             </Button>
           </div>
-        </CardContent>
-      </Card>
-
-      {preview.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Previsualización ({preview.length})</CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm">
-            <ul className="divide-y">
-              {preview.map((e, i) => (
-                <li key={i} className="flex justify-between py-1.5">
-                  <span>
-                    {e.fechaInicio} — {e.titulo}
-                  </span>
-                  <span className="text-muted-foreground">{ETIQUETA[e.tipo] ?? e.tipo}</span>
-                </li>
-              ))}
-            </ul>
-          </CardContent>
-        </Card>
-      )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Eventos guardados</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm">
-          {eventos.length === 0 ? (
-            <p className="text-muted-foreground">Sin eventos guardados todavía.</p>
-          ) : (
-            <ul className="divide-y">
-              {eventos.map((e) => (
-                <li key={e.id} className="flex justify-between items-center gap-2 py-1.5">
-                  <span>
-                    {e.fechaInicio} — {e.titulo}
-                  </span>
-                  <span className="flex items-center gap-2 shrink-0">
-                    <span className="text-muted-foreground">{ETIQUETA[e.tipo] ?? e.tipo}</span>
-                    <Button
-                      size="sm"
-                      variant={editandoId === e.id ? 'default' : 'outline'}
-                      onClick={() => (editandoId === e.id ? cerrarEdicion() : abrirEdicion(e))}
-                    >
-                      Editar
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => borrarEvento(e.id)}>
-                      Eliminar
-                    </Button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
         </CardContent>
       </Card>
     </div>

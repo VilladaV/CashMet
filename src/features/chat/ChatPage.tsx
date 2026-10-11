@@ -1,7 +1,7 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { estimadosVehiculoCO, interpretarMensaje } from './engine'
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
@@ -16,6 +16,8 @@ import {
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
 import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
 import { construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
+import { CashMetEmblem } from '@/components/brand/CashMetLogo'
+import { Send, Sparkles, CheckCircle2, AlertCircle, User } from 'lucide-react'
 
 interface Msg {
   id: number
@@ -23,17 +25,18 @@ interface Msg {
   texto: string
   borrador?: BorradorMovimiento
   estado?: 'pendiente' | 'guardado' | 'cancelado'
+  timestamp?: string
 }
 
 const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
 
 const SUGERENCIAS = [
-  '¿cuánto tengo?',
-  'gasté 50.000 en mercado',
-  'me consignaron 3.000.000 de salario',
-  'muéstrame los últimos movimientos',
+  '¿cuánto tengo en el banco?',
+  'gasté 45.000 en almuerzo',
+  'me pagaron 2.800.000 de nómina',
   'resumen de este mes',
-  'genera el calendario',
+  'muéstrame los últimos movimientos',
+  'genera el calendario de vencimientos',
 ]
 
 export default function ChatPage() {
@@ -43,7 +46,15 @@ export default function ChatPage() {
       id: 0,
       rol: 'ia',
       texto:
-        'Hola. Escríbeme por ejemplo: "gasté 50.000 en mercado", "me consignaron 3.000.000 de salario", "¿cuánto tengo?", "pagué 450.000 de cuota del crédito", "agrega vehículo Mazda 3 2019 placa ABC123", "investiga SOAT Mazda 3 2019 1500cc", "genera el calendario" o "resumen de este mes".',
+        '👋 ¡Hola! Soy tu asistente financiero CashMet. Puedes escribirme en lenguaje natural, por ejemplo:\n\n' +
+        '• "gasté 45.000 en mercado con Bancolombia"\n' +
+        '• "me consignaron 3.000.000 de sueldo"\n' +
+        '• "¿cuánto tengo en mis cuentas?"\n' +
+        '• "pagué 350.000 de cuota del crédito"\n' +
+        '• "agrega vehículo Mazda 3 2021 placa HJK890"\n' +
+        '• "genera el calendario de vencimientos"\n' +
+        '• "resumen de este mes"',
+      timestamp: 'Ahora',
     },
   ])
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
@@ -55,7 +66,7 @@ export default function ChatPage() {
   useEffect(() => {
     listarCuentasBanco()
       .then(setCuentas)
-      .catch(() => setError('No se pudieron cargar las cuentas. ¿Reglas de Firestore desplegadas?'))
+      .catch(() => setError('No se pudieron cargar las cuentas bancarias.'))
   }, [])
 
   useEffect(() => {
@@ -64,7 +75,8 @@ export default function ChatPage() {
 
   const push = (m: Omit<Msg, 'id'>) => {
     const id = idRef.current++
-    setMsgs((prev) => [...prev, { ...m, id }])
+    const tiempo = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+    setMsgs((prev) => [...prev, { ...m, id, timestamp: tiempo }])
     return id
   }
 
@@ -81,32 +93,35 @@ export default function ChatPage() {
       try {
         const { cuentas: cs, total } = await obtenerResumenSaldos()
         if (!cs.length) {
-          push({ rol: 'ia', texto: 'No tienes cuentas registradas aún. Ve a la pestaña "Cuentas" para crear la primera.' })
+          push({
+            rol: 'ia',
+            texto: 'No tienes cuentas bancarias registradas aún. Ve a la pestaña "Cuentas" para añadir la primera.',
+          })
         } else {
           const detalle = cs
             .map((c) => `• ${c.nombre}: ${COD(Number(c.saldoActual) || 0)}`)
             .join('\n')
-          push({ rol: 'ia', texto: `Saldo total: ${COD(total)}\n${detalle}` })
+          push({ rol: 'ia', texto: `💰 Saldo Total: ${COD(total)}\n\nDesglose por cuenta:\n${detalle}` })
         }
       } catch {
-        push({ rol: 'ia', texto: 'No pude consultar los saldos.' })
+        push({ rol: 'ia', texto: 'No pude consultar los saldos de tus cuentas.' })
       }
       return
     }
 
     if (interp.acciones.includes('busqueda_movimientos')) {
       try {
-        const movs = await listarMovimientos(10)
+        const movs = await listarMovimientos(8)
         if (!movs.length) {
           push({ rol: 'ia', texto: 'No hay movimientos registrados todavía.' })
         } else {
           const detalle = movs
             .map((m) => `• ${m.fecha} — ${m.concepto}: ${COD(Number(m.monto) || 0)} (${m.tipo})`)
             .join('\n')
-          push({ rol: 'ia', texto: `Últimos ${movs.length} movimientos:\n${detalle}` })
+          push({ rol: 'ia', texto: `📋 Últimos ${movs.length} movimientos:\n\n${detalle}` })
         }
       } catch {
-        push({ rol: 'ia', texto: 'No pude buscar los movimientos.' })
+        push({ rol: 'ia', texto: 'No pude recuperar los movimientos.' })
       }
       return
     }
@@ -117,14 +132,14 @@ export default function ChatPage() {
         if (!eventos.length) {
           push({
             rol: 'ia',
-            texto: 'No hay vehículos, nómina o deudas registrados para generar eventos. Regístralos en sus pestañas.',
+            texto: 'No hay vehículos, nómina o deudas registrados para proyectar eventos. Agrégalos en sus pestañas de gestión.',
           })
         } else {
           const n = await guardarEventos(eventos)
-          push({ rol: 'ia', texto: `Se guardaron ${n} eventos en el calendario para los próximos 12 meses.` })
+          push({ rol: 'ia', texto: `📅 ¡Listo! Se generaron y guardaron ${n} eventos en el calendario para los próximos 12 meses.` })
         }
       } catch {
-        push({ rol: 'ia', texto: 'No pude generar el calendario.' })
+        push({ rol: 'ia', texto: 'No pude generar los eventos del calendario.' })
       }
       return
     }
@@ -135,7 +150,7 @@ export default function ChatPage() {
         const todos = await listarTodosLosMovimientos(500)
         const delMes = todos.filter((m) => String(m.fecha).startsWith(mes))
         if (!delMes.length) {
-          push({ rol: 'ia', texto: `No hay movimientos en ${mes}.` })
+          push({ rol: 'ia', texto: `No se registraron movimientos en el periodo ${mes}.` })
         } else {
           let ingresos = 0
           let gastos = 0
@@ -155,19 +170,23 @@ export default function ChatPage() {
           push({
             rol: 'ia',
             texto:
-              `Resumen ${mes}:\nIngresos: ${COD(ingresos)}\nGastos: ${COD(gastos)}\nBalance: ${COD(ingresos - gastos)}` +
-              (top ? `\n\nCategorías:\n${top}` : ''),
+              `📊 Resumen Financiero (${mes}):\n\n` +
+              `• Ingresos: ${COD(ingresos)}\n` +
+              `• Gastos: ${COD(gastos)}\n` +
+              `• Balance Neto: ${COD(ingresos - gastos)}\n\n` +
+              (top ? `Mayores categorías de gasto:\n${top}` : ''),
           })
         }
       } catch {
-        push({ rol: 'ia', texto: 'No pude calcular el resumen.' })
+        push({ rol: 'ia', texto: 'No pude calcular el resumen del mes.' })
       }
       return
     }
 
     if (interp.acciones.includes('pago_deuda')) {
+      const hoyString = new Date().toISOString().slice(0, 10)
       const monto = Number(interp.params?.monto) || 0
-      const fecha = String(interp.params?.fecha ?? new Date().toISOString().slice(0, 10))
+      const fecha = String(interp.params?.fecha ?? hoyString)
       const nombreBuscado = String(interp.params?.deudaNombre ?? '').toLowerCase()
       try {
         const deudas = (await listarDeudas()).filter((d) => d.estado !== 'pagada')
@@ -180,15 +199,15 @@ export default function ChatPage() {
             rol: 'ia',
             texto:
               deudas.length === 0
-                ? 'No tienes deudas activas registradas. Ve a la pestaña "Deudas" para crear una.'
-                : `Tengo varias deudas activas:\n${deudas.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n¿Cuál quieres pagar? Menciónala, ej: "pagué 100.000 de ${deudas[0].nombre}".`,
+                ? 'No tienes deudas activas registradas. Ve a la pestaña "Deudas" para registrar una.'
+                : `Tienes varias deudas activas:\n${deudas.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n¿A cuál deseas aplicar el abono? Ej: "pagué 100.000 de ${deudas[0].nombre}".`,
           })
           return
         }
         await registrarPagoDeuda(deuda.id, monto, fecha)
         push({
           rol: 'ia',
-          texto: `Pago registrado: ${COD(monto)} a "${deuda.nombre}". Nuevo saldo: ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
+          texto: `✅ Pago registrado: ${COD(monto)} a "${deuda.nombre}". Nuevo saldo pendiente: ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
         })
       } catch (e: any) {
         console.error('Error al pagar deuda:', e)
@@ -203,29 +222,30 @@ export default function ChatPage() {
       push({
         rol: 'ia',
         texto:
-          `Estimados Colombia (${String(p.marca)} ${String(p.linea)} - modelo ${p.modelo ?? '?'}):\n` +
-          `• SOAT: ${COD(est.soatAnualEstimadoCOP)} (rango ${COD(est.soatRango.min)} - ${COD(est.soatRango.max)})\n` +
-          `• Tecnicomecánica: ~${COD(est.tecnicomecanicaCostoEstimadoCOP)}\n` +
-          `• Seguro todo riesgo: ${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} (anual, rango ${COD(est.rangoSTR.min)} - ${COD(est.rangoSTR.max)})\n` +
-          `\nNivel de confianza: medio. ${est.fuente} Registra el vehículo en la pestaña "Vehículos" para guardarlos definitivamente.`,
+          `🚗 Estimados Colombia para ${String(p.marca)} ${String(p.linea)} (Modelo ${p.modelo ?? '?'}):\n\n` +
+          `• SOAT Anual estimado: ${COD(est.soatAnualEstimadoCOP)} (Rango: ${COD(est.soatRango.min)} - ${COD(est.soatRango.max)})\n` +
+          `• Tecnicomecánica (RTM): ~${COD(est.tecnicomecanicaCostoEstimadoCOP)}\n` +
+          `• Seguro Todo Riesgo: ~${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} anual\n\n` +
+          `💡 Nivel de confianza: medio (${est.fuente}). Puedes guardarlo en la pestaña "Vehículos".`,
       })
       return
     }
 
     if (interp.acciones.includes('crear_vehiculo')) {
       const p = interp.params ?? {}
+      const yearDefault = new Date().getFullYear()
       try {
         await crearVehiculo({
           placa: String(p.placa ?? '').trim() || undefined,
           marca: String(p.marca),
           linea: String(p.linea),
-          modelo: Number(p.modelo) || new Date().getFullYear(),
+          modelo: Number(p.modelo) || yearDefault,
           tipo: String(p.tipo) as 'carro' | 'moto' | 'camion' | 'otro',
           cilindraje: Number(p.cilindraje) || undefined,
         })
         push({
           rol: 'ia',
-          texto: `Vehículo registrado: ${String(p.marca)} ${String(p.linea)} (${p.modelo}). Puedes completar SOAT, tecnicomecánica y seguro en la pestaña "Vehículos".`,
+          texto: `✅ Vehículo registrado con éxito: ${String(p.marca)} ${String(p.linea)} (${p.modelo}). Puedes consultar y afinar SOAT, RTM y seguros en la pestaña "Vehículos".`,
         })
       } catch (e: any) {
         console.error('Error al crear vehículo:', e)
@@ -258,7 +278,7 @@ export default function ChatPage() {
       setMsgs((prev) => prev.map((m) => (m.id === id ? { ...m, estado: 'guardado' } : m)))
       push({
         rol: 'ia',
-        texto: `Guardado: ${data.tipo} de ${COD(data.monto)} — ${data.concepto} (${data.categoria}).`,
+        texto: `✅ Guardado correctamente: ${data.tipo.toUpperCase()} de ${COD(data.monto)} — ${data.concepto} (${data.categoria}).`,
       })
       if (data.cuentaBancoId) {
         listarCuentasBanco().then(setCuentas).catch(() => {})
@@ -266,8 +286,7 @@ export default function ChatPage() {
     } catch (e: any) {
       console.error('Error al guardar movimiento:', e)
       const code = e?.code || (e && e.name) || 'desconocido'
-      const msg = e?.message ? ` ${e.message}` : ''
-      setError(`No se pudo guardar el movimiento (${code}).${msg}`)
+      setError(`No se pudo guardar el movimiento (${code}).`)
     } finally {
       setGuardandoId(null)
     }
@@ -278,27 +297,60 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="container mx-auto p-4 max-w-3xl">
-      <Card>
-        <CardHeader>
-          <CardTitle>CashMet - Chat IA</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="h-96 overflow-auto border rounded-md p-3 bg-muted/20 text-sm space-y-3">
+    <div className="container mx-auto p-2 sm:p-4 max-w-4xl space-y-3">
+      {/* TARJETA PRINCIPAL DEL CHAT */}
+      <Card className="glass-card shadow-lg border-slate-200/90 overflow-hidden">
+        {/* Header del Chat */}
+        <div className="gradient-brand-navy p-3.5 sm:p-4 text-white flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20 shadow-xs">
+              <CashMetEmblem size={26} />
+            </div>
+            <div>
+              <div className="font-bold text-sm sm:text-base flex items-center gap-2">
+                <span>CashMet Copilot</span>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                  Motor IA Activo
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-live" />
+                <span>Interpreta gastos, pagos de deudas, vencimientos y saldos</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <CardContent className="p-3 sm:p-4 space-y-3">
+          {/* Área de mensajes con scroll */}
+          <div className="h-[460px] sm:h-[500px] overflow-y-auto rounded-xl p-3 sm:p-4 bg-slate-50/70 border border-slate-200/80 text-sm space-y-3">
             {msgs.map((m) => (
-              <div key={m.id} className={`flex ${m.rol === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[85%] ${m.borrador && m.estado === 'pendiente' ? 'w-full' : ''}`}>
+              <div
+                key={m.id}
+                className={`flex gap-2.5 items-end ${m.rol === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                {/* Avatar del Asistente */}
+                {m.rol === 'ia' && (
+                  <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 shadow-2xs flex items-center justify-center shrink-0 mb-1">
+                    <CashMetEmblem size={18} />
+                  </div>
+                )}
+
+                <div className={`max-w-[88%] sm:max-w-[80%] ${m.borrador && m.estado === 'pendiente' ? 'w-full' : ''}`}>
+                  {/* Burbuja del mensaje */}
                   <div
-                    className={`whitespace-pre-wrap rounded-lg px-3 py-2 ${
+                    className={`rounded-2xl px-4 py-2.5 shadow-2xs leading-relaxed whitespace-pre-wrap ${
                       m.rol === 'user'
-                        ? 'bg-primary text-primary-foreground rounded-br-sm'
-                        : 'bg-background border rounded-bl-sm'
+                        ? 'gradient-brand-navy text-white rounded-br-xs font-medium'
+                        : 'bg-white border border-slate-200/90 text-slate-800 rounded-bl-xs'
                     }`}
                   >
                     {m.texto}
                   </div>
+
+                  {/* Tarjeta de Confirmación de Movimiento */}
                   {m.borrador && m.estado === 'pendiente' && (
-                    <div className="mt-2">
+                    <div className="mt-2 animate-in fade-in slide-in-from-top-2">
                       <ConfirmacionCard
                         borrador={m.borrador}
                         cuentas={cuentas}
@@ -308,35 +360,82 @@ export default function ChatPage() {
                       />
                     </div>
                   )}
-                  {m.estado === 'guardado' && <div className="text-xs text-green-700 mt-1">✔ Movimiento guardado</div>}
-                  {m.estado === 'cancelado' && <div className="text-xs text-muted-foreground mt-1">Cancelado</div>}
+
+                  {/* Estado de guardado / cancelado */}
+                  {m.estado === 'guardado' && (
+                    <div className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 mt-1 pl-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Movimiento registrado y saldo actualizado</span>
+                    </div>
+                  )}
+
+                  {m.estado === 'cancelado' && (
+                    <div className="text-[11px] text-slate-400 mt-1 pl-1">
+                      Movimiento descartado
+                    </div>
+                  )}
+
+                  {m.timestamp && (
+                    <div className={`text-[10px] text-slate-400 mt-0.5 px-1 ${m.rol === 'user' ? 'text-right' : 'text-left'}`}>
+                      {m.timestamp}
+                    </div>
+                  )}
                 </div>
+
+                {/* Avatar del usuario */}
+                {m.rol === 'user' && (
+                  <div className="w-7 h-7 rounded-lg gradient-brand-growth flex items-center justify-center text-white shrink-0 mb-1 shadow-2xs">
+                    <User className="w-3.5 h-3.5" />
+                  </div>
+                )}
               </div>
             ))}
             <div ref={bottomRef} />
           </div>
-          {error && <div className="text-xs text-red-600">{error}</div>}
-          <div className="flex flex-wrap gap-1">
-            {SUGERENCIAS.map((s) => (
-              <Button
-                key={s}
-                size="sm"
-                variant="outline"
-                className="h-7 text-xs"
-                onClick={() => setMsg(s)}
-              >
-                {s}
-              </Button>
-            ))}
+
+          {/* Errores */}
+          {error && (
+            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 text-red-700 border border-red-200 text-xs">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {/* Chips de Sugerencias Rápidas */}
+          <div className="space-y-1.5 pt-1">
+            <div className="text-[11px] font-semibold text-slate-500 flex items-center gap-1.5">
+              <Sparkles className="w-3 h-3 text-emerald-600" />
+              <span>Sugerencias rápidas:</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {SUGERENCIAS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setMsg(s)}
+                  className="px-2.5 py-1 rounded-full text-xs bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200/90 hover:border-emerald-300 transition-all shadow-2xs cursor-pointer active:scale-95"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex gap-2">
+
+          {/* Barra de entrada de texto */}
+          <div className="flex gap-2 pt-1">
             <Input
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
-              placeholder="Escribe gasto/ingreso/saldo..."
+              placeholder="Ej: gasté 35.000 en gasolina, ¿cuánto tengo?, etc..."
               onKeyDown={(e) => e.key === 'Enter' && send()}
+              className="h-11 rounded-xl bg-white border-slate-200 focus-visible:ring-emerald-500 text-sm shadow-2xs"
             />
-            <Button onClick={send}>Enviar</Button>
+            <Button
+              onClick={send}
+              className="h-11 px-4 rounded-xl gradient-brand-navy hover:opacity-90 text-white font-semibold flex items-center gap-1.5 shadow-xs shrink-0 transition-transform active:scale-95"
+            >
+              <Send className="w-4 h-4" />
+              <span className="hidden sm:inline">Enviar</span>
+            </Button>
           </div>
         </CardContent>
       </Card>
