@@ -1,7 +1,8 @@
 import type { Interpretacion } from '@/features/chat/engine'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
-const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-2.0-flash'
+const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
+const MODELOS_FALLBACK = ['gemini-flash-latest', 'gemini-2.5-flash']
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
@@ -57,6 +58,19 @@ interface Contexto {
   cuentas: string[]
 }
 
+async function llamarGemini(body: unknown): Promise<Response | null> {
+  const candidatos = [MODELO, ...MODELOS_FALLBACK].filter((m, i, a) => m && a.indexOf(m) === i)
+  for (const modelo of candidatos) {
+    const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (r.ok) return r
+  }
+  return null
+}
+
 export async function interpretarConGemini(mensaje: string, contexto: Contexto): Promise<Interpretacion> {
   if (!API_KEY) throw new Error('gemini_sin_clave')
 
@@ -70,12 +84,8 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
   }
 
-  const res = await fetch(`${ENDPOINT}/${MODELO}:generateContent?key=${API_KEY}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`gemini_http_${res.status}`)
+  const res = await llamarGemini(body)
+  if (!res) throw new Error('gemini_no_disponible')
 
   const data = (await res.json()) as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
