@@ -6,6 +6,7 @@ import { listarVehiculos } from '@/lib/firebase/vehiculosRepo'
 import { listarPropiedades } from '@/lib/firebase/propiedadesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { listarEventos } from '@/lib/firebase/calendarioRepo'
+import { lineaTasasContexto } from '@/lib/fx'
 
 const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
 
@@ -64,6 +65,9 @@ export async function construirSnapshotFinanciero(): Promise<string> {
   const eventos = (val(evR) ?? []).filter((e) => String(e.fechaInicio) >= hoyISO())
 
   const lineas: string[] = [`Contexto financiero actual (datos en vivo de su base, ${hoyISO()}):`]
+
+  const tasasLinea = await lineaTasasContexto()
+  if (tasasLinea) lineas.push('', tasasLinea)
 
   const totalCuentas = cuentas.reduce((s, c) => s + (Number(c.saldoActual) || 0), 0)
   lineas.push('', `DINERO EN CUENTAS: ${COD(totalCuentas)} (${cuentas.length} cuentas)`)

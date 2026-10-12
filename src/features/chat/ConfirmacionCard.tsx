@@ -97,6 +97,17 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
           />
         </label>
 
+        {borrador.moneda && borrador.montoOriginal != null && (
+          <p className="col-span-2 -mt-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+            Monto original: {borrador.moneda} {borrador.montoOriginal.toLocaleString('es-CO')}
+            {borrador.tasaCambio
+              ? ` · tasa: 1 ${borrador.moneda} = $${borrador.tasaCambio.toLocaleString('es-CO', {
+                  maximumFractionDigits: 2,
+                })} COP`
+              : ' · no se pudo obtener la tasa, escribe el valor en pesos'}
+          </p>
+        )}
+
         <label className="flex flex-col gap-1">
           <span className="font-semibold text-slate-600 flex items-center gap-1">
             <Tag className="w-3 h-3 text-slate-400" /> Categoría

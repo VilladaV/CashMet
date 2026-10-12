@@ -62,7 +62,8 @@ const SUGERENCIAS = [
   'analiza mi estado financiero',
   '¿cuánto tengo en el banco?',
   'compré un almuerzo por 25.000 y me regalaron 70.000',
-  'agrega gasto recurrente internet 120000 mensual',
+  'me pagaron 3.000 dólares',
+  '¿a cómo está el dólar?',
   'resumen de este mes',
 ]
 
@@ -72,6 +73,7 @@ const SALUDO =
   '• "gasté 45.000 en mercado"\n' +
   '• "compré un almuerzo por 25.000 y me regalaron 70.000" (¡varias en un solo mensaje!)\n' +
   '• "¿cuánto tengo en mis cuentas?"\n' +
+  '• "me pagaron 3.000 dólares" (convierto a pesos con la tasa del día)\n' +
   '• "pagué 350.000 de la cuota del crédito"\n' +
   '• "agrega gasto recurrente internet 120000 mensual"\n' +
   '• "recuérdame pagar el arriendo el 5"\n' +

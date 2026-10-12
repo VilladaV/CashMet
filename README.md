@@ -5,7 +5,7 @@ CashMet es una aplicación web/PWA para gestión económica personal con IA (cha
 ## Stack
 - Vite + React + TypeScript
 - Tailwind CSS v4 + shadcn/ui
-- IA: **Lucía**, contadora colombiana (Gemini API REST) con fallback al motor NL local; detecta **varias transacciones por mensaje**; Genkit disponible para migrar a Cloud Functions
+- IA: **Lucía**, contadora colombiana (Gemini API REST) con fallback al motor NL local; detecta **varias transacciones por mensaje**, recuerda la conversación, analiza el estado real en vivo y **convierte monedas a COP** con la tasa del día; Genkit disponible para migrar a Cloud Functions
 - Firebase Auth (Email/Password), Firestore
 - PWA (vite-plugin-pwa) + FCM Web Push (opcional)
 - Google Calendar API (OAuth) (opcional)

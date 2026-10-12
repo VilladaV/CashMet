@@ -4,6 +4,9 @@ export interface BorradorMovimiento {
   concepto: string
   monto: number
   categoria: string
+  moneda?: string
+  montoOriginal?: number
+  tasaCambio?: number
 }
 
 export function normalizarTexto(texto: string): string {

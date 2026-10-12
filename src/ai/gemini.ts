@@ -1,4 +1,5 @@
 import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
+import { normalizarMoneda } from '@/lib/fx'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
 const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.1-flash-lite'
@@ -21,20 +22,26 @@ Responde SIEMPRE con un único objeto JSON válido, sin texto adicional ni bloqu
 - "mensaje": lo que le dices a la persona. Puede ser corto (1-3 frases) O un análisis cuando el usuario pide que analices su situación. Tono humano.
 - "acciones": lista con TODAS las transacciones detectadas (puede estar vacía).
 
+MONEDAS (muy importante): el usuario puede hablar en otras monedas (nómina en dólares, gastos en euros, etc.). Cuando detectes una moneda distinta al peso colombiano:
+- Deja el monto en su VALOR ORIGINAL y escribe su código ISO en el campo "moneda" (USD, EUR, GBP, MXN, BRL, PEN, ...). NO conviertas tú: la aplicación hace la conversión a COP con la tasa del día y se la muestra al usuario.
+- Ejemplos: "me pagaron 3.000 dólares" → {"tipo":"ingreso","monto":3000,"moneda":"USD","categoria":"Salario"}; "gasté 50 euros en cena" → {"tipo":"gasto","monto":50,"moneda":"EUR","categoria":"Alimentación"}.
+- Si es en pesos colombianos, omite "moneda" (o pon "COP").
+- Si el usuario pregunta por el valor de una moneda ("¿a cómo está el dólar?", "¿cuánto son 100 euros en pesos?"), responde en "mensaje" con las cifras del bloque "TASAS DE CAMBIO" del contexto (si aparece) y deja "acciones" vacía.
+
 ESTILO (muy importante): escribe como una contadora conversando, NO como un reporte corporativo. Frases cortas, naturales y cálidas, en primera persona. NO uses sintaxis Markdown: nada de **negrita**, ni #, ni asteriscos. Cuando enumeres 3 o 4 datos, usa guiones simples al inicio de línea ("- dato"), y solo si de verdad ayuda; si no, prefiere una redacción fluida de 2 a 4 frases. No repitas siempre la misma estructura: varía. Puedes separar ideas en párrafos cortos con una línea en blanco. Cierra con algo cercano o una recomendación concreta cuando aporte, sin sonar a plantilla.
 
 MUY IMPORTANTE: un mismo mensaje puede contener VARIAS transacciones. Detéctalas TODAS y devuélvelas como acciones separadas, en el mismo orden.
 Ejemplo: "compré un almuerzo por 25k y luego me regalaron 70k" → DOS acciones: registrar_movimiento {tipo:"gasto", monto:25000, concepto:"Almuerzo", categoria:"Alimentación"} y registrar_movimiento {tipo:"ingreso", monto:70000, concepto:"Regalo", categoria:"Ingreso"}.
 
 Acciones permitidas y sus params:
-- registrar_movimiento: {tipo:"gasto"|"ingreso", fecha:"YYYY-MM-DD", concepto:"...", monto:numero entero COP sin puntos ni símbolos, categoria:"..."}
+- registrar_movimiento: {tipo:"gasto"|"ingreso", fecha:"YYYY-MM-DD", concepto:"...", monto:numero (en su moneda original, sin símbolos), categoria:"...", moneda:"USD" (opcional, solo si NO es COP)}
 - consulta_saldos: {}
 - busqueda_movimientos: {}
 - resumen_mes: {mes:"YYYY-MM"}
 - generar_calendario: {}
-- pago_deuda: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto"}
-- pago_nomina: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto"}
-- crear_recurrente: {concepto:"...", monto:numero, categoria:"hogar"|"transporte"|"salud"|"educacion"|"servicios"|"otro", periodicidad:"mensual"|"bimestral"|"trimestral"|"semestral"|"anual", diaVencimiento:numero}
+- pago_deuda: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto", moneda:"USD" (opcional)}
+- pago_nomina: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto", moneda:"USD" (opcional)}
+- crear_recurrente: {concepto:"...", monto:numero, categoria:"hogar"|"transporte"|"salud"|"educacion"|"servicios"|"otro", periodicidad:"mensual"|"bimestral"|"trimestral"|"semestral"|"anual", diaVencimiento:numero, moneda:"USD" (opcional)}
 - crear_evento: {titulo:"...", fecha:"YYYY-MM-DD"}
 - investigar_vehiculo: {marca:"...", linea:"...", modelo:numero, cilindraje:numero}
 - crear_vehiculo: {placa:"...", marca:"...", linea:"...", modelo:numero, tipo:"carro"|"moto"|"camion"|"otro", cilindraje:numero}
@@ -163,6 +170,7 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
           concepto: String(params.concepto ?? '').trim() || 'Movimiento',
           monto: num(params.monto),
           categoria: String(params.categoria ?? '').trim() || (tipo === 'ingreso' ? 'Ingresos' : 'Otros'),
+          moneda: normalizarMoneda(params.moneda),
         },
       })
       continue
@@ -180,6 +188,13 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     if (nombre === 'resumen_mes') {
       params.mes = String(params.mes ?? contexto.hoy.slice(0, 7)).slice(0, 7)
     }
+
+    if ('moneda' in params) {
+      const m = normalizarMoneda(params.moneda)
+      if (m) params.moneda = m
+      else delete params.moneda
+    }
+
     lote.push({ nombre, params })
   }
 

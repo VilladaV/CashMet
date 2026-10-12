@@ -7,6 +7,7 @@ import {
   parseTipo,
   type BorradorMovimiento,
 } from '@/ai/parser/nl'
+import { detectarMoneda } from '@/lib/fx'
 
 export interface AccionInterpretada {
   nombre: string
@@ -28,6 +29,7 @@ const AYUDA =
   '¡Hola! Soy Lucía, tu contadora. Puedo registrar gastos e ingresos ("gasté 50.000 en mercado", "me regalaron 70.000"), ' +
   'varios en un mismo mensaje ("compré un almuerzo por 25.000 y pagué 30.000 de taxi"), consultar saldos ("¿cuánto tengo?"), ' +
   'listar movimientos, registrar pagos de deudas, pagar nómina, crear gastos recurrentes y eventos, ' +
+  'convertir otras monedas a pesos con la tasa del día ("me pagaron 3.000 dólares", "gasté 50 euros"), ' +
   'registrar vehículos, estimar SOAT/tecnicomecánica/seguros en Colombia, generar el calendario de vencimientos y ' +
   'darte el resumen del mes. Cuéntame con confianza cómo te fue con la plata. 💛'
 
@@ -176,6 +178,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
   }
 
   const monto = parseMontoCO(mensaje)
+  const moneda = detectarMoneda(mensaje)
 
   if (
     monto &&
@@ -187,7 +190,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     return {
       respuesta: 'Registrando pago de nómina...',
       acciones: ['pago_nomina'],
-      params: { monto, fecha: parseFecha(mensaje), nombre: nm ? nm[1].trim() : undefined },
+      params: { monto, fecha: parseFecha(mensaje), nombre: nm ? nm[1].trim() : undefined, moneda },
     }
   }
 
@@ -206,6 +209,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
         categoria: parseCategoria(mensaje, 'gasto'),
         periodicidad: 'mensual',
         diaVencimiento: extraerDiaVencimiento(mensaje),
+        moneda,
       },
     }
   }
@@ -226,6 +230,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
         monto,
         fecha: parseFecha(mensaje),
         deudaNombre: nombre ? nombre[1].trim().replace(/\s+\d.*$/, '').trim() : undefined,
+        moneda,
       },
     }
   }
@@ -280,6 +285,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
       concepto: limpiarConcepto(mensaje),
       monto,
       categoria: parseCategoria(mensaje, tipo),
+      moneda,
     }
     return {
       respuesta: 'Listo, mira cómo te quedó y confírmalo si está bien 👇',
