@@ -6,6 +6,7 @@
   PROPIEDADES: 'propiedades',
   NOMINA: 'nomina',
   GASTOS_RECURRENTES: 'gastos_recurrentes',
+  IMPUESTOS: 'impuestos',
   MOVIMIENTOS: 'movimientos',
   CALENDARIO_EVENTOS: 'calendario_eventos',
   CONFIGURACION_SISTEMA: 'configuracion_sistema',

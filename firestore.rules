@@ -13,6 +13,7 @@ service cloud.firestore {
     match /propiedades/{docId} { allow read, write: if isSignedIn(); }
     match /nomina/{docId} { allow read, write: if isSignedIn(); }
     match /gastos_recurrentes/{docId} { allow read, write: if isSignedIn(); }
+    match /impuestos/{docId} { allow read, write: if isSignedIn(); }
     match /movimientos/{docId} { allow read, write: if isSignedIn(); }
     match /calendario_eventos/{docId} { allow read, write: if isSignedIn(); }
     match /configuracion_sistema/{docId} { allow read, write: if isSignedIn(); }

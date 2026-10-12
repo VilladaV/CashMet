@@ -12,6 +12,7 @@ import PropiedadesPage from './features/propiedades/PropiedadesPage'
 import NominaPage from './features/nomina/NominaPage'
 import RecurrentesPage from './features/recurrentes/RecurrentesPage'
 import BackupPage from './features/backup/BackupPage'
+import ImpuestosPage from './features/impuestos/ImpuestosPage'
 import {
   MessageSquare,
   LayoutDashboard,
@@ -22,6 +23,7 @@ import {
   Building2,
   Users,
   Repeat,
+  Receipt,
   Database,
   LogOut,
   SlidersHorizontal,
@@ -38,6 +40,7 @@ export type Tab =
   | 'propiedades'
   | 'nomina'
   | 'recurrentes'
+  | 'impuestos'
   | 'backup'
 
 interface TabDef {
@@ -58,6 +61,7 @@ const TABS: TabDef[] = [
   { id: 'propiedades', label: 'Propiedades', icon: Building2, category: 'gestion' },
   { id: 'nomina', label: 'Nómina', icon: Users, category: 'gestion' },
   { id: 'recurrentes', label: 'Recurrentes', icon: Repeat, category: 'gestion' },
+  { id: 'impuestos', label: 'Impuestos', icon: Receipt, category: 'gestion' },
   { id: 'backup', label: 'Backup', icon: Database, category: 'gestion' },
 ]
 
@@ -193,6 +197,7 @@ export default function App() {
         {tab === 'propiedades' && <PropiedadesPage />}
         {tab === 'nomina' && <NominaPage />}
         {tab === 'recurrentes' && <RecurrentesPage />}
+        {tab === 'impuestos' && <ImpuestosPage />}
         {tab === 'backup' && <BackupPage />}
       </main>
 

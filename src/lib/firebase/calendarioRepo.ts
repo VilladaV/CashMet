@@ -60,10 +60,11 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
   const eventos: EventoInput[] = []
   const recDefault = [{ minutosAntes: 1440 }, { minutosAntes: 60 }]
 
-  const [vehiculos, nominas, deudas] = await Promise.all([
+  const [vehiculos, nominas, deudas, impuestos] = await Promise.all([
     leerColeccion(COLLECTIONS.VEHICULOS),
     leerColeccion(COLLECTIONS.NOMINA),
     leerColeccion(COLLECTIONS.DEUDAS),
+    leerColeccion(COLLECTIONS.IMPUESTOS),
   ])
 
   for (const v of vehiculos) {
@@ -102,6 +103,23 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
         recurrente: false,
         recordatorios: recDefault,
         relacionado: { vehiculoId: v.id },
+      })
+    }
+  }
+
+  for (const imp of impuestos) {
+    if (imp.pagado) continue
+    const f = imp.fechaVencimiento as string | undefined
+    if (f && enProximoAnio(f, meses)) {
+      eventos.push({
+        titulo: `Impuesto ${imp.nombre ?? ''}`.trim(),
+        descripcion: imp.entidad ? `Entidad: ${imp.entidad}` : undefined,
+        tipo: 'impuesto',
+        fechaInicio: f,
+        allDay: true,
+        recurrente: false,
+        recordatorios: recDefault,
+        relacionado: { impuestoId: imp.id },
       })
     }
   }
