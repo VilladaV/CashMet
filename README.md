@@ -1,28 +1,30 @@
 ﻿# CashMet
 
-CashMet es una aplicación web/PWA para gestión económica personal con IA (chat-first). Permite registrar gastos/ingresos en lenguaje natural, clasificar, actualizar saldos y gestionar vehículos, propiedades, nómina, recurrentes, vencimientos y calendario. Pensado para uso privado, Colombia (COP).
+CashMet es una aplicación web/PWA para gestión económica personal con IA (chat-first). Permite registrar gastos/ingresos en lenguaje natural, clasificar, actualizar saldos y gestionar cuentas, deudas, vehículos, propiedades, nómina, recurrentes, impuestos, vencimientos y calendario. Pensado para uso privado, Colombia (COP).
 
 ## Stack
 - Vite + React + TypeScript
 - Tailwind CSS v4 + shadcn/ui
-- Genkit + Google AI (Gemini)
+- IA: Gemini (API REST) con fallback al motor NL local; Genkit disponible para migrar a Cloud Functions
 - Firebase Auth (Email/Password), Firestore
-- PWA (vite-plugin-pwa) + FCM Web Push
-- Google Calendar API (OAuth)
+- PWA (vite-plugin-pwa) + FCM Web Push (opcional)
+- Google Calendar API (OAuth) (opcional)
 
 ## Inicio rápido
 1. Copiar `.env.example` a `.env.local` y completar credenciales Firebase
-2. `npm install`
-3. `npm run dev`
-4. `npm run build && npm run preview`
+2. (Opcional, para IA real) poner `VITE_GEMINI_API_KEY` — sin ella el chat usa el parser local
+3. `npm install`
+4. `npm run dev`
+5. `npm run build && npm run preview`
 
 ## Flujo
 - Login → Chat IA (principal)
-- Pestañas: Chat IA / Calendario / Dashboard
+- Pestañas: Chat IA / Dashboard / Calendario / Cuentas / Deudas / Vehículos / Propiedades / Nómina / Recurrentes / Impuestos / Backup
 
 ## Seguridad
 - Reglas Firestore estrictas (solo autenticado)
 - Nunca commitear secretos
+- `VITE_GEMINI_API_KEY` viaja en el bundle: **restringirla por HTTP referrer** a los dominios de Hosting. Para clave 100% server-side, migrar a Cloud Functions (plan Blaze).
 - `investigacionVehiculoCO` exige `requiereConfirmacion=true` y marca `investigado_IA`
 
 ## Docs

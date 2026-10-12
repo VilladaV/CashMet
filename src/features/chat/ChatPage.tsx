@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
-import { estimadosVehiculoCO, interpretarMensaje } from './engine'
+import { estimadosVehiculoCO } from './engine'
+import { interpretar, geminiDisponible } from './interpretar'
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
 import {
@@ -15,7 +16,9 @@ import {
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
 import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
-import { construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
+import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
+import { listarNomina } from '@/lib/firebase/nominaRepo'
+import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
 import { Send, Sparkles, CheckCircle2, AlertCircle, User } from 'lucide-react'
 
@@ -30,12 +33,36 @@ interface Msg {
 
 const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
 
+type CatRecurrente = 'hogar' | 'transporte' | 'salud' | 'educacion' | 'servicios' | 'otro'
+type PerRecurrente = 'mensual' | 'bimestral' | 'trimestral' | 'semestral' | 'anual'
+
+const normalizarCategoria = (c: string): CatRecurrente => {
+  const t = c.toLowerCase()
+  if (t.includes('hogar') || t.includes('casa') || t.includes('mercado')) return 'hogar'
+  if (t.includes('transp') || t.includes('gasolina') || t.includes('carro') || t.includes('moto')) return 'transporte'
+  if (t.includes('salud') || t.includes('medic')) return 'salud'
+  if (t.includes('educ') || t.includes('estudio') || t.includes('coleg')) return 'educacion'
+  if (t.includes('servic') || t.includes('luz') || t.includes('agua') || t.includes('internet') || t.includes('gas'))
+    return 'servicios'
+  return 'otro'
+}
+
+const normalizarPeriodicidad = (p: string): PerRecurrente => {
+  const t = p.toLowerCase()
+  if (t.startsWith('bim')) return 'bimestral'
+  if (t.startsWith('tri')) return 'trimestral'
+  if (t.startsWith('sem')) return 'semestral'
+  if (t.startsWith('an') || t.includes('año')) return 'anual'
+  return 'mensual'
+}
+
 const SUGERENCIAS = [
   '¿cuánto tengo en el banco?',
   'gasté 45.000 en almuerzo',
   'me pagaron 2.800.000 de nómina',
+  'agrega gasto recurrente internet 120000 mensual',
+  'recuérdame pagar el arriendo el 5',
   'resumen de este mes',
-  'muéstrame los últimos movimientos',
   'genera el calendario de vencimientos',
 ]
 
@@ -50,7 +77,10 @@ export default function ChatPage() {
         '• "gasté 45.000 en mercado con Bancolombia"\n' +
         '• "me consignaron 3.000.000 de sueldo"\n' +
         '• "¿cuánto tengo en mis cuentas?"\n' +
-        '• "pagué 350.000 de cuota del crédito"\n' +
+                '• "pagué 350.000 de cuota del crédito"\n' +
+        '• "agrega gasto recurrente internet 120000 mensual"\n' +
+        '• "recuérdame pagar el arriendo el 5"\n' +
+        '• "pagué la nómina de Juan 2.500.000"\n' +
         '• "agrega vehículo Mazda 3 2021 placa HJK890"\n' +
         '• "genera el calendario de vencimientos"\n' +
         '• "resumen de este mes"',
@@ -87,7 +117,7 @@ export default function ChatPage() {
     setError('')
     push({ rol: 'user', texto })
 
-    const interp = interpretarMensaje(texto)
+    const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre) })
 
     if (interp.acciones.includes('consulta_saldos')) {
       try {
@@ -254,6 +284,90 @@ export default function ChatPage() {
       return
     }
 
+    if (interp.acciones.includes('pago_nomina')) {
+      const p = interp.params ?? {}
+      const monto = Number(p.monto) || 0
+      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const nombre = String(p.nombre ?? '').trim()
+      try {
+        const nominas = await listarNomina()
+        const match = nombre
+          ? nominas.find((n) => n.nombreCompleto.toLowerCase().includes(nombre.toLowerCase()))
+          : nominas.length === 1
+            ? nominas[0]
+            : undefined
+        await crearMovimiento({
+          fecha,
+          tipo: 'pago_nomina',
+          concepto: `Pago de nómina${match ? ' a ' + match.nombreCompleto : nombre ? ' a ' + nombre : ''}`,
+          monto,
+          categoria: 'Nómina',
+          nominaId: match?.id,
+          fuente: 'chat_IA',
+        })
+        push({
+          rol: 'ia',
+          texto: `✅ Pago de nómina registrado: ${COD(monto)}${match ? ` a ${match.nombreCompleto}` : ''} (${fecha}).`,
+        })
+      } catch (e: any) {
+        console.error('Error al registrar pago de nómina:', e)
+        setError(`No se pudo registrar el pago de nómina (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (interp.acciones.includes('crear_recurrente')) {
+      const p = interp.params ?? {}
+      const monto = Number(p.monto ?? p.valor) || 0
+      const concepto = String(p.concepto ?? '').trim() || 'Gasto recurrente'
+      const categoria = normalizarCategoria(String(p.categoria ?? 'otro'))
+      const periodicidad = normalizarPeriodicidad(String(p.periodicidad ?? 'mensual'))
+      const dia = Number(p.diaVencimiento) || undefined
+      try {
+        await crearRecurrente({
+          concepto,
+          categoria,
+          valor: monto,
+          periodicidad,
+          diaVencimiento: dia && dia >= 1 && dia <= 31 ? dia : undefined,
+          activo: true,
+          autoGenerar: true,
+        })
+        push({
+          rol: 'ia',
+          texto:
+            `✅ Gasto recurrente creado: "${concepto}" por ${COD(monto)} (${periodicidad}${dia ? `, vence día ${dia}` : ''}).\n\n` +
+            `Puedes generar sus movimientos y eventos de cada mes desde la pestaña "Recurrentes".`,
+        })
+      } catch (e: any) {
+        console.error('Error al crear recurrente:', e)
+        setError(`No se pudo crear el gasto recurrente (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (interp.acciones.includes('crear_evento')) {
+      const p = interp.params ?? {}
+      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const titulo = String(p.titulo ?? '').trim() || 'Evento'
+      try {
+        await crearEvento({
+          titulo,
+          tipo: 'personal',
+          fechaInicio: fecha,
+          allDay: true,
+          recurrente: false,
+          recordatorios: [{ minutosAntes: 1440 }],
+          relacionado: {},
+        })
+        push({ rol: 'ia', texto: `📅 Evento creado: "${titulo}" para el ${fecha}.` })
+      } catch (e: any) {
+        console.error('Error al crear evento:', e)
+        setError(`No se pudo crear el evento (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
     if (interp.acciones.includes('requiere_confirmacion') && interp.borrador) {
       push({ rol: 'ia', texto: interp.respuesta, borrador: interp.borrador, estado: 'pendiente' })
       return
@@ -310,7 +424,7 @@ export default function ChatPage() {
               <div className="font-bold text-sm sm:text-base flex items-center gap-2">
                 <span>CashMet Copilot</span>
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  Motor IA Activo
+                  {geminiDisponible ? 'IA Gemini' : 'IA local'}
                 </span>
               </div>
               <div className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-0.5">

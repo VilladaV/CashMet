@@ -33,4 +33,15 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes('node_modules/firebase') || id.includes('@firebase')) return 'firebase'
+          if (id.includes('node_modules/react') || id.includes('node_modules/scheduler')) return 'vendor'
+          return undefined
+        },
+      },
+    },
+  },
 })

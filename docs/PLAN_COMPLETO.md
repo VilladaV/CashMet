@@ -4,7 +4,7 @@
 
 ---
 
-## 0. ESTADO DE AVANCE REAL (actualizado 2026-10-09)
+## 0. ESTADO DE AVANCE REAL (actualizado 2026-10-12)
 
 > Las casillas de la sección 10 son el **plan original**. Esta sección refleja lo que **realmente funciona hoy**.
 
@@ -12,17 +12,25 @@
 
 ### Funcional hoy
 - **Auth** email/password con registro desde la app. Reglas Firestore desplegadas.
-- **Chat IA** (motor NL propio en `src/features/chat/engine.ts`, sin LLM): registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes. UI con burbujas usuario/IA y chips de sugerencias.
+- **Chat IA con LLM real (Gemini) y fallback local**: si existe `VITE_GEMINI_API_KEY`, el chat usa **Gemini** (`gemini-2.0-flash`) para clasificar la intención en JSON y el cliente ejecuta la acción; si falta la clave o falla la red, cae automáticamente al **motor NL local** (`src/features/chat/engine.ts`). El indicador del chat muestra "IA Gemini" o "IA local".
+  - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes.
 - **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
-- **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes.
+- **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes, **impuestos**.
+- **Impuestos** (nuevo): colección `impuestos` (predial, vehicular, renta, ICA, otros) con entidad, valor, periodicidad, fecha de vencimiento y estado pagado. Los impuestos no pagados con vencimiento se agregan al calendario y a los recordatorios.
+- **Recurrentes con autogeneración** (nuevo): modelo extendido (`fechaInicio`, `fechaFin`, `cuentaBancoId`, `autoGenerar`) y botón "Generar movimientos y eventos del mes" (idempotente: no duplica lo ya generado). Respeta periodicidad mensual/bimestral/trimestral/semestral/anual.
 - **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
-- **Backup**: exportar/importar todo Firestore a JSON desde la app.
-- **PWA** instalable.
+- **Backup**: exportar/importar todo Firestore a JSON desde la app (incluye `impuestos`).
+- **PWA** instalable. Build con **code-splitting** (chunks `firebase`/`vendor`/`index`, ninguno > 500 kB).
 
 ### Pendiente para el 100%
-- Sincronización Google Calendar (OAuth) — opcional.
-- Notificaciones push FCM/VAPID — opcional.
-- Capa Genkit/Gemini real server-side: los flows/tools existen y compilan (`tsc -b`), pero el chat de producción usa el parser propio; falta ejecutarlos (Cloud Function + `GEMINI_API_KEY`).
+- **Google Calendar (OAuth)** — opcional, no bloquea el objetivo central.
+- **Notificaciones push FCM/VAPID** — opcional, no bloquea el objetivo central.
+- **IA server-side (Cloud Functions + Genkit)**: hoy Gemini se invoca desde el cliente con `VITE_GEMINI_API_KEY` (ver §5.5). Migrar a Cloud Functions cuando la cuenta esté en plan Blaze; los `flows`/`tools` en `src/ai/` quedan listos como andamiaje para esa migración.
+- **Tests automáticos**: aún no hay runner de pruebas.
+
+### Notas de seguridad (§5.5)
+- La clave `VITE_GEMINI_API_KEY` viaja en el bundle del cliente (app privada de 1 usuario). **Obligatorio** restringirla en Google AI Studio por *HTTP referrers* a los dominios de Firebase Hosting (`cashmet-b70e4.web.app`, `cashmet-b70e4.firebaseapp.com`).
+- Para máxima seguridad (clave fuera del cliente), mover la llamada a Gemini a una Cloud Function (requiere plan **Blaze**, con capa gratuita).
 
 ---
 
@@ -264,24 +272,26 @@ nomina/{id}
 
 > **Colombia nómina**: Prima de Servicios (Ley 50/1990): 2 mitades (30 junio + 20 diciembre aprox fechas). IA debe mantener recordatorio, no calcular complejidad tributaria completa (orientativo para presupuesto).
 
-### 4.7 `gastos_mensuales_minimos_automatizados` (Gastos recurrentes fijos)
+### 4.7 `gastos_recurrentes` (Gastos recurrentes fijos)
 ```ts
 gastos_recurrentes/{id}
 {
   concepto: string  // 'Internet', 'Agua', 'Luz', 'Arriendo', 'Celular', 'Gas'
   categoria: 'hogar'|'transporte'|'salud'|'educacion'|'servicios'|'otro'
   valor: number  // COP
-  periodicidad: 'diaria'|'semanal'|'quincenal'|'mensual'|'bimestral'|'trimestral'|'semestral'|'anual'
+  periodicidad: 'mensual'|'bimestral'|'trimestral'|'semestral'|'anual'
   diaVencimiento?: number  // día del mes (1-31)
-  fechaInicio: string
+  fechaInicio?: string  // YYYY-MM-DD (base para calcular en qué meses aplica)
   fechaFin?: string
+  cuentaBancoId?: string  // cuenta que afecta al autogenerar el movimiento
+  autoGenerar?: boolean  // si se incluye en "Generar recurrentes del mes"
   activo: boolean
-  afectaCuentas: Array<{ cuentaBancoId: string, porcentaje?: number, montoFijo?: number }>
-  autoGenerarEnChat: boolean  // sugerir al IA al inicio mes
-  notas: string
-  actualizado: Timestamp
+  notas?: string
+  actualizado?: number
 }
 ```
+
+> **Autogeneración**: `generarMovimientosRecurrentes(mes)` y `generarEventosRecurrentes(mes)` en `src/lib/firebase/recurrentesRepo.ts` crean (idempotente) el movimiento de gasto y el evento de calendario del mes. La periodicidad se calcula respecto a `fechaInicio`; para bimestral/trimestral/semestral/anual solo genera en los meses que corresponden.
 
 ### 4.8 `movimientos` (Transacciones/gastos/ingresos)
 Registro histórico (crucial para chat + trazabilidad).
@@ -327,7 +337,7 @@ calendario_eventos/{id}
   reglaRecurrencia?: string  // RRULE (RFC 5545)
   recordatorios: Array<{ minutosAntes: number }>  // 1d, 1h, 30m
   relacionado: {
-    vehiculoId?: string, deudaId?: string, propiedadId?: string, nominaId?: string, recurrenteId?: string
+    vehiculoId?: string, deudaId?: string, propiedadId?: string, nominaId?: string, recurrenteId?: string, impuestoId?: string
   }
   sincronizadoGoogle: boolean
   activo: boolean
@@ -364,6 +374,24 @@ resumenes_mensuales/{YYYY-MM}
   actualizado: Timestamp
 }
 ```
+
+### 4.12 `impuestos` (Impuestos del usuario)
+```ts
+impuestos/{id}
+{
+  nombre: string  // 'Predial casa Bogotá', 'Impuesto vehicular Mazda 3'
+  tipo: 'predial'|'vehicular'|'renta'|'ica'|'predial_bimestral'|'otro'
+  entidad?: string  // municipio / entidad
+  valor: number  // COP
+  periodicidad: 'anual'|'semestral'|'bimestral'|'trimestral'|'mensual'|'unico'
+  fechaVencimiento?: string  // YYYY-MM-DD
+  pagado: boolean
+  notas?: string
+  actualizado?: number
+}
+```
+
+> Los impuestos **no pagados** con `fechaVencimiento` se agregan automáticamente al calendario (`construirEventos`) con `tipo: 'impuesto'` y `relacionado.impuestoId`.
 
 ---
 
@@ -433,6 +461,21 @@ Crear `src/ai/tools/`:
 - `flows/investigacionVehiculoFlow.ts`: Flow investigación Colombia con validación.
 - `flows/generarCalendarioFlow.ts`: Genera eventos (sueldos, vencimientos, primas julio/diciembre, recibo sueldo propio).
 - `flows/calculoMensualFlow.ts`: Proyección mensual.
+
+### 5.5 Implementación IA vigente (cliente Gemini + fallback)
+
+Mientras la cuenta no esté en plan **Blaze** (Cloud Functions lo requiere), la IA real corre en el cliente:
+
+- **`src/ai/gemini.ts`**: llama a la API REST de Gemini (`v1beta/models/{modelo}:generateContent`) con `responseMimeType: application/json`. Envía un *system instruction* con el catálogo de acciones y pide `{accion, respuesta, params}`. Normaliza fechas/montos.
+- **`src/features/chat/interpretar.ts`**: orquestador. Si `geminiDisponible` (hay `VITE_GEMINI_API_KEY`) usa Gemini; ante cualquier error hace *fallback* al motor local `interpretarMensaje`.
+- **`src/features/chat/ChatPage.tsx`**: ejecuta la acción resultante. `registrar_movimiento` → tarjeta de confirmación; el resto se persiste directo (recurrente, evento, pago de nómina, pagos de deuda, etc.).
+- **Variables**: `VITE_GEMINI_API_KEY` (obligatoria para IA real), `VITE_GEMINI_MODEL` (por defecto `gemini-2.0-flash`). Ver `.env.example`.
+- **Seguridad**: la clave queda en el bundle; **restringirla por HTTP referrer** a los dominios de Hosting. Para eliminar el riesgo, migrar a Cloud Function (ver §7).
+
+**Migración a Functions (cuando haya Blaze)**:
+1. `firebase init functions` (TypeScript).
+2. Mover `interpretarConGemini` a una callable que lea `GEMINI_API_KEY` del entorno (secret manager).
+3. En `interpretar.ts`, reemplazar el `fetch` directo por `httpsCallable('interpretarChat')`.
 
 ---
 

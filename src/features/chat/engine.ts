@@ -88,6 +88,24 @@ function extraerMarcaLinea(texto: string): { marca: string; linea: string } {
   return { marca: palabras[0] || '', linea: palabras[1] || palabras[0] || '' }
 }
 
+function isoDe(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function fechaDeDia(dia: number): string {
+  const hoy = new Date()
+  const base = new Date(hoy.getFullYear(), hoy.getMonth(), dia)
+  if (base.getTime() < new Date(hoy.toDateString()).getTime()) base.setMonth(base.getMonth() + 1)
+  return isoDe(base)
+}
+
+function extraerDiaVencimiento(texto: string): number | undefined {
+  const m = normalizarTexto(texto).match(/\bvence\s+(?:el\s+)?(\d{1,2})\b/)
+  if (!m) return undefined
+  const d = parseInt(m[1], 10)
+  return d >= 1 && d <= 31 ? d : undefined
+}
+
 function mesParam(texto: string): string | undefined {
   const t = normalizarTexto(texto)
   for (const nombre of Object.keys(MESES)) {
@@ -135,7 +153,55 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     return { respuesta: 'Calculando el resumen...', acciones: ['resumen_mes'], params: { mes: mesParam(mensaje) } }
   }
 
+  const diaVenc = extraerDiaVencimiento(mensaje)
+  if (diaVenc || /\b(agenda|agendame|recuerdame|recordarme|recordatorio|evento|cita|reunion)\b/.test(t)) {
+    const limpio = mensaje
+      .replace(/\bvence\s+(el\s+)?\d{1,2}\b/gi, '')
+      .replace(/\b(agenda|agéndame|agendame|recuérdame|recuerdame|recordarme|recordatorio|evento|cita|reunión|reunion)\b/gi, '')
+    return {
+      respuesta: 'Preparando el evento...',
+      acciones: ['crear_evento'],
+      params: {
+        titulo: limpiarConcepto(limpio) || 'Evento',
+        fecha: diaVenc ? fechaDeDia(diaVenc) : parseFecha(mensaje),
+      },
+    }
+  }
+
   const monto = parseMontoCO(mensaje)
+
+  if (
+    monto &&
+    monto > 0 &&
+    /\b(pague|pago|pagar|abone|abonar)\b/.test(t) &&
+    /\b(sueldo|nomina|salario)\b/.test(t)
+  ) {
+    const nm = mensaje.match(/\b(?:a|para)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+){1,3})/i)
+    return {
+      respuesta: 'Registrando pago de nómina...',
+      acciones: ['pago_nomina'],
+      params: { monto, fecha: parseFecha(mensaje), nombre: nm ? nm[1].trim() : undefined },
+    }
+  }
+
+  if (
+    monto &&
+    monto > 0 &&
+    parseTipo(mensaje) === 'gasto' &&
+    /\b(recurrente|mensual|mensualmente|fijo|fija|cada mes|todos los meses)\b/.test(t)
+  ) {
+    return {
+      respuesta: 'Preparando gasto recurrente...',
+      acciones: ['crear_recurrente'],
+      params: {
+        concepto: limpiarConcepto(mensaje),
+        monto,
+        categoria: parseCategoria(mensaje, 'gasto'),
+        periodicidad: 'mensual',
+        diaVencimiento: extraerDiaVencimiento(mensaje),
+      },
+    }
+  }
 
   if (
     monto &&
