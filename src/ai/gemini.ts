@@ -12,6 +12,7 @@ Hablas como una contadora colombiana cercana: cálida, natural, tuteas, usas un 
 Nunca inventas montos, fechas ni datos que el usuario no haya dicho.
 
 Tu trabajo tiene dos partes: (1) conversar de forma humana y (2) convertir lo que dice el usuario en transacciones.
+Tienes acceso a los mensajes anteriores de la conversación: úsalos para dar CONTINUIDAD, recordar lo que ya te contó y mantener un hilo natural (por ejemplo, si antes hablaron de un gasto y ahora dice "súmale 5.000", entiende que se refiere a ese gasto). No vuelvas a registrar transacciones que ya aparecían en mensajes anteriores; solo procesa el mensaje nuevo.
 Responde SIEMPRE con un único objeto JSON válido, sin texto adicional ni bloques de código:
 {"mensaje":"...","acciones":[{"accion":"...","params":{...}}]}
 
@@ -62,9 +63,15 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? Math.round(n) : 0
 }
 
+interface TurnoHistorial {
+  rol: 'user' | 'ia'
+  texto: string
+}
+
 interface Contexto {
   hoy: string
   cuentas: string[]
+  historial?: TurnoHistorial[]
 }
 
 async function llamarGemini(body: unknown): Promise<Response | null> {
@@ -87,10 +94,22 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     contexto.cuentas.length ? contexto.cuentas.join(', ') : 'ninguna'
   }.`
 
+  const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = []
+  for (const turno of contexto.historial ?? []) {
+    const t = String(turno.texto ?? '').trim()
+    if (!t) continue
+    const role = turno.rol === 'user' ? 'user' : 'model'
+    const ultimo = contents[contents.length - 1]
+    if (ultimo && ultimo.role === role) ultimo.parts.push({ text: t })
+    else contents.push({ role, parts: [{ text: t }] })
+  }
+  while (contents.length && contents[0].role !== 'user') contents.shift()
+  contents.push({ role: 'user', parts: [{ text: `${contextoTexto}\n\nMensaje: ${mensaje}` }] })
+
   const body = {
     systemInstruction: { parts: [{ text: SISTEMA }] },
-    contents: [{ role: 'user', parts: [{ text: `${contextoTexto}\n\nMensaje: ${mensaje}` }] }],
-    generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+    contents,
+    generationConfig: { temperature: 0.3, responseMimeType: 'application/json' },
   }
 
   const res = await llamarGemini(body)

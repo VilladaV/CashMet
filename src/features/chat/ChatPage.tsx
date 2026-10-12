@@ -20,7 +20,7 @@ import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
-import { Send, Sparkles, CheckCircle2, AlertCircle, User } from 'lucide-react'
+import { Send, Sparkles, CheckCircle2, AlertCircle, User, Trash2 } from 'lucide-react'
 
 interface Msg {
   id: number
@@ -77,15 +77,53 @@ const SALUDO =
   '• "resumen de este mes"\n\n' +
   'Y si quieres, solo conversamos: pregúntame lo que necesites. 💛'
 
+const CLAVE_CHAT = 'cashmet_chat_v1'
+
+const saludoInicial = (): Msg => ({ id: 0, rol: 'ia', texto: SALUDO, timestamp: 'Ahora' })
+
+const cargarHistorial = (): Msg[] => {
+  try {
+    const raw = localStorage.getItem(CLAVE_CHAT)
+    if (raw) {
+      const parsed = JSON.parse(raw) as Msg[]
+      if (Array.isArray(parsed) && parsed.length) {
+        return parsed.map((m) => (m.estado === 'pendiente' ? { ...m, estado: 'cancelado' as const } : m))
+      }
+    }
+  } catch {
+    /* historial corrupto: se reinicia */
+  }
+  return [saludoInicial()]
+}
+
 export default function ChatPage() {
   const [msg, setMsg] = useState('')
-  const [msgs, setMsgs] = useState<Msg[]>([{ id: 0, rol: 'ia', texto: SALUDO, timestamp: 'Ahora' }])
+  const [msgs, setMsgs] = useState<Msg[]>(cargarHistorial)
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
   const [guardandoId, setGuardandoId] = useState<number | null>(null)
   const [pensando, setPensando] = useState(false)
   const [error, setError] = useState('')
   const idRef = useRef(1)
   const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    idRef.current = msgs.reduce((mx, m) => Math.max(mx, m.id), 0) + 1
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CLAVE_CHAT, JSON.stringify(msgs.slice(-60)))
+    } catch {
+      // almacenamiento no disponible
+    }
+  }, [msgs])
+
+  const limpiarChat = () => {
+    idRef.current = 1
+    setMsgs([saludoInicial()])
+    setError('')
+  }
 
   useEffect(() => {
     listarCuentasBanco()
@@ -364,7 +402,12 @@ export default function ChatPage() {
     push({ rol: 'user', texto })
     setPensando(true)
     try {
-      const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre) })
+      const historial = msgs
+        .filter((m) => m.texto.trim() && m.texto !== SALUDO)
+        .slice(-12)
+        .map((m) => ({ rol: m.rol, texto: m.texto }))
+
+      const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre), historial })
 
       const ops: AccionInterpretada[] = interp.lote?.length
         ? interp.lote
@@ -456,10 +499,17 @@ export default function ChatPage() {
               </div>
               <div className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-0.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-live" />
-                <span>Tu contadora personal · acepta varias transacciones por mensaje</span>
+                <span>Tu contadora personal · recuerda la conversación</span>
               </div>
             </div>
           </div>
+          <button
+            onClick={limpiarChat}
+            title="Nueva conversación"
+            className="p-2 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 text-white/90 transition-colors cursor-pointer active:scale-95"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
         </div>
 
         <CardContent className="p-3 sm:p-4 space-y-3">
