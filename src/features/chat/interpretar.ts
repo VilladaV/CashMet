@@ -1,4 +1,4 @@
-import { interpretarMensaje, type Interpretacion } from './engine'
+import { interpretarLote, interpretarMensaje, type Interpretacion } from './engine'
 import { geminiDisponible, interpretarConGemini } from '@/ai/gemini'
 
 export { geminiDisponible }
@@ -18,5 +18,5 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
       console.warn('Gemini no disponible; usando parser local.', e)
     }
   }
-  return interpretarMensaje(mensaje)
+  return interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
 }

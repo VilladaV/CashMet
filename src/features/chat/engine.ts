@@ -8,21 +8,28 @@ import {
   type BorradorMovimiento,
 } from '@/ai/parser/nl'
 
+export interface AccionInterpretada {
+  nombre: string
+  borrador?: BorradorMovimiento
+  params?: Record<string, unknown>
+}
+
 export interface Interpretacion {
   respuesta: string
   acciones: string[]
   borrador?: BorradorMovimiento
   params?: Record<string, unknown>
+  lote?: AccionInterpretada[]
 }
 
+export const NOMBRE_IA = 'Lucía'
+
 const AYUDA =
-  'Puedo: registrar gastos/ingresos ("gasté 50.000 en mercado", "me pagaron 2.500.000"), ' +
-  'consultar saldos ("¿cuánto tengo?"), listar movimientos ("muéstrame los últimos movimientos"), ' +
-  'registrar pagos de deudas ("pagué 450.000 de cuota del crédito"), ' +
-  'registrar vehículos ("agrega vehículo Mazda 3 2019 placa ABC123"), ' +
-  'estimar SOAT/seguros ("investiga SOAT Mazda 3 2019 1500cc"), ' +
-  'generar el calendario de vencimientos ("genera el calendario") y ' +
-  'ver el resumen del mes ("resumen de este mes").'
+  '¡Hola! Soy Lucía, tu contadora. Puedo registrar gastos e ingresos ("gasté 50.000 en mercado", "me regalaron 70.000"), ' +
+  'varios en un mismo mensaje ("compré un almuerzo por 25.000 y pagué 30.000 de taxi"), consultar saldos ("¿cuánto tengo?"), ' +
+  'listar movimientos, registrar pagos de deudas, pagar nómina, crear gastos recurrentes y eventos, ' +
+  'registrar vehículos, estimar SOAT/tecnicomecánica/seguros en Colombia, generar el calendario de vencimientos y ' +
+  'darte el resumen del mes. Cuéntame con confianza cómo te fue con la plata. 💛'
 
 const MESES: Record<string, number> = {
   enero: 1,
@@ -275,11 +282,52 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
       categoria: parseCategoria(mensaje, tipo),
     }
     return {
-      respuesta: 'Detecté un movimiento. Revisa los datos y confirma para guardarlo:',
+      respuesta: 'Listo, mira cómo te quedó y confírmalo si está bien 👇',
       acciones: ['requiere_confirmacion'],
       borrador,
     }
   }
 
   return { respuesta: AYUDA, acciones: [] }
+}
+
+const CONECTORES_LOTE = /\s+y\s+|\s*[,;]\s*|\s+luego\s+|\s+despues\s+|\s+tambien\s+|\s+ademas\s+/i
+
+export function interpretarLote(mensaje: string): Interpretacion | null {
+  const segmentos = mensaje
+    .split(CONECTORES_LOTE)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && /\d/.test(s))
+  if (segmentos.length < 2) return null
+
+  const lote: AccionInterpretada[] = []
+  for (const seg of segmentos) {
+    const r = interpretarMensaje(seg)
+    if (r.acciones.includes('requiere_confirmacion') && r.borrador && r.borrador.monto >= 1000) {
+      lote.push({ nombre: 'requiere_confirmacion', borrador: r.borrador })
+    }
+  }
+  if (lote.length < 2) return null
+
+  const totalGastos = lote
+    .filter((a) => a.borrador?.tipo === 'gasto')
+    .reduce((s, a) => s + (a.borrador?.monto || 0), 0)
+  const totalIngresos = lote
+    .filter((a) => a.borrador?.tipo === 'ingreso')
+    .reduce((s, a) => s + (a.borrador?.monto || 0), 0)
+
+  const resumen = [
+    totalGastos > 0 ? `gastos por $${totalGastos.toLocaleString('es-CO')}` : '',
+    totalIngresos > 0 ? `ingresos por $${totalIngresos.toLocaleString('es-CO')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' y ')
+
+  return {
+    respuesta: `Detecté ${lote.length} movimientos en tu mensaje${
+      resumen ? ` (${resumen})` : ''
+    }. Revísalos y confírmalos uno por uno 👇`,
+    acciones: lote.map((a) => a.nombre),
+    lote,
+  }
 }

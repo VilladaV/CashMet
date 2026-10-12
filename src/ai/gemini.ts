@@ -1,4 +1,4 @@
-import type { Interpretacion } from '@/features/chat/engine'
+import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
 const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
@@ -7,10 +7,19 @@ const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
 
-const SISTEMA = `Eres el clasificador de intenciones de CashMet, un asistente financiero personal en Colombia (moneda COP).
-Debes convertir el mensaje del usuario en UNA acción y sus parámetros. Responde SIEMPRE con un único objeto JSON válido, sin texto adicional ni bloques de código.
+const SISTEMA = `Eres Lucía, la contadora personal y de confianza del usuario en CashMet (Colombia, moneda COP).
+Hablas como una contadora colombiana cercana: cálida, natural, tuteas, usas un lenguaje sencillo y de vez en cuando expresas una opinión breve sobre las finanzas (una sola frase, sin regañar ni sermonear).
+Nunca inventas montos, fechas ni datos que el usuario no haya dicho.
 
-Formato: {"accion":"...","respuesta":"...","params":{...}}
+Tu trabajo tiene dos partes: (1) conversar de forma humana y (2) convertir lo que dice el usuario en transacciones.
+Responde SIEMPRE con un único objeto JSON válido, sin texto adicional ni bloques de código:
+{"mensaje":"...","acciones":[{"accion":"...","params":{...}}]}
+
+- "mensaje": lo que le dices a la persona (1-3 frases, tono humano; puede incluir una opinión o un consejo corto).
+- "acciones": lista con TODAS las transacciones detectadas (puede estar vacía).
+
+MUY IMPORTANTE: un mismo mensaje puede contener VARIAS transacciones. Detéctalas TODAS y devuélvelas como acciones separadas, en el mismo orden.
+Ejemplo: "compré un almuerzo por 25k y luego me regalaron 70k" → DOS acciones: registrar_movimiento {tipo:"gasto", monto:25000, concepto:"Almuerzo", categoria:"Alimentación"} y registrar_movimiento {tipo:"ingreso", monto:70000, concepto:"Regalo", categoria:"Ingreso"}.
 
 Acciones permitidas y sus params:
 - registrar_movimiento: {tipo:"gasto"|"ingreso", fecha:"YYYY-MM-DD", concepto:"...", monto:numero entero COP sin puntos ni símbolos, categoria:"..."}
@@ -27,13 +36,13 @@ Acciones permitidas y sus params:
 - ayuda: {}
 
 Reglas:
-- "respuesta" es un texto breve en español que describe lo que entendiste (no ejecutes nada).
-- Si el usuario registra un gasto o ingreso normal usa registrar_movimiento.
-- Usa pago_nomina solo para sueldos/salarios; pago_deuda para cuotas, créditos, tarjetas o préstamos.
-- Usa crear_recurrente si menciona "recurrente", "mensual", "fijo", "cada mes" o "todos los meses" con un gasto.
-- Usa crear_evento si pide agendar, recordar, una cita/reunión, o algo que "vence el día N".
-- Si falta el monto en un gasto/ingreso, igualmente devuelve registrar_movimiento con monto 0 y explica en "respuesta".
-- Interpreta fechas relativas (hoy, mañana, ayer, el 15) usando la fecha actual entregada.
+- Si es solo conversación (saludo, charla, pregunta general o de opinión), deja "acciones" vacía y contesta con tu "mensaje".
+- Nunca digas que ya guardaste o registraste un movimiento: se le muestra al usuario una tarjeta para que lo confirme. Invítalo a revisarlo (ej: "te lo dejo para que lo confirmes").
+- Gasto o ingreso normal → registrar_movimiento. Sueldos/salarios → pago_nomina; cuotas, créditos, tarjetas o préstamos → pago_deuda.
+- crear_recurrente si menciona "recurrente", "mensual", "fijo", "cada mes" o "todos los meses" con un gasto.
+- crear_evento si pide agendar, recordar, una cita/reunión, o algo que "vence el día N".
+- Si falta el monto, usa monto 0 y pídelo amablemente en "mensaje".
+- Interpreta fechas relativas (hoy, mañana, ayer, "el 15") usando la fecha actual entregada.
 - Solo JSON.`
 
 function limpiarJson(texto: string): string {
@@ -92,49 +101,63 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
   }
   const texto = (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
   const parsed = JSON.parse(limpiarJson(texto)) as {
-    accion?: string
+    mensaje?: string
     respuesta?: string
+    acciones?: Array<{ accion?: string; params?: Record<string, unknown> }>
+    accion?: string
     params?: Record<string, unknown>
   }
 
-  const accion = String(parsed.accion ?? 'ayuda')
-  const params = parsed.params ?? {}
-  const respuesta = String(parsed.respuesta ?? '').trim()
+  const mensajeHumano = String(parsed.mensaje ?? parsed.respuesta ?? '').trim()
 
-  if (accion === 'registrar_movimiento') {
-    const tipo = params.tipo === 'ingreso' ? 'ingreso' : 'gasto'
-    return {
-      respuesta: respuesta || 'Revisa y confirma el movimiento:',
-      acciones: ['requiere_confirmacion'],
-      borrador: {
-        tipo,
-        fecha: fechaValida(params.fecha, contexto.hoy),
-        concepto: String(params.concepto ?? '').trim() || 'Movimiento',
-        monto: num(params.monto),
-        categoria: String(params.categoria ?? '').trim() || (tipo === 'ingreso' ? 'Ingresos' : 'Otros'),
-      },
-      params,
+  let crudas = Array.isArray(parsed.acciones) ? parsed.acciones : []
+  if (!crudas.length && parsed.accion) crudas = [{ accion: parsed.accion, params: parsed.params }]
+
+  const lote: AccionInterpretada[] = []
+  for (const a of crudas) {
+    const nombre = String(a.accion ?? '').trim()
+    if (!nombre) continue
+    const params = { ...(a.params ?? {}) }
+
+    if (nombre === 'registrar_movimiento') {
+      const tipo = params.tipo === 'ingreso' ? 'ingreso' : 'gasto'
+      lote.push({
+        nombre: 'requiere_confirmacion',
+        params,
+        borrador: {
+          tipo,
+          fecha: fechaValida(params.fecha, contexto.hoy),
+          concepto: String(params.concepto ?? '').trim() || 'Movimiento',
+          monto: num(params.monto),
+          categoria: String(params.categoria ?? '').trim() || (tipo === 'ingreso' ? 'Ingresos' : 'Otros'),
+        },
+      })
+      continue
     }
+
+    if (nombre === 'crear_evento') params.fecha = fechaValida(params.fecha, contexto.hoy)
+    if (nombre === 'pago_deuda' || nombre === 'pago_nomina') {
+      params.fecha = fechaValida(params.fecha, contexto.hoy)
+      params.monto = num(params.monto)
+    }
+    if (nombre === 'crear_recurrente') {
+      params.monto = num(params.monto)
+      params.valor = params.monto
+    }
+    if (nombre === 'resumen_mes') {
+      params.mes = String(params.mes ?? contexto.hoy.slice(0, 7)).slice(0, 7)
+    }
+    lote.push({ nombre, params })
   }
 
-  if (accion === 'crear_evento') {
-    params.fecha = fechaValida(params.fecha, contexto.hoy)
-  }
-  if (accion === 'pago_deuda' || accion === 'pago_nomina') {
-    params.fecha = fechaValida(params.fecha, contexto.hoy)
-    params.monto = num(params.monto)
-  }
-  if (accion === 'crear_recurrente') {
-    params.monto = num(params.monto)
-    params.valor = params.monto
-  }
-  if (accion === 'resumen_mes') {
-    params.mes = String(params.mes ?? contexto.hoy.slice(0, 7)).slice(0, 7)
-  }
-
+  const soloConversacion = lote.length === 0
   return {
-    respuesta: respuesta || 'No estoy seguro de cómo ayudarte con eso. Escribe "ayuda" para ver lo que puedo hacer.',
-    acciones: [accion],
-    params,
+    respuesta:
+      mensajeHumano ||
+      (soloConversacion
+        ? 'Cuéntame en qué te ayudo con tus cuentas. 💛'
+        : 'Listo, revisa esto y confírmalo cuando quieras 👇'),
+    acciones: lote.map((a) => a.nombre),
+    lote: lote.length ? lote : undefined,
   }
 }

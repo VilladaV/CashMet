@@ -105,7 +105,7 @@ export function parseFecha(texto: string): string {
 export function parseTipo(texto: string): 'gasto' | 'ingreso' {
   const t = normalizarTexto(texto)
   const ingreso =
-    /\b(ingres|recib|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion)\b/
+    /\b(ingres|recib|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion|me regalaron|me regalo|regalaron|me invitaron|invitaron|gane|premio|bono|loteria|me dieron)\b/
   return ingreso.test(t) ? 'ingreso' : 'gasto'
 }
 
@@ -136,9 +136,13 @@ export function parseCategoria(texto: string, tipo: 'gasto' | 'ingreso'): string
 export function limpiarConcepto(texto: string): string {
   let s = texto.trim()
   s = s.replace(/\$\s*[\d.,]+\s*(k|m|mm|millones?|mil)?/gi, ' ')
+  s = s.replace(/\b\d[\d.,]*\s*(k|m|mm|millones?|mil)\b/gi, ' ')
   s = s.replace(/\b(registra|registrar|anota|anotar|agrega|agregar|añade|añadir|guardar|guarda)\b/gi, ' ')
-  s = s.replace(/\b(hoy|ayer|anteayer|manana)\b/gi, ' ')
+  s = s.replace(/\b(compre|compré|pague|pagué|gaste|gasté|recibi|recibí|vendi|vendí|me regalaron|me dieron)\b/gi, ' ')
+  s = s.replace(/\b(hoy|ayer|anteayer|manana|mañana)\b/gi, ' ')
+  s = s.replace(/\b(por|en|de|con|para)\s*$/i, ' ')
   s = s.replace(/\s+/g, ' ').trim()
+  s = s.replace(/^(un|una|unos|unas|el|la|los|las)\s+/i, '')
   s = s.replace(/^[,.:;\-\s]+|[,.:;\-\s]+$/g, '').trim()
   if (!s) return 'Movimiento'
   return s.charAt(0).toUpperCase() + s.slice(1)

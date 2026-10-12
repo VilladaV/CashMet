@@ -466,10 +466,10 @@ Crear `src/ai/tools/`:
 
 Mientras la cuenta no esté en plan **Blaze** (Cloud Functions lo requiere), la IA real corre en el cliente:
 
-- **`src/ai/gemini.ts`**: llama a la API REST de Gemini (`v1beta/models/{modelo}:generateContent`) con `responseMimeType: application/json`. Envía un *system instruction* con el catálogo de acciones y pide `{accion, respuesta, params}`. Normaliza fechas/montos. Usa `gemini-3.8-flash` y, si el modelo está saturado/no disponible, reintenta con `gemini-flash-latest` y `gemini-2.5-flash` antes de rendirse.
-- **`src/features/chat/interpretar.ts`**: orquestador. Si `geminiDisponible` (hay `VITE_GEMINI_API_KEY`) usa Gemini; ante cualquier error hace *fallback* al motor local `interpretarMensaje`.
-- **`src/features/chat/ChatPage.tsx`**: ejecuta la acción resultante. `registrar_movimiento` → tarjeta de confirmación; el resto se persiste directo (recurrente, evento, pago de nómina, pagos de deuda, etc.).
-- **Variables**: `VITE_GEMINI_API_KEY` (obligatoria para IA real), `VITE_GEMINI_MODEL` (por defecto `gemini-2.0-flash`). Ver `.env.example`.
+- **`src/ai/gemini.ts`**: llama a la API REST de Gemini (`v1beta/models/{modelo}:generateContent`) con `responseMimeType: application/json`. La IA tiene identidad: **Lucía**, contadora colombiana cercana que conversa con naturalidad y da una opinión breve. El *system instruction* pide `{mensaje, acciones:[{accion, params}]}` — es decir, **varias transacciones por mensaje** (una entrada por cada movimiento detectado). Normaliza fechas/montos. Usa `gemini-3.8-flash` y, si el modelo está saturado/no disponible, reintenta con `gemini-flash-latest` y `gemini-2.5-flash` antes de rendirse.
+- **`src/features/chat/interpretar.ts`**: orquestador. Si `geminiDisponible` (hay `VITE_GEMINI_API_KEY`) usa Gemini; ante cualquier error hace *fallback* al motor local (`interpretarLote`, que divide el mensaje por conectores "y / , / luego" y produce varios borradores; si no, `interpretarMensaje`).
+- **`src/features/chat/ChatPage.tsx`**: muestra el `mensaje` humano de Lucía y ejecuta cada acción del lote. Cada `registrar_movimiento` genera **su propia tarjeta de confirmación** (se pueden confirmar varias en un mismo mensaje); el resto se persiste directo (recurrente, evento, pago de nómina, pagos de deuda, etc.). Incluye indicador "escribiendo…".
+- **Variables**: `VITE_GEMINI_API_KEY` (obligatoria para IA real), `VITE_GEMINI_MODEL` (por defecto `gemini-3.8-flash`). Ver `.env.example`.
 - **Seguridad**: la clave queda en el bundle; **restringirla por HTTP referrer** a los dominios de Hosting. Para eliminar el riesgo, migrar a Cloud Function (ver §7).
 
 **Migración a Functions (cuando haya Blaze)**:
