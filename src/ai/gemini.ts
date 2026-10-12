@@ -1,13 +1,8 @@
 import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
-const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
-const MODELOS_FALLBACK = [
-  'gemini-3.7-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
-  'gemini-flash-lite-latest',
-]
+const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.1-flash-lite'
+const MODELOS_FALLBACK = ['gemini-3.5-flash-lite']
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
