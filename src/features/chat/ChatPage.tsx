@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { estimadosVehiculoCO, NOMBRE_IA, type AccionInterpretada } from './engine'
 import { interpretar, geminiDisponible } from './interpretar'
+import { construirSnapshotFinanciero, invalidarSnapshotFinanciero } from './snapshot'
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
 import {
@@ -57,11 +58,10 @@ const normalizarPeriodicidad = (p: string): PerRecurrente => {
 }
 
 const SUGERENCIAS = [
+  'analiza mi estado financiero',
   '¿cuánto tengo en el banco?',
   'compré un almuerzo por 25.000 y me regalaron 70.000',
-  'gasté 45.000 en almuerzo',
   'agrega gasto recurrente internet 120000 mensual',
-  'recuérdame pagar el arriendo el 5',
   'resumen de este mes',
 ]
 
@@ -190,6 +190,7 @@ export default function ChatPage() {
           })
         } else {
           const n = await guardarEventos(eventos)
+          invalidarSnapshotFinanciero()
           push({ rol: 'ia', texto: `📅 ¡Listo! Generé y guardé ${n} eventos en el calendario para los próximos 12 meses.` })
         }
       } catch {
@@ -265,6 +266,7 @@ export default function ChatPage() {
           return
         }
         await registrarPagoDeuda(deuda.id, monto, fecha)
+        invalidarSnapshotFinanciero()
         push({
           rol: 'ia',
           texto: `✅ Listo, registré el pago de ${COD(monto)} a "${deuda.nombre}". Te queda un saldo de ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
@@ -301,6 +303,7 @@ export default function ChatPage() {
           tipo: String(p.tipo) as 'carro' | 'moto' | 'camion' | 'otro',
           cilindraje: Number(p.cilindraje) || undefined,
         })
+        invalidarSnapshotFinanciero()
         push({
           rol: 'ia',
           texto: `✅ Registré tu vehículo: ${String(p.marca)} ${String(p.linea)} (${p.modelo}). Puedes afinar SOAT, RTM y seguros en la pestaña "Vehículos".`,
@@ -332,6 +335,7 @@ export default function ChatPage() {
           nominaId: match?.id,
           fuente: 'chat_IA',
         })
+        invalidarSnapshotFinanciero()
         push({
           rol: 'ia',
           texto: `✅ Registré el pago de nómina de ${COD(monto)}${match ? ` a ${match.nombreCompleto}` : ''} (${fecha}).`,
@@ -359,6 +363,7 @@ export default function ChatPage() {
           activo: true,
           autoGenerar: true,
         })
+        invalidarSnapshotFinanciero()
         push({
           rol: 'ia',
           texto:
@@ -385,6 +390,7 @@ export default function ChatPage() {
           recordatorios: [{ minutosAntes: 1440 }],
           relacionado: {},
         })
+        invalidarSnapshotFinanciero()
         push({ rol: 'ia', texto: `📅 Anoté "${titulo}" para el ${fecha}. Te aviso un día antes.` })
       } catch (e: any) {
         console.error('Error al crear evento:', e)
@@ -404,10 +410,12 @@ export default function ChatPage() {
     try {
       const historial = msgs
         .filter((m) => m.texto.trim() && m.texto !== SALUDO)
-        .slice(-12)
+        .slice(-8)
         .map((m) => ({ rol: m.rol, texto: m.texto }))
 
-      const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre), historial })
+      const snapshot = await construirSnapshotFinanciero().catch(() => undefined)
+
+      const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre), historial, snapshot })
 
       const ops: AccionInterpretada[] = interp.lote?.length
         ? interp.lote
@@ -459,6 +467,7 @@ export default function ChatPage() {
         cuentaBancoId: data.cuentaBancoId,
         fuente: 'chat_IA',
       })
+      invalidarSnapshotFinanciero()
       setMsgs((prev) => prev.map((m) => (m.id === id ? { ...m, estado: 'guardado' } : m)))
       push({
         rol: 'ia',

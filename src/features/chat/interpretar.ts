@@ -6,6 +6,7 @@ export { geminiDisponible }
 export interface ContextoChat {
   cuentas: string[]
   historial?: Array<{ rol: 'user' | 'ia'; texto: string }>
+  snapshot?: string
 }
 
 export async function interpretar(mensaje: string, contexto: ContextoChat): Promise<Interpretacion> {
@@ -15,6 +16,7 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
         hoy: new Date().toISOString().slice(0, 10),
         cuentas: contexto.cuentas,
         historial: contexto.historial,
+        snapshot: contexto.snapshot,
       })
     } catch (e) {
       console.warn('Gemini no disponible; usando parser local.', e)
