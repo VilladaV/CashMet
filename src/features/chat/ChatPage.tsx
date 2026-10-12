@@ -6,6 +6,7 @@ import { estimadosVehiculoCO, NOMBRE_IA, type AccionInterpretada } from './engin
 import { interpretar, geminiDisponible } from './interpretar'
 import { construirSnapshotFinanciero, invalidarSnapshotFinanciero } from './snapshot'
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
+import TextoEnriquecido from './TextoEnriquecido'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
 import {
   crearMovimiento,
@@ -545,7 +546,7 @@ export default function ChatPage() {
                         : 'bg-white border border-slate-200/90 text-slate-800 rounded-bl-xs'
                     }`}
                   >
-                    {m.texto}
+                    {m.rol === 'ia' ? <TextoEnriquecido texto={m.texto} /> : m.texto}
                   </div>
 
                   {/* Tarjeta de Confirmación de Movimiento */}
