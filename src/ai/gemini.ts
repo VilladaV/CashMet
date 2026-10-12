@@ -2,7 +2,12 @@ import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
 const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.8-flash'
-const MODELOS_FALLBACK = ['gemini-flash-latest', 'gemini-2.5-flash']
+const MODELOS_FALLBACK = [
+  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-flash-lite-latest',
+]
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
@@ -81,17 +86,19 @@ interface Contexto {
   snapshot?: string
 }
 
-async function llamarGemini(body: unknown): Promise<Response | null> {
+async function llamarGemini(body: unknown): Promise<{ res: Response | null; cuotaAgotada: boolean }> {
   const candidatos = [MODELO, ...MODELOS_FALLBACK].filter((m, i, a) => m && a.indexOf(m) === i)
+  let cuotaAgotada = false
   for (const modelo of candidatos) {
     const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (r.ok) return r
+    if (r.ok) return { res: r, cuotaAgotada: false }
+    if (r.status === 429) cuotaAgotada = true
   }
-  return null
+  return { res: null, cuotaAgotada }
 }
 
 export async function interpretarConGemini(mensaje: string, contexto: Contexto): Promise<Interpretacion> {
@@ -124,8 +131,8 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     generationConfig: { temperature: 0.3, responseMimeType: 'application/json' },
   }
 
-  const res = await llamarGemini(body)
-  if (!res) throw new Error('gemini_no_disponible')
+  const { res, cuotaAgotada } = await llamarGemini(body)
+  if (!res) throw new Error(cuotaAgotada ? 'gemini_cuota' : 'gemini_no_disponible')
 
   const data = (await res.json()) as {
     candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
