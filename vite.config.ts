@@ -38,6 +38,7 @@ export default defineConfig({
       output: {
         manualChunks(id: string) {
           if (id.includes('node_modules/firebase') || id.includes('@firebase')) return 'firebase'
+          if (id.includes('node_modules/motion')) return 'motion'
           if (id.includes('node_modules/react') || id.includes('node_modules/scheduler')) return 'vendor'
           return undefined
         },

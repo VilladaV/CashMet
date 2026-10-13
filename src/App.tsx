@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { logout } from '@/lib/firebase/auth'
 import CashMetLogo from '@/components/brand/CashMetLogo'
@@ -65,14 +66,40 @@ const TABS: TabDef[] = [
   { id: 'backup', label: 'Backup', icon: Database, category: 'gestion' },
 ]
 
+const SUBTITULO: Record<Tab, string> = {
+  chat: 'Habla con Lucía, tu contadora',
+  dashboard: 'Tu dinero de un vistazo',
+  calendario: 'Vencimientos y recordatorios',
+  cuentas: 'Dinero en bancos y efectivo',
+  deudas: 'Créditos, tarjetas y préstamos',
+  vehiculos: 'SOAT, técnico-mecánica y seguros',
+  propiedades: 'Patrimonio e inmuebles',
+  nomina: 'Equipo, salarios y primas',
+  recurrentes: 'Gastos fijos automáticos',
+  impuestos: 'Predial, vehicular y renta',
+  backup: 'Respaldo de tu información',
+}
+
+function transicionar(aplicar: () => void) {
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => void }
+  if (typeof doc.startViewTransition === 'function') doc.startViewTransition(aplicar)
+  else aplicar()
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('chat')
   const [menuGestionAbierto, setMenuGestionAbierto] = useState(false)
 
   const cambiar = (t: Tab) => {
-    setTab(t)
+    if (t === tab) {
+      setMenuGestionAbierto(false)
+      return
+    }
     setMenuGestionAbierto(false)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    transicionar(() => {
+      setTab(t)
+      window.scrollTo({ top: 0 })
+    })
   }
 
   const primaryTabs = TABS.filter((t) => t.category === 'primary')
@@ -81,128 +108,148 @@ export default function App() {
   const esGestionActual = gestionTabs.some((t) => t.id === tab)
 
   return (
-    <div className="min-h-screen bg-mesh-pattern flex flex-col font-sans text-slate-900 pb-20 md:pb-8">
-      {/* HEADER PRINCIPAL */}
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-xs">
-        <div className="container mx-auto max-w-5xl flex items-center justify-between px-4 py-2.5">
-          {/* Logo con marca */}
-          <div className="cursor-pointer" onClick={() => cambiar('chat')}>
-            <CashMetLogo size="md" showText={true} showSubtitle={true} />
+    <div className="min-h-screen bg-mesh-pattern font-sans text-mist-100">
+      <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
+        <div className="animate-drift absolute -top-40 left-1/4 h-[480px] w-[480px] rounded-full bg-emerald-500/[0.07] blur-[130px]" />
+        <div className="animate-drift absolute bottom-0 right-0 h-[420px] w-[420px] rounded-full bg-sky-500/[0.08] blur-[130px] [animation-delay:-8s]" />
+      </div>
+
+      {/* BARRA SUPERIOR FLOTANTE */}
+      <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-night-950/70 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <button onClick={() => cambiar('chat')} className="shrink-0 cursor-pointer md:hidden" title="Ir al chat">
+              <CashMetLogo size="sm" showText={false} showSubtitle={false} variant="dark" />
+            </button>
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-extrabold tracking-tight text-white sm:text-base">
+                {tabActual?.label}
+              </h1>
+              <p className="hidden truncate text-[11px] text-mist-500 sm:block">{SUBTITULO[tab]}</p>
+            </div>
           </div>
 
-          {/* Indicador en vivo + Salir */}
-          <div className="flex items-center gap-3">
-            <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200/80 shadow-2xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-live" />
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
+              <span className="animate-pulse-live h-1.5 w-1.5 rounded-full bg-emerald-400" />
               <span>COP · En vivo</span>
             </div>
-
             <Button
               size="sm"
               variant="ghost"
-              className="h-8 px-2.5 text-xs text-slate-600 hover:text-red-700 hover:bg-red-50 gap-1.5"
+              className="h-8 gap-1.5 px-2.5 text-xs text-mist-500 hover:bg-white/5 hover:text-red-300"
               onClick={() => logout()}
               title="Cerrar sesión"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Salir</span>
             </Button>
           </div>
         </div>
-
-        {/* BARRA DE NAVEGACIÓN DESKTOP & TABLET */}
-        <div className="border-t border-slate-100 bg-slate-50/70 hidden md:block">
-          <div className="container mx-auto max-w-5xl flex items-center justify-between px-4 py-1.5">
-            {/* Pestañas Principales (Chat, Dashboard, Calendario) */}
-            <div className="flex items-center gap-1">
-              {primaryTabs.map((t) => {
-                const Icon = t.icon
-                const activo = tab === t.id
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => cambiar(t.id)}
-                    className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                      activo
-                        ? 'gradient-brand-navy text-white shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                    }`}
-                  >
-                    <Icon className={`w-3.5 h-3.5 ${activo ? 'text-emerald-400' : 'text-slate-500'}`} />
-                    <span>{t.label}</span>
-                    {t.badge && (
-                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                        activo ? 'bg-emerald-500 text-slate-950' : 'bg-slate-200 text-slate-700'
-                      }`}>
-                        {t.badge}
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-
-            {/* Pestañas de Gestión (Sub-menú segmentado con pills) */}
-            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5">
-              <span className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider mr-1">
-                Gestión:
-              </span>
-              {gestionTabs.map((t) => {
-                const Icon = t.icon
-                const activo = tab === t.id
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => cambiar(t.id)}
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-                      activo
-                        ? 'bg-emerald-600 text-white font-semibold shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
-                    }`}
-                  >
-                    <Icon className={`w-3 h-3 ${activo ? 'text-white' : 'text-slate-600'}`} />
-                    <span>{t.label}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </div>
       </header>
 
-      {/* TITULO DE SECCIÓN EN MÓVIL SI ESTÁ EN GESTIÓN */}
-      {esGestionActual && (
-        <div className="md:hidden bg-emerald-50/80 border-b border-emerald-200/80 px-4 py-2 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-1.5 font-semibold text-emerald-900">
-            {tabActual && <tabActual.icon className="w-3.5 h-3.5 text-emerald-600" />}
-            <span>Gestión · {tabActual?.label}</span>
-          </div>
-          <button
-            onClick={() => setMenuGestionAbierto(true)}
-            className="text-[11px] font-medium text-emerald-700 underline"
-          >
-            Cambiar módulo
+      <div className="relative mx-auto flex max-w-[1500px] items-start gap-5 px-4 pb-24 sm:px-6 md:pb-10">
+        {/* SIDEBAR ESCRITORIO */}
+        <aside className="sticky top-[57px] hidden max-h-[calc(100vh-77px)] w-60 shrink-0 flex-col overflow-y-auto py-5 pr-1 no-scrollbar md:flex xl:w-64">
+          <button onClick={() => cambiar('chat')} className="mb-6 cursor-pointer px-2 text-left">
+            <CashMetLogo size="md" showText={true} showSubtitle={true} variant="dark" />
           </button>
-        </div>
-      )}
 
-      {/* CONTENIDO PRINCIPAL */}
-      <main className="flex-1 w-full">
-        {tab === 'chat' && <ChatPage />}
-        {tab === 'dashboard' && <DashboardPage />}
-        {tab === 'calendario' && <CalendarioPage />}
-        {tab === 'cuentas' && <CuentasPage />}
-        {tab === 'deudas' && <DeudasPage />}
-        {tab === 'vehiculos' && <VehiculosPage />}
-        {tab === 'propiedades' && <PropiedadesPage />}
-        {tab === 'nomina' && <NominaPage />}
-        {tab === 'recurrentes' && <RecurrentesPage />}
-        {tab === 'impuestos' && <ImpuestosPage />}
-        {tab === 'backup' && <BackupPage />}
-      </main>
+          <nav className="space-y-1">
+            {primaryTabs.map((t) => {
+              const Icon = t.icon
+              const activo = tab === t.id
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => cambiar(t.id)}
+                  className={`relative flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold transition-colors ${
+                    activo ? 'text-white' : 'text-mist-500 hover:bg-white/[0.04] hover:text-mist-100'
+                  }`}
+                >
+                  {activo && (
+                    <motion.span
+                      layoutId="nav-pill"
+                      className="surface-glow absolute inset-0 rounded-xl bg-gradient-to-r from-emerald-500/[0.22] to-sky-500/[0.1]"
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <Icon className={`relative h-[18px] w-[18px] ${activo ? 'text-emerald-300' : 'text-mist-600'}`} />
+                  <span className="relative">{t.label}</span>
+                  {t.badge && (
+                    <span className="relative ml-auto rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-black tracking-wide text-emerald-300">
+                      {t.badge}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </nav>
 
-      {/* DOCK INFERIOR PARA MÓVIL (PWA MOBILE EXPERIENCE) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-lg border-t border-slate-200 px-3 py-1.5 shadow-lg flex items-center justify-around">
+          <div className="mb-2 mt-7 px-3 text-[10px] font-black tracking-[0.22em] text-mist-600 uppercase">
+            Gestión
+          </div>
+          <nav className="space-y-0.5">
+            {gestionTabs.map((t) => {
+              const Icon = t.icon
+              const activo = tab === t.id
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => cambiar(t.id)}
+                  className={`relative flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-semibold transition-colors ${
+                    activo ? 'text-white' : 'text-mist-500 hover:bg-white/[0.04] hover:text-mist-100'
+                  }`}
+                >
+                  {activo && (
+                    <motion.span
+                      layoutId="nav-pill"
+                      className="absolute inset-0 rounded-lg bg-white/[0.08]"
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <Icon className={`relative h-4 w-4 ${activo ? 'text-emerald-300' : 'text-mist-600'}`} />
+                  <span className="relative">{t.label}</span>
+                  {activo && <span className="relative ml-auto h-1.5 w-1.5 rounded-full bg-emerald-400" />}
+                </button>
+              )
+            })}
+          </nav>
+
+          <div className="mt-auto px-2 pt-8">
+            <div className="rounded-2xl border border-white/[0.06] bg-white/[0.03] p-3.5">
+              <div className="text-xs font-bold text-white">Lucía · IA contable</div>
+              <p className="mt-1 text-[11px] leading-relaxed text-mist-500">
+                Registra, convierte monedas y analiza tu estado real.
+              </p>
+              <button
+                onClick={() => cambiar('chat')}
+                className="mt-2.5 w-full cursor-pointer rounded-xl bg-emerald-400/15 py-2 text-xs font-bold text-emerald-300 transition-colors hover:bg-emerald-400/25"
+              >
+                Hablar con Lucía
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        {/* CONTENIDO */}
+        <main className="min-w-0 flex-1 py-4 sm:py-5">
+          {tab === 'chat' && <ChatPage />}
+          {tab === 'dashboard' && <DashboardPage />}
+          {tab === 'calendario' && <CalendarioPage />}
+          {tab === 'cuentas' && <CuentasPage />}
+          {tab === 'deudas' && <DeudasPage />}
+          {tab === 'vehiculos' && <VehiculosPage />}
+          {tab === 'propiedades' && <PropiedadesPage />}
+          {tab === 'nomina' && <NominaPage />}
+          {tab === 'recurrentes' && <RecurrentesPage />}
+          {tab === 'impuestos' && <ImpuestosPage />}
+          {tab === 'backup' && <BackupPage />}
+        </main>
+      </div>
+
+      {/* DOCK MÓVIL */}
+      <nav className="fixed right-0 bottom-0 left-0 z-40 flex items-center justify-around border-t border-white/[0.07] bg-night-950/85 px-2 py-2 backdrop-blur-xl md:hidden">
         {primaryTabs.map((t) => {
           const Icon = t.icon
           const activo = tab === t.id
@@ -210,82 +257,87 @@ export default function App() {
             <button
               key={t.id}
               onClick={() => cambiar(t.id)}
-              className={`flex flex-col items-center justify-center py-1 px-3 rounded-lg text-[10px] font-semibold transition-all ${
-                activo ? 'text-[#0A2540]' : 'text-slate-600 hover:text-slate-800'
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-xl px-3 py-1 text-[10px] font-bold transition-colors ${
+                activo ? 'text-white' : 'text-mist-600'
               }`}
             >
-              <div
-                className={`p-1.5 rounded-lg transition-all ${
-                  activo ? 'bg-[#0A2540] text-emerald-400 shadow-xs' : 'text-slate-600'
-                }`}
-              >
-                <Icon className="w-4 h-4" />
-              </div>
+              <span className={`rounded-xl p-1.5 transition-all ${activo ? 'bg-emerald-400/20 text-emerald-300' : ''}`}>
+                <Icon className="h-[18px] w-[18px]" />
+              </span>
               <span className="mt-0.5">{t.label}</span>
             </button>
           )
         })}
-
-        {/* Botón Gestión en Móvil */}
         <button
           onClick={() => setMenuGestionAbierto(true)}
-          className={`flex flex-col items-center justify-center py-1 px-3 rounded-lg text-[10px] font-semibold transition-all ${
-            esGestionActual ? 'text-emerald-700' : 'text-slate-600 hover:text-slate-800'
+          className={`flex cursor-pointer flex-col items-center justify-center rounded-xl px-3 py-1 text-[10px] font-bold transition-colors ${
+            esGestionActual ? 'text-emerald-300' : 'text-mist-600'
           }`}
         >
-          <div
-            className={`p-1.5 rounded-lg transition-all ${
-              esGestionActual ? 'bg-emerald-600 text-white shadow-xs' : 'text-slate-600'
-            }`}
-          >
-            <SlidersHorizontal className="w-4 h-4" />
-          </div>
+          <span className={`rounded-xl p-1.5 transition-all ${esGestionActual ? 'bg-emerald-400/20' : ''}`}>
+            <SlidersHorizontal className="h-[18px] w-[18px]" />
+          </span>
           <span className="mt-0.5">Gestión</span>
         </button>
       </nav>
 
-      {/* MODAL / SHEET RÁPIDO DE GESTIÓN EN MÓVIL */}
-      {menuGestionAbierto && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="bg-white w-full max-w-sm rounded-t-2xl sm:rounded-2xl p-5 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in slide-in-from-bottom-6">
-            <div className="flex items-center justify-between border-b pb-3">
-              <div className="font-bold text-sm text-slate-900 flex items-center gap-2">
-                <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
-                <span>Módulos de Gestión Financiera</span>
+      {/* SHEET GESTIÓN MÓVIL */}
+      <AnimatePresence>
+        {menuGestionAbierto && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm sm:items-center sm:p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            onClick={() => setMenuGestionAbierto(false)}
+          >
+            <motion.div
+              className="glass-card w-full max-w-sm space-y-4 rounded-t-3xl p-5 sm:rounded-3xl"
+              initial={{ y: 120, scale: 0.98, opacity: 0 }}
+              animate={{ y: 0, scale: 1, opacity: 1 }}
+              exit={{ y: 120, scale: 0.98, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 36 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between border-b border-white/[0.07] pb-3">
+                <div className="flex items-center gap-2 text-sm font-bold text-white">
+                  <SlidersHorizontal className="h-4 w-4 text-emerald-300" />
+                  <span>Módulos de gestión</span>
+                </div>
+                <button
+                  onClick={() => setMenuGestionAbierto(false)}
+                  className="cursor-pointer rounded-full p-1.5 text-mist-500 hover:bg-white/5 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
-              <button
-                onClick={() => setMenuGestionAbierto(false)}
-                className="p-1 rounded-full text-slate-400 hover:text-slate-700"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              {gestionTabs.map((t) => {
-                const Icon = t.icon
-                const activo = tab === t.id
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => cambiar(t.id)}
-                    className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-left font-semibold transition-all ${
-                      activo
-                        ? 'border-emerald-500 bg-emerald-50 text-emerald-900 shadow-2xs'
-                        : 'border-slate-200 text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className={`p-1.5 rounded-lg ${activo ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                      <Icon className="w-3.5 h-3.5" />
-                    </div>
-                    <span>{t.label}</span>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {gestionTabs.map((t) => {
+                  const Icon = t.icon
+                  const activo = tab === t.id
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => cambiar(t.id)}
+                      className={`flex cursor-pointer items-center gap-2.5 rounded-2xl border p-3 text-left font-bold transition-all ${
+                        activo
+                          ? 'border-emerald-400/40 bg-emerald-400/10 text-white'
+                          : 'border-white/[0.07] text-mist-300 hover:bg-white/[0.04]'
+                      }`}
+                    >
+                      <span className={`rounded-xl p-1.5 ${activo ? 'bg-emerald-400/25 text-emerald-200' : 'bg-white/[0.06] text-mist-500'}`}>
+                        <Icon className="h-3.5 w-3.5" />
+                      </span>
+                      <span>{t.label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }

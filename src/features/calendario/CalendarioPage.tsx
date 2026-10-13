@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -44,13 +45,13 @@ const ETIQUETA: Record<string, string> = {
 const DIAS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
 
 const COLOR_TIPO: Record<string, string> = {
-  soat: 'bg-red-50 text-red-700 border-red-200',
-  tecnicomecanica: 'bg-amber-50 text-amber-800 border-amber-200',
-  seguro_tr: 'bg-orange-50 text-orange-800 border-orange-200',
-  cuota_deuda: 'bg-sky-50 text-sky-800 border-sky-200',
-  prima_julio: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-  prima_diciembre: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-  personal: 'bg-slate-50 text-slate-700 border-slate-200',
+  soat: 'border-red-400/30 bg-red-400/10 text-red-200',
+  tecnicomecanica: 'border-amber-400/30 bg-amber-400/10 text-amber-200',
+  seguro_tr: 'border-orange-400/30 bg-orange-400/10 text-orange-200',
+  cuota_deuda: 'border-sky-400/30 bg-sky-400/10 text-sky-200',
+  prima_julio: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
+  prima_diciembre: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
+  personal: 'border-white/10 bg-white/[0.05] text-mist-300',
 }
 
 const HOY_ISO = new Date().toISOString().slice(0, 10)
@@ -238,57 +239,61 @@ export default function CalendarioPage() {
   const eventosDia = diaSel ? porDia[diaSel] ?? [] : []
 
   return (
-    <div className="container mx-auto p-2 sm:p-4 max-w-5xl space-y-4">
-      {/* HEADER CARD: GENERADOR INTELIGENTE */}
-      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
-        <div className="h-1.5 w-full gradient-brand-growth" />
-        <CardContent className="p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+    <motion.div
+      className="space-y-4"
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <Card className="glass-card overflow-hidden border-0">
+        <div className="h-1 w-full bg-gradient-to-r from-sky-500 via-teal-400 to-emerald-400" />
+        <CardContent className="flex flex-col items-start justify-between gap-3 p-4 sm:flex-row sm:items-center sm:p-5">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <CalendarIcon className="w-5 h-5 text-emerald-600" />
-              <h1 className="font-bold text-base text-slate-900">
-                Calendario de Vencimientos Financieros (Colombia)
+              <CalendarIcon className="h-5 w-5 text-emerald-300" />
+              <h1 className="text-base font-extrabold tracking-tight text-white">
+                Vencimientos financieros
               </h1>
             </div>
-            <p className="text-xs text-slate-500 max-w-xl">
-              Proyecta automáticamente fechas críticas: SOAT, Tecnicomecánica, Seguro Todo Riesgo, primas legales (junio/diciembre) y cuotas de préstamos.
+            <p className="max-w-xl text-xs leading-relaxed text-mist-500">
+              Proyecta fechas críticas: SOAT, Tecnicomecánica, Seguro Todo Riesgo, primas legales (junio/diciembre) y cuotas de préstamos.
             </p>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="flex w-full items-center gap-2 sm:w-auto">
             <Button
               size="sm"
               variant="outline"
               disabled={generando}
               onClick={previsualizar}
-              className="text-xs h-8.5 border-slate-200 flex-1 sm:flex-initial"
+              className="h-9 flex-1 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white sm:flex-initial"
             >
-              <Clock className="w-3.5 h-3.5 text-slate-500 mr-1.5" />
+              <Clock className="mr-1.5 h-3.5 w-3.5" />
               <span>Previsualizar</span>
             </Button>
             <Button
               size="sm"
               disabled={generando || !preview.length}
               onClick={guardar}
-              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8.5 px-3.5 flex-1 sm:flex-initial shadow-xs"
+              className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-3.5 text-xs font-bold text-[#04241a] hover:brightness-110 sm:flex-initial"
             >
-              <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+              <Sparkles className="mr-1.5 h-3.5 w-3.5" />
               <span>Guardar {preview.length ? `(${preview.length})` : ''}</span>
             </Button>
           </div>
         </CardContent>
 
         {(msg || error) && (
-          <div className="px-4 pb-3">
+          <div className="space-y-2 px-4 pb-3">
             {msg && (
-              <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-1.5 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-2 text-xs font-medium text-emerald-200">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                 <span>{msg}</span>
               </div>
             )}
             {error && (
-              <div className="p-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 font-medium flex items-center gap-1.5">
-                <AlertCircle className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-1.5 rounded-xl border border-red-400/25 bg-red-500/10 p-2 text-xs font-medium text-red-300">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                 <span>{error}</span>
               </div>
             )}
@@ -296,28 +301,26 @@ export default function CalendarioPage() {
         )}
       </Card>
 
-      {/* CUADRÍCULA DEL CALENDARIO MENSUAL */}
-      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
-        {/* Navegación del Mes */}
-        <CardHeader className="py-3 px-4 sm:px-6 border-b border-slate-100 flex flex-row items-center justify-between">
-          <CardTitle className="text-base font-extrabold text-slate-900 capitalize flex items-center gap-2">
+      <Card className="glass-card overflow-hidden border-0">
+        <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-3 sm:px-6">
+          <CardTitle className="flex items-center gap-2 text-base font-black tracking-tight text-white capitalize">
             <span>{etiquetaMes}</span>
           </CardTitle>
 
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5">
             <Button
               size="icon"
               variant="outline"
-              className="h-8 w-8 border-slate-200 text-slate-600"
+              className="h-8 w-8 cursor-pointer border-white/10 bg-transparent text-mist-300 hover:bg-white/5 hover:text-white"
               onClick={() => cambiarMes(-1)}
               title="Mes anterior"
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="h-4 w-4" />
             </Button>
             <Button
               size="sm"
               variant="outline"
-              className="h-8 px-2.5 text-xs font-semibold border-slate-200 text-slate-700"
+              className="h-8 cursor-pointer border-white/10 bg-transparent px-2.5 text-xs font-bold text-mist-300 hover:bg-white/5 hover:text-white"
               onClick={() => {
                 const hoy = new Date()
                 setMesVista(new Date(hoy.getFullYear(), hoy.getMonth(), 1))
@@ -329,18 +332,17 @@ export default function CalendarioPage() {
             <Button
               size="icon"
               variant="outline"
-              className="h-8 w-8 border-slate-200 text-slate-600"
+              className="h-8 w-8 cursor-pointer border-white/10 bg-transparent text-mist-300 hover:bg-white/5 hover:text-white"
               onClick={() => cambiarMes(1)}
               title="Mes siguiente"
             >
-              <ChevronRight className="w-4 h-4" />
+              <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
         </CardHeader>
 
-        <CardContent className="p-3 sm:p-5 space-y-2">
-          {/* Días de la semana */}
-          <div className="grid grid-cols-7 gap-1 text-center text-xs font-bold text-slate-500 py-1">
+        <CardContent className="space-y-2 p-3 sm:p-5">
+          <div className="grid grid-cols-7 gap-1 py-1 text-center text-[11px] font-black tracking-wider text-mist-600 uppercase">
             {DIAS.map((d) => (
               <div key={d} className="py-1">
                 {d}
@@ -348,10 +350,9 @@ export default function CalendarioPage() {
             ))}
           </div>
 
-          {/* Días del mes */}
           <div className="grid grid-cols-7 gap-1 sm:gap-1.5">
             {celdas.map((c, i) => {
-              if (!c) return <div key={`empty-${i}`} className="min-h-16 sm:min-h-20 rounded-xl bg-slate-50/40" />
+              if (!c) return <div key={`empty-${i}`} className="min-h-16 rounded-xl bg-white/[0.02] sm:min-h-20" />
               const evs = porDia[c.clave] ?? []
               const esHoy = c.clave === HOY_ISO
               const seleccionado = c.clave === diaSel
@@ -360,26 +361,26 @@ export default function CalendarioPage() {
                   type="button"
                   key={c.clave}
                   onClick={() => setDiaSel(seleccionado ? null : c.clave)}
-                  className={`min-h-16 sm:min-h-20 rounded-xl border p-1 sm:p-1.5 text-left align-top transition-all cursor-pointer ${
+                  className={`min-h-16 cursor-pointer rounded-xl border p-1 align-top transition-all sm:min-h-20 sm:p-1.5 ${
                     seleccionado
-                      ? 'border-emerald-500 bg-emerald-50/50 shadow-2xs'
+                      ? 'border-emerald-400/50 bg-emerald-400/10 shadow-[0_0_24px_-8px_rgba(16,185,129,0.5)]'
                       : esHoy
-                      ? 'border-slate-300 bg-sky-50/30'
-                      : 'border-slate-200/80 bg-white hover:bg-slate-50'
+                      ? 'border-sky-400/30 bg-sky-400/[0.07]'
+                      : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.14] hover:bg-white/[0.05]'
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="mb-1 flex items-center justify-between">
                     <span
-                      className={`text-xs font-bold ${
+                      className={`text-xs font-black ${
                         esHoy
-                          ? 'inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#0A2540] text-emerald-400 text-[11px]'
-                          : 'text-slate-600'
+                          ? 'inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-400 text-[11px] text-[#04241a]'
+                          : 'text-mist-300'
                       }`}
                     >
                       {c.dia}
                     </span>
                     {evs.length > 0 && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                     )}
                   </div>
 
@@ -387,8 +388,8 @@ export default function CalendarioPage() {
                     {evs.slice(0, 2).map((e) => (
                       <div
                         key={e.id}
-                        className={`truncate rounded-md border px-1 py-0.2 text-[9px] sm:text-[10px] font-semibold leading-tight ${
-                          COLOR_TIPO[e.tipo] ?? 'bg-slate-50 text-slate-700 border-slate-200'
+                        className={`truncate rounded-md border px-1 py-0.5 text-[9px] font-bold leading-tight sm:text-[10px] ${
+                          COLOR_TIPO[e.tipo] ?? 'border-white/10 bg-white/[0.05] text-mist-300'
                         }`}
                         title={e.titulo}
                       >
@@ -396,7 +397,7 @@ export default function CalendarioPage() {
                       </div>
                     ))}
                     {evs.length > 2 && (
-                      <div className="text-[9px] font-bold text-slate-400 pl-0.5">
+                      <div className="pl-0.5 text-[9px] font-bold text-mist-600">
                         +{evs.length - 2} más
                       </div>
                     )}
@@ -406,161 +407,164 @@ export default function CalendarioPage() {
             })}
           </div>
 
-          {/* DETALLE DEL DÍA SELECCIONADO */}
           {diaSel && (
-            <div className="mt-3 p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 animate-in fade-in space-y-2">
-              <div className="text-xs font-bold text-emerald-950 flex items-center justify-between">
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-3 space-y-2 rounded-2xl border border-emerald-400/25 bg-emerald-400/[0.07] p-3.5"
+            >
+              <div className="flex items-center justify-between text-xs font-bold text-white">
                 <span>Eventos del {diaSel}</span>
-                <span className="text-[11px] font-normal text-emerald-800">
+                <span className="text-[11px] font-medium text-emerald-300">
                   {eventosDia.length} programados
                 </span>
               </div>
 
               {eventosDia.length === 0 ? (
-                <div className="text-xs text-slate-500 py-1">Sin eventos programados para este día.</div>
+                <div className="py-1 text-xs text-mist-500">Sin eventos programados para este día.</div>
               ) : (
-                <ul className="divide-y divide-emerald-100/70 text-xs">
+                <ul className="divide-y divide-white/[0.06] text-xs">
                   {eventosDia.map((e) => (
                     <li key={e.id} className="flex items-center justify-between gap-2 py-2">
                       <div>
-                        <span className="font-bold text-slate-900">{e.titulo}</span>
-                        <span className="text-slate-500 text-[11px]"> · {ETIQUETA[e.tipo] ?? e.tipo}</span>
+                        <span className="font-bold text-white">{e.titulo}</span>
+                        <span className="text-[11px] text-mist-500"> · {ETIQUETA[e.tipo] ?? e.tipo}</span>
                         {e.descripcion && (
-                          <div className="text-[11px] text-slate-500 mt-0.5">{e.descripcion}</div>
+                          <div className="mt-0.5 text-[11px] text-mist-500">{e.descripcion}</div>
                         )}
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex shrink-0 items-center gap-1">
                         <Button
                           size="icon"
                           variant="ghost"
-                          className="h-7 w-7 text-slate-500 hover:text-slate-900"
+                          className="h-7 w-7 cursor-pointer text-mist-500 hover:bg-white/[0.06] hover:text-white"
                           onClick={() => abrirEdicion(e)}
                           title="Editar"
                         >
-                          <Edit2 className="w-3.5 h-3.5" />
+                          <Edit2 className="h-3.5 w-3.5" />
                         </Button>
                         <Button
                           size="icon"
                           variant="ghost"
-                          className="h-7 w-7 text-slate-500 hover:text-red-700"
+                          className="h-7 w-7 cursor-pointer text-mist-500 hover:bg-red-500/10 hover:text-red-300"
                           onClick={() => borrarEvento(e.id)}
                           title="Eliminar"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     </li>
                   ))}
                 </ul>
               )}
-            </div>
+            </motion.div>
           )}
         </CardContent>
       </Card>
 
-      {/* FORMULARIO DE EDICIÓN DE EVENTO */}
       {form && (
-        <Card className="border-emerald-300 bg-emerald-50/20 shadow-md">
-          <CardHeader className="py-3 px-4 border-b border-emerald-100">
-            <CardTitle className="text-sm font-bold text-emerald-950 flex items-center gap-2">
-              <Edit2 className="w-4 h-4 text-emerald-600" />
-              <span>Modificar Evento del Calendario</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-4 space-y-3 text-xs">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <label className="flex flex-col gap-1">
-                <span className="font-semibold text-slate-700">Fecha</span>
-                <Input
-                  type="date"
-                  value={form.fecha}
-                  onChange={(e) => setForm({ ...form, fecha: e.target.value })}
-                  className="h-8 text-xs bg-white border-slate-200"
-                />
-              </label>
+        <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} transition={{ type: 'spring', stiffness: 300, damping: 28 }}>
+          <Card className="border border-emerald-400/25 bg-emerald-400/[0.06]">
+            <CardHeader className="border-b border-white/[0.06] px-4 py-3">
+              <CardTitle className="flex items-center gap-2 text-sm font-bold text-white">
+                <Edit2 className="h-4 w-4 text-emerald-300" />
+                <span>Modificar evento</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 p-4 text-xs">
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <label className="flex flex-col gap-1">
+                  <span className="font-bold text-mist-300">Fecha</span>
+                  <Input
+                    type="date"
+                    value={form.fecha}
+                    onChange={(e) => setForm({ ...form, fecha: e.target.value })}
+                    className="field-dark h-9 text-xs shadow-none"
+                  />
+                </label>
 
-              <label className="flex flex-col gap-1">
-                <span className="font-semibold text-slate-700">Tipo</span>
-                <select
-                  className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
-                  value={form.tipo}
-                  onChange={(e) => setForm({ ...form, tipo: e.target.value as TipoEvento })}
+                <label className="flex flex-col gap-1">
+                  <span className="font-bold text-mist-300">Tipo</span>
+                  <select
+                    className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
+                    value={form.tipo}
+                    onChange={(e) => setForm({ ...form, tipo: e.target.value as TipoEvento })}
+                  >
+                    {Object.keys(ETIQUETA).map((k) => (
+                      <option key={k} value={k}>
+                        {ETIQUETA[k]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="flex flex-col gap-1 sm:col-span-2">
+                  <span className="font-bold text-mist-300">Título</span>
+                  <Input
+                    value={form.titulo}
+                    onChange={(e) => setForm({ ...form, titulo: e.target.value })}
+                    className="field-dark h-9 text-xs shadow-none"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-1 sm:col-span-2">
+                  <span className="font-bold text-mist-300">Descripción</span>
+                  <Input
+                    value={form.descripcion}
+                    onChange={(e) => setForm({ ...form, descripcion: e.target.value })}
+                    className="field-dark h-9 text-xs shadow-none"
+                  />
+                </label>
+              </div>
+
+              <div className="flex gap-2 border-t border-white/[0.06] pt-3">
+                <Button
+                  size="sm"
+                  className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 text-xs font-bold text-[#04241a] hover:brightness-110"
+                  disabled={guardando}
+                  onClick={guardarEdicion}
                 >
-                  {Object.keys(ETIQUETA).map((k) => (
-                    <option key={k} value={k}>
-                      {ETIQUETA[k]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="sm:col-span-2 flex flex-col gap-1">
-                <span className="font-semibold text-slate-700">Título</span>
-                <Input
-                  value={form.titulo}
-                  onChange={(e) => setForm({ ...form, titulo: e.target.value })}
-                  className="h-8 text-xs bg-white border-slate-200"
-                />
-              </label>
-
-              <label className="sm:col-span-2 flex flex-col gap-1">
-                <span className="font-semibold text-slate-700">Descripción</span>
-                <Input
-                  value={form.descripcion}
-                  onChange={(e) => setForm({ ...form, descripcion: e.target.value })}
-                  className="h-8 text-xs bg-white border-slate-200"
-                />
-              </label>
-            </div>
-
-            <div className="flex gap-2 pt-2 border-t border-slate-100">
-              <Button
-                size="sm"
-                className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8 gap-1.5"
-                disabled={guardando}
-                onClick={guardarEdicion}
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>{guardando ? 'Guardando...' : 'Guardar Cambios'}</span>
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="text-xs h-8 border-slate-200"
-                disabled={guardando}
-                onClick={cerrarEdicion}
-              >
-                Cancelar
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  <span>{guardando ? 'Guardando...' : 'Guardar cambios'}</span>
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white"
+                  disabled={guardando}
+                  onClick={cerrarEdicion}
+                >
+                  Cancelar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </motion.div>
       )}
 
-      {/* CREAR EVENTO MANUAL */}
-      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
-        <CardHeader className="py-3 px-4 border-b border-slate-100">
-          <CardTitle className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <PlusCircle className="w-4 h-4 text-emerald-600" />
-            <span>Crear Evento o Recordatorio Manual</span>
+      <Card className="glass-card overflow-hidden border-0">
+        <CardHeader className="border-b border-white/[0.06] px-4 py-3">
+          <CardTitle className="flex items-center gap-2 text-sm font-extrabold text-white">
+            <PlusCircle className="h-4 w-4 text-emerald-300" />
+            <span>Crear evento manual</span>
           </CardTitle>
         </CardHeader>
-        <CardContent className="p-4 space-y-3 text-xs">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <CardContent className="space-y-3 p-4 text-xs">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <label className="flex flex-col gap-1">
-              <span className="font-semibold text-slate-700">Fecha</span>
+              <span className="font-bold text-mist-300">Fecha</span>
               <Input
                 type="date"
                 value={nuevo.fecha}
                 onChange={(e) => setNuevo({ ...nuevo, fecha: e.target.value })}
-                className="h-8 text-xs bg-white border-slate-200"
+                className="field-dark h-9 text-xs shadow-none"
               />
             </label>
 
             <label className="flex flex-col gap-1">
-              <span className="font-semibold text-slate-700">Tipo de Evento</span>
+              <span className="font-bold text-mist-300">Tipo de evento</span>
               <select
-                className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
+                className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
                 value={nuevo.tipo}
                 onChange={(e) => setNuevo({ ...nuevo, tipo: e.target.value as TipoEvento })}
               >
@@ -572,23 +576,23 @@ export default function CalendarioPage() {
               </select>
             </label>
 
-            <label className="sm:col-span-2 flex flex-col gap-1">
-              <span className="font-semibold text-slate-700">Título del Recordatorio</span>
+            <label className="flex flex-col gap-1 sm:col-span-2">
+              <span className="font-bold text-mist-300">Título del recordatorio</span>
               <Input
                 value={nuevo.titulo}
                 onChange={(e) => setNuevo({ ...nuevo, titulo: e.target.value })}
                 placeholder="Ej: Pago de predial, Mantenimiento preventivo..."
-                className="h-8 text-xs bg-white border-slate-200"
+                className="field-dark h-9 text-xs shadow-none"
               />
             </label>
 
-            <label className="sm:col-span-2 flex flex-col gap-1">
-              <span className="font-semibold text-slate-700">Descripción (opcional)</span>
+            <label className="flex flex-col gap-1 sm:col-span-2">
+              <span className="font-bold text-mist-300">Descripción (opcional)</span>
               <Input
                 value={nuevo.descripcion}
                 onChange={(e) => setNuevo({ ...nuevo, descripcion: e.target.value })}
                 placeholder="Notas adicionales..."
-                className="h-8 text-xs bg-white border-slate-200"
+                className="field-dark h-9 text-xs shadow-none"
               />
             </label>
           </div>
@@ -598,13 +602,13 @@ export default function CalendarioPage() {
               size="sm"
               disabled={creando || !nuevo.fecha || !nuevo.titulo.trim()}
               onClick={crearManual}
-              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8 px-4 gap-1.5 shadow-xs"
+              className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
-              <span>{creando ? 'Creando...' : 'Crear Recordatorio'}</span>
+              <span>{creando ? 'Creando...' : 'Crear recordatorio'}</span>
             </Button>
           </div>
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   )
 }

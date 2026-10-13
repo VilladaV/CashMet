@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { exportarBackup, importarBackup } from '@/lib/firebase/backup'
@@ -48,23 +49,27 @@ export default function BackupPage() {
   }
 
   return (
-    <div className="container mx-auto p-2 sm:p-4 max-w-4xl space-y-4">
-      <Card className="glass-card shadow-sm border-slate-200/90 overflow-hidden">
-        <div className="h-1.5 w-full gradient-brand-growth" />
-        <CardHeader className="py-4 px-4 sm:px-6 border-b border-slate-100 flex flex-row items-center justify-between">
-          <CardTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
-            <Database className="w-5 h-5 text-emerald-600" />
-            <span>Copia de Seguridad y Restauración de Datos</span>
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <Card className="glass-card overflow-hidden border-0">
+        <div className="h-1 w-full bg-gradient-to-r from-sky-500 via-teal-400 to-emerald-400" />
+        <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-4 sm:px-6">
+          <CardTitle className="flex items-center gap-2 text-base font-extrabold text-white">
+            <Database className="h-5 w-5 text-emerald-300" />
+            <span>Copia de seguridad</span>
           </CardTitle>
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Formato JSON Puro</span>
+          <div className="flex items-center gap-1.5 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-xs font-bold text-emerald-300">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            <span>JSON puro</span>
           </div>
         </CardHeader>
 
-        <CardContent className="p-4 sm:p-6 space-y-4 text-xs">
-          <p className="text-slate-600 leading-relaxed text-sm">
-            Exporta una instantánea completa de tu base de datos financiera: cuentas bancarias, deudas, vehículos, propiedades, trabajadores de nómina, gastos recurrentes fijos, movimientos y calendario de vencimientos. Puedes guardarla localmente o restaurarla en cualquier momento.
+        <CardContent className="space-y-4 p-4 text-xs sm:p-6">
+          <p className="text-sm leading-relaxed text-mist-500">
+            Exporta una instantánea completa de tu base de datos: cuentas, deudas, vehículos, propiedades, nómina, recurrentes, movimientos y calendario. Guárdala localmente o restáurala cuando quieras.
           </p>
 
           <div className="flex flex-wrap gap-2.5 pt-1">
@@ -72,10 +77,10 @@ export default function BackupPage() {
               size="sm"
               disabled={busy}
               onClick={descargar}
-              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-9 px-4 gap-2 shadow-xs cursor-pointer"
+              className="h-10 cursor-pointer gap-2 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
-              <Download className="w-4 h-4" />
-              <span>{busy ? 'Generando...' : 'Descargar Copia de Seguridad (.json)'}</span>
+              <Download className="h-4 w-4" />
+              <span>{busy ? 'Generando...' : 'Descargar copia (.json)'}</span>
             </Button>
 
             <Button
@@ -83,10 +88,10 @@ export default function BackupPage() {
               variant="outline"
               disabled={busy}
               onClick={() => fileRef.current?.click()}
-              className="text-xs h-9 px-4 border-slate-200 text-slate-700 hover:bg-slate-100 gap-2 cursor-pointer"
+              className="h-10 cursor-pointer gap-2 border-white/10 bg-transparent px-4 text-xs text-mist-300 hover:bg-white/5 hover:text-white"
             >
-              <Upload className="w-4 h-4 text-slate-500" />
-              <span>Restaurar desde Archivo JSON</span>
+              <Upload className="h-4 w-4" />
+              <span>Restaurar desde archivo</span>
             </Button>
 
             <input
@@ -102,20 +107,20 @@ export default function BackupPage() {
           </div>
 
           {msg && (
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-3 font-bold text-emerald-200">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" />
               <span>{msg}</span>
             </div>
           )}
 
           {error && (
-            <div className="flex items-center gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 font-medium">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-3 font-medium text-red-300">
+              <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
           )}
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   )
 }

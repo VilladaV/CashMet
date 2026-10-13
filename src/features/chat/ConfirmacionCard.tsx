@@ -29,34 +29,32 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
   const esIngreso = tipo === 'ingreso'
 
   return (
-    <div className="rounded-xl border border-emerald-200/90 bg-white p-4 space-y-3 shadow-md">
-      {/* Cabecera del borrador */}
-      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+    <div className="space-y-3 rounded-2xl border border-emerald-400/25 bg-gradient-to-b from-emerald-400/[0.1] to-transparent p-4">
+      <div className="flex items-center justify-between gap-2 border-b border-white/[0.07] pb-2.5">
         <div className="flex items-center gap-2">
-          <div className={`p-1.5 rounded-lg ${esIngreso ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-            {esIngreso ? <ArrowDownLeft className="w-4 h-4" /> : <ArrowUpRight className="w-4 h-4" />}
+          <div className={`rounded-xl p-1.5 ${esIngreso ? 'bg-emerald-400/20 text-emerald-300' : 'bg-red-400/20 text-red-300'}`}>
+            {esIngreso ? <ArrowDownLeft className="h-4 w-4" /> : <ArrowUpRight className="h-4 w-4" />}
           </div>
           <div>
-            <div className="font-bold text-xs text-slate-900">Confirmar Movimiento</div>
-            <div className="text-[11px] text-slate-500">Revisa o ajusta antes de guardar en Firestore</div>
+            <div className="text-xs font-extrabold text-white">Confirmar movimiento</div>
+            <div className="text-[11px] text-mist-500">Revisa o ajusta antes de guardar</div>
           </div>
         </div>
 
-        <div className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-          esIngreso ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'
+        <div className={`rounded-full border px-2.5 py-1 text-xs font-black ${
+          esIngreso
+            ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+            : 'border-red-400/30 bg-red-400/10 text-red-200'
         }`}>
           ${montoNum.toLocaleString('es-CO')} COP
         </div>
       </div>
 
-      {/* Formulario editable */}
       <div className="grid grid-cols-2 gap-2 text-xs">
         <label className="flex flex-col gap-1">
-          <span className="font-semibold text-slate-600 flex items-center gap-1">
-            Tipo
-          </span>
+          <span className="font-bold text-mist-300">Tipo</span>
           <select
-            className="h-8 rounded-lg border border-slate-200 bg-slate-50/70 px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
+            className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
             value={tipo}
             onChange={(e) => setTipo(e.target.value as 'gasto' | 'ingreso')}
           >
@@ -66,39 +64,39 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="font-semibold text-slate-600 flex items-center gap-1">
-            <CalendarIcon className="w-3 h-3 text-slate-400" /> Fecha
+          <span className="flex items-center gap-1 font-bold text-mist-300">
+            <CalendarIcon className="h-3 w-3 text-mist-600" /> Fecha
           </span>
           <Input
             type="date"
             value={fecha}
             onChange={(e) => setFecha(e.target.value)}
-            className="h-8 text-xs bg-slate-50/70 border-slate-200 focus-visible:ring-emerald-500"
+            className="field-dark h-9 text-xs shadow-none"
           />
         </label>
 
         <label className="col-span-2 flex flex-col gap-1">
-          <span className="font-semibold text-slate-600">Concepto</span>
+          <span className="font-bold text-mist-300">Concepto</span>
           <Input
             value={concepto}
             onChange={(e) => setConcepto(e.target.value)}
             placeholder="Ej: Almuerzo, Mercado, Gasolina..."
-            className="h-8 text-xs bg-slate-50/70 border-slate-200 focus-visible:ring-emerald-500"
+            className="field-dark h-9 text-xs shadow-none"
           />
         </label>
 
         <label className="flex flex-col gap-1">
-          <span className="font-semibold text-slate-600">Monto (COP)</span>
+          <span className="font-bold text-mist-300">Monto (COP)</span>
           <Input
             inputMode="numeric"
             value={monto}
             onChange={(e) => setMonto(e.target.value)}
-            className="h-8 text-xs bg-slate-50/70 border-slate-200 focus-visible:ring-emerald-500 font-semibold"
+            className="field-dark h-9 text-xs font-bold shadow-none"
           />
         </label>
 
         {borrador.moneda && borrador.montoOriginal != null && (
-          <p className="col-span-2 -mt-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+          <p className="col-span-2 -mt-1 rounded-lg bg-amber-400/10 px-2 py-1.5 text-[11px] font-semibold text-amber-200">
             Monto original: {borrador.moneda} {borrador.montoOriginal.toLocaleString('es-CO')}
             {borrador.tasaCambio
               ? ` · tasa: 1 ${borrador.moneda} = $${borrador.tasaCambio.toLocaleString('es-CO', {
@@ -109,22 +107,22 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         )}
 
         <label className="flex flex-col gap-1">
-          <span className="font-semibold text-slate-600 flex items-center gap-1">
-            <Tag className="w-3 h-3 text-slate-400" /> Categoría
+          <span className="flex items-center gap-1 font-bold text-mist-300">
+            <Tag className="h-3 w-3 text-mist-600" /> Categoría
           </span>
           <Input
             value={categoria}
             onChange={(e) => setCategoria(e.target.value)}
-            className="h-8 text-xs bg-slate-50/70 border-slate-200 focus-visible:ring-emerald-500"
+            className="field-dark h-9 text-xs shadow-none"
           />
         </label>
 
         <label className="col-span-2 flex flex-col gap-1">
-          <span className="font-semibold text-slate-600 flex items-center gap-1">
-            <Wallet className="w-3 h-3 text-slate-400" /> Afectar cuenta bancaria
+          <span className="flex items-center gap-1 font-bold text-mist-300">
+            <Wallet className="h-3 w-3 text-mist-600" /> Afectar cuenta bancaria
           </span>
           <select
-            className="h-8 rounded-lg border border-slate-200 bg-slate-50/70 px-2 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
+            className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
             value={cuentaBancoId}
             onChange={(e) => setCuentaBancoId(e.target.value)}
           >
@@ -138,11 +136,10 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         </label>
       </div>
 
-      {/* Botones de acción */}
-      <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
+      <div className="flex items-center gap-2 border-t border-white/[0.07] pt-2.5">
         <Button
           size="sm"
-          className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8 gap-1.5 shadow-xs"
+          className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 text-xs font-bold text-[#04241a] hover:brightness-110"
           disabled={guardando || montoNum <= 0 || !concepto.trim()}
           onClick={() =>
             onConfirm({
@@ -155,18 +152,18 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
             })
           }
         >
-          <CheckCircle2 className="w-3.5 h-3.5" />
-          <span>{guardando ? 'Guardando en BD...' : 'Confirmar y Guardar'}</span>
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          <span>{guardando ? 'Guardando...' : 'Confirmar y guardar'}</span>
         </Button>
 
         <Button
           size="sm"
           variant="outline"
-          className="text-xs h-8 text-slate-600 hover:bg-slate-100 border-slate-200 gap-1"
+          className="h-9 cursor-pointer gap-1 border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white"
           disabled={guardando}
           onClick={onCancel}
         >
-          <XCircle className="w-3.5 h-3.5 text-slate-400" />
+          <XCircle className="h-3.5 w-3.5" />
           <span>Descartar</span>
         </Button>
       </div>

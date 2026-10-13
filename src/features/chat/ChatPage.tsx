@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -21,8 +22,9 @@ import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
+import { lineaTasasContexto } from '@/lib/fx'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
-import { Send, Sparkles, CheckCircle2, AlertCircle, User, Trash2 } from 'lucide-react'
+import { Send, Sparkles, CheckCircle2, AlertCircle, User, Trash2, ArrowLeftRight, MessagesSquare, Zap } from 'lucide-react'
 
 interface Msg {
   id: number
@@ -106,6 +108,7 @@ export default function ChatPage() {
   const [guardandoId, setGuardandoId] = useState<number | null>(null)
   const [pensando, setPensando] = useState(false)
   const [error, setError] = useState('')
+  const [tasas, setTasas] = useState<string[]>([])
   const idRef = useRef(1)
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -132,6 +135,11 @@ export default function ChatPage() {
     listarCuentasBanco()
       .then(setCuentas)
       .catch(() => setError('No se pudieron cargar las cuentas bancarias.'))
+    lineaTasasContexto()
+      .then((t) => {
+        if (t) setTasas(t.split('\n').filter((l) => l.startsWith('- ')))
+      })
+      .catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -493,24 +501,27 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="container mx-auto p-2 sm:p-4 max-w-4xl space-y-3">
-      {/* TARJETA PRINCIPAL DEL CHAT */}
-      <Card className="glass-card shadow-lg border-slate-200/90 overflow-hidden">
-        {/* Header del Chat */}
-        <div className="gradient-brand-navy p-3.5 sm:p-4 text-white flex items-center justify-between">
+    <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
+      {/* COLUMNA DEL CHAT */}
+      <Card className="glass-card surface-glow overflow-hidden border-0">
+        <div className="flex items-center justify-between border-b border-white/[0.07] bg-white/[0.02] p-3.5 sm:p-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/20 shadow-xs">
+            <motion.div
+              className="flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-400/25 bg-gradient-to-br from-emerald-400/25 to-sky-500/15"
+              animate={{ boxShadow: ['0 0 0 0 rgba(52,211,153,0)', '0 0 24px 2px rgba(52,211,153,0.35)', '0 0 0 0 rgba(52,211,153,0)'] }}
+              transition={{ duration: 3.2, repeat: Infinity, ease: 'easeInOut' }}
+            >
               <CashMetEmblem size={26} />
-            </div>
+            </motion.div>
             <div>
-              <div className="font-bold text-sm sm:text-base flex items-center gap-2">
+              <div className="flex items-center gap-2 text-sm font-extrabold text-white sm:text-base">
                 <span>{NOMBRE_IA}</span>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
                   {geminiDisponible ? 'IA Gemini' : 'IA local'}
                 </span>
               </div>
-              <div className="text-[11px] text-slate-300 flex items-center gap-1.5 mt-0.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-live" />
+              <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-mist-500">
+                <span className="animate-pulse-live h-1.5 w-1.5 rounded-full bg-emerald-400" />
                 <span>Tu contadora personal · recuerda la conversación</span>
               </div>
             </div>
@@ -518,116 +529,126 @@ export default function ChatPage() {
           <button
             onClick={limpiarChat}
             title="Nueva conversación"
-            className="p-2 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 text-white/90 transition-colors cursor-pointer active:scale-95"
+            className="cursor-pointer rounded-xl border border-white/10 bg-white/[0.04] p-2 text-mist-300 transition-all hover:bg-white/10 hover:text-white active:scale-95"
           >
-            <Trash2 className="w-4 h-4" />
+            <Trash2 className="h-4 w-4" />
           </button>
         </div>
 
-        <CardContent className="p-3 sm:p-4 space-y-3">
-          {/* Área de mensajes con scroll */}
-          <div className="h-[460px] sm:h-[500px] overflow-y-auto rounded-xl p-3 sm:p-4 bg-slate-50/70 border border-slate-200/80 text-sm space-y-3">
-            {msgs.map((m) => (
-              <div
-                key={m.id}
-                className={`flex gap-2.5 items-end ${m.rol === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {/* Avatar del Asistente */}
-                {m.rol === 'ia' && (
-                  <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 shadow-2xs flex items-center justify-center shrink-0 mb-1">
-                    <CashMetEmblem size={18} />
-                  </div>
-                )}
-
-                <div className={`max-w-[88%] sm:max-w-[80%] ${m.borrador && m.estado === 'pendiente' ? 'w-full' : ''}`}>
-                  {/* Burbuja del mensaje */}
-                  <div
-                    className={`rounded-2xl px-4 py-2.5 shadow-2xs leading-relaxed whitespace-pre-wrap ${
-                      m.rol === 'user'
-                        ? 'gradient-brand-navy text-white rounded-br-xs font-medium'
-                        : 'bg-white border border-slate-200/90 text-slate-800 rounded-bl-xs'
-                    }`}
-                  >
-                    {m.rol === 'ia' ? <TextoEnriquecido texto={m.texto} /> : m.texto}
-                  </div>
-
-                  {/* Tarjeta de Confirmación de Movimiento */}
-                  {m.borrador && m.estado === 'pendiente' && (
-                    <div className="mt-2 animate-in fade-in slide-in-from-top-2">
-                      <ConfirmacionCard
-                        borrador={m.borrador}
-                        cuentas={cuentas}
-                        guardando={guardandoId === m.id}
-                        onConfirm={(data) => confirmar(m.id, data)}
-                        onCancel={() => cancelar(m.id)}
-                      />
+        <CardContent className="space-y-3 p-3 sm:p-4">
+          <div className="slim-scroll h-[480px] space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-black/25 p-3 text-sm sm:h-[520px] sm:p-5">
+            <AnimatePresence initial={false}>
+              {msgs.map((m) => (
+                <motion.div
+                  key={m.id}
+                  layout="position"
+                  initial={{ opacity: 0, y: 16, scale: 0.99 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+                  className={`flex items-end gap-2.5 ${m.rol === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  {m.rol === 'ia' && (
+                    <div className="mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.05]">
+                      <CashMetEmblem size={18} />
                     </div>
                   )}
 
-                  {/* Estado de guardado / cancelado */}
-                  {m.estado === 'guardado' && (
-                    <div className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 mt-1 pl-1">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Movimiento registrado y saldo actualizado</span>
+                  <div className={`max-w-[88%] sm:max-w-[80%] ${m.borrador && m.estado === 'pendiente' ? 'w-full' : ''}`}>
+                    <div
+                      className={`rounded-2xl px-4 py-2.5 leading-relaxed whitespace-pre-wrap ${
+                        m.rol === 'user'
+                          ? 'rounded-br-md bg-gradient-to-br from-emerald-400 to-teal-500 font-medium text-[#04241a] shadow-[0_8px_24px_-8px_rgba(16,185,129,0.6)]'
+                          : 'rounded-bl-md border border-white/[0.08] bg-white/[0.05] text-mist-100'
+                      }`}
+                    >
+                      {m.rol === 'ia' ? <TextoEnriquecido texto={m.texto} /> : m.texto}
                     </div>
-                  )}
 
-                  {m.estado === 'cancelado' && (
-                    <div className="text-[11px] text-slate-400 mt-1 pl-1">Movimiento descartado</div>
-                  )}
+                    <AnimatePresence initial={false}>
+                      {m.borrador && m.estado === 'pendiente' && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -8, scale: 0.99 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.98 }}
+                          transition={{ type: 'spring', stiffness: 300, damping: 28 }}
+                          className="mt-2"
+                        >
+                          <ConfirmacionCard
+                            borrador={m.borrador}
+                            cuentas={cuentas}
+                            guardando={guardandoId === m.id}
+                            onConfirm={(data) => confirmar(m.id, data)}
+                            onCancel={() => cancelar(m.id)}
+                          />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
 
-                  {m.timestamp && (
-                    <div className={`text-[10px] text-slate-400 mt-0.5 px-1 ${m.rol === 'user' ? 'text-right' : 'text-left'}`}>
-                      {m.timestamp}
-                    </div>
-                  )}
-                </div>
+                    {m.estado === 'guardado' && (
+                      <div className="mt-1 flex items-center gap-1 pl-1 text-[11px] font-bold text-emerald-300">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        <span>Movimiento registrado y saldo actualizado</span>
+                      </div>
+                    )}
 
-                {/* Avatar del usuario */}
-                {m.rol === 'user' && (
-                  <div className="w-7 h-7 rounded-lg gradient-brand-growth flex items-center justify-center text-white shrink-0 mb-1 shadow-2xs">
-                    <User className="w-3.5 h-3.5" />
+                    {m.estado === 'cancelado' && (
+                      <div className="mt-1 pl-1 text-[11px] text-mist-600">Movimiento descartado</div>
+                    )}
+
+                    {m.timestamp && (
+                      <div className={`mt-0.5 px-1 text-[10px] text-mist-600 ${m.rol === 'user' ? 'text-right' : 'text-left'}`}>
+                        {m.timestamp}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
 
-            {/* Indicador de "escribiendo" */}
+                  {m.rol === 'user' && (
+                    <div className="mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-400/30 to-emerald-400/30 text-white">
+                      <User className="h-3.5 w-3.5" />
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+
             {pensando && (
-              <div className="flex gap-2.5 items-end justify-start">
-                <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 shadow-2xs flex items-center justify-center shrink-0 mb-1">
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-end justify-start gap-2.5"
+              >
+                <div className="mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/[0.05]">
                   <CashMetEmblem size={18} />
                 </div>
-                <div className="rounded-2xl rounded-bl-xs px-4 py-3 bg-white border border-slate-200/90 shadow-2xs flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:-0.3s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce [animation-delay:-0.15s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce" />
+                <div className="flex items-center gap-1.5 rounded-2xl rounded-bl-md border border-white/[0.08] bg-white/[0.05] px-4 py-3.5">
+                  <span className="typing-dot h-1.5 w-1.5 rounded-full bg-emerald-300" />
+                  <span className="typing-dot h-1.5 w-1.5 rounded-full bg-emerald-300 [animation-delay:0.2s]" />
+                  <span className="typing-dot h-1.5 w-1.5 rounded-full bg-emerald-300 [animation-delay:0.4s]" />
+                  <span className="ml-1 text-[11px] font-semibold text-mist-500">Lucía está escribiendo…</span>
                 </div>
-              </div>
+              </motion.div>
             )}
             <div ref={bottomRef} />
           </div>
 
-          {/* Errores */}
           {error && (
-            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 text-red-700 border border-red-200 text-xs">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 text-xs text-red-300">
+              <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
           )}
 
-          {/* Chips de Sugerencias Rápidas */}
           <div className="space-y-1.5 pt-1">
-            <div className="text-[11px] font-semibold text-slate-500 flex items-center gap-1.5">
-              <Sparkles className="w-3 h-3 text-emerald-600" />
-              <span>Sugerencias rápidas:</span>
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-mist-500">
+              <Sparkles className="h-3 w-3 text-emerald-300" />
+              <span>Sugerencias rápidas</span>
             </div>
             <div className="flex flex-wrap gap-1.5">
               {SUGERENCIAS.map((s) => (
                 <button
                   key={s}
                   onClick={() => setMsg(s)}
-                  className="px-2.5 py-1 rounded-full text-xs bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200/90 hover:border-emerald-300 transition-all shadow-2xs cursor-pointer active:scale-95"
+                  className="cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-mist-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-400/10 hover:text-emerald-200 active:scale-95"
                 >
                   {s}
                 </button>
@@ -635,26 +656,83 @@ export default function ChatPage() {
             </div>
           </div>
 
-          {/* Barra de entrada de texto */}
           <div className="flex gap-2 pt-1">
             <Input
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
               placeholder="Ej: gasté 35.000 en gasolina y me regalaron 20.000..."
               onKeyDown={(e) => e.key === 'Enter' && send()}
-              className="h-11 rounded-xl bg-white border-slate-200 focus-visible:ring-emerald-500 text-sm shadow-2xs"
+              className="field-dark h-12 rounded-2xl text-sm shadow-none"
             />
-            <Button
-              onClick={send}
-              disabled={pensando}
-              className="h-11 px-4 rounded-xl gradient-brand-navy hover:opacity-90 text-white font-semibold flex items-center gap-1.5 shadow-xs shrink-0 transition-transform active:scale-95 disabled:opacity-60"
-            >
-              <Send className="w-4 h-4" />
-              <span className="hidden sm:inline">Enviar</span>
-            </Button>
+            <motion.div whileTap={{ scale: 0.94 }} className="shrink-0">
+              <Button
+                onClick={send}
+                disabled={pensando}
+                className="h-12 cursor-pointer rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-400 px-4 font-bold text-[#04241a] shadow-[0_8px_24px_-8px_rgba(16,185,129,0.7)] hover:brightness-110 disabled:opacity-60"
+              >
+                <Send className="h-4 w-4" />
+                <span className="hidden sm:inline">Enviar</span>
+              </Button>
+            </motion.div>
           </div>
         </CardContent>
       </Card>
+
+      {/* PANEL LATERAL: PULSO */}
+      <aside className="hidden space-y-4 xl:block">
+        <Card className="glass-card overflow-hidden border-0">
+          <CardContent className="space-y-3 p-4">
+            <div className="flex items-center gap-2 text-xs font-black tracking-wider text-white uppercase">
+              <ArrowLeftRight className="h-3.5 w-3.5 text-emerald-300" />
+              <span>Tasas del día</span>
+            </div>
+            {tasas.length ? (
+              <ul className="space-y-1.5">
+                {tasas.map((t) => (
+                  <li
+                    key={t}
+                    className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-2 text-xs font-semibold text-mist-300"
+                  >
+                    {t.replace(/^-\s*/, '')}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="animate-shimmer h-16 rounded-xl" />
+            )}
+            <p className="text-[11px] leading-relaxed text-mist-600">
+              Referencia en COP. Lucía convierte sola cuando hablas en otra moneda.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="glass-card overflow-hidden border-0">
+          <CardContent className="space-y-2.5 p-4">
+            <div className="flex items-center gap-2 text-xs font-black tracking-wider text-white uppercase">
+              <MessagesSquare className="h-3.5 w-3.5 text-emerald-300" />
+              <span>Cómo hablarme</span>
+            </div>
+            {[
+              'Varias en un mensaje: usa "y", "luego" o comas.',
+              'Monedas: "3.000 dólares", "50 euros".',
+              'Pídeme análisis: "¿cómo voy este mes?".',
+            ].map((t) => (
+              <p key={t} className="text-[11px] leading-relaxed text-mist-500">
+                · {t}
+              </p>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="overflow-hidden border-0 bg-gradient-to-br from-emerald-500/[0.16] to-sky-500/[0.08]">
+          <CardContent className="flex items-center gap-2.5 p-4">
+            <Zap className="h-4 w-4 shrink-0 text-emerald-300" />
+            <p className="text-[11px] leading-relaxed text-mist-300">
+              Todo lo que confirmes aquí actualiza saldos y el análisis en vivo.
+            </p>
+          </CardContent>
+        </Card>
+      </aside>
     </div>
   )
 }

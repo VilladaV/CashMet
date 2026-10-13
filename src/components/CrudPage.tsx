@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -93,33 +94,37 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
   }
 
   return (
-    <div className="container mx-auto p-2 sm:p-4 max-w-4xl space-y-4">
-      {/* FORMULARIO DE CREACIÓN / EDICIÓN */}
-      <Card className="glass-card shadow-sm border-slate-200/90 overflow-hidden">
-        <div className="h-1 w-full gradient-brand-growth" />
-        <CardHeader className="py-3.5 px-4 sm:px-6 border-b border-slate-100 flex flex-row items-center justify-between">
-          <CardTitle className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
-            {editId ? <Edit3 className="w-4 h-4 text-emerald-600" /> : <PlusCircle className="w-4 h-4 text-emerald-600" />}
-            <span>{editId ? `Editar ${titulo}` : `Nuevo Registro de ${titulo}`}</span>
+    <motion.div
+      className="space-y-4"
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <Card className="glass-card overflow-hidden border-0">
+        <div className="h-1 w-full bg-gradient-to-r from-sky-500 via-teal-400 to-emerald-400" />
+        <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
+          <CardTitle className="flex items-center gap-2 text-sm font-extrabold text-white sm:text-base">
+            {editId ? <Edit3 className="h-4 w-4 text-emerald-300" /> : <PlusCircle className="h-4 w-4 text-emerald-300" />}
+            <span>{editId ? `Editar ${titulo}` : `Nuevo registro de ${titulo}`}</span>
           </CardTitle>
           {editId && (
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-              Modo Edición
+            <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-black text-emerald-300">
+              Modo edición
             </span>
           )}
         </CardHeader>
-        <CardContent className="p-4 sm:p-6 space-y-4 text-xs">
-          {descripcion && <p className="text-slate-500">{descripcion}</p>}
+        <CardContent className="space-y-4 p-4 text-xs sm:p-6">
+          {descripcion && <p className="leading-relaxed text-mist-500">{descripcion}</p>}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {campos.map((c) => (
               <label key={c.key} className={`${c.span2 ? 'sm:col-span-2' : ''} flex flex-col gap-1.5`}>
-                <span className="font-semibold text-slate-700">
-                  {c.label} {c.required && <span className="text-red-500">*</span>}
+                <span className="font-bold text-mist-300">
+                  {c.label} {c.required && <span className="text-red-300">*</span>}
                 </span>
                 {c.tipo === 'select' ? (
                   <select
-                    className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium focus:ring-2 focus:ring-emerald-500 outline-none"
+                    className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
                     value={form[c.key] ?? ''}
                     onChange={(e) => setForm({ ...form, [c.key]: e.target.value })}
                   >
@@ -135,7 +140,7 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                     type={c.tipo === 'number' ? 'number' : c.tipo === 'date' ? 'date' : 'text'}
                     value={form[c.key] ?? ''}
                     onChange={(e) => setForm({ ...form, [c.key]: e.target.value })}
-                    className="h-9 text-xs bg-white border-slate-200 focus-visible:ring-emerald-500"
+                    className="field-dark h-10 text-xs shadow-none"
                   />
                 )}
               </label>
@@ -143,27 +148,27 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 font-medium">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 font-medium text-red-300">
+              <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
           )}
 
           {msg && (
-            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold">
-              <Check className="w-4 h-4 shrink-0" />
+            <div className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-2.5 font-bold text-emerald-200">
+              <Check className="h-4 w-4 shrink-0" />
               <span>{msg}</span>
             </div>
           )}
 
-          <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+          <div className="flex items-center gap-2 border-t border-white/[0.06] pt-3">
             <Button
               size="sm"
               disabled={busy}
               onClick={submit}
-              className="gradient-brand-growth text-white hover:opacity-90 font-semibold text-xs h-8.5 px-4 gap-1.5 shadow-xs"
+              className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
-              <span>{busy ? 'Guardando...' : editId ? 'Actualizar Registro' : `Guardar ${titulo}`}</span>
+              <span>{busy ? 'Guardando...' : editId ? 'Actualizar registro' : `Guardar ${titulo}`}</span>
             </Button>
             {editId && (
               <Button
@@ -176,9 +181,9 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                   setError('')
                   setMsg('')
                 }}
-                className="text-xs h-8.5 border-slate-200"
+                className="h-9 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white"
               >
-                Cancelar Edición
+                Cancelar edición
               </Button>
             )}
           </div>
@@ -187,36 +192,35 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
 
       {extra}
 
-      {/* LISTADO DE ELEMENTOS EXISTENTES */}
-      <Card className="glass-card shadow-xs border-slate-200/90 overflow-hidden">
-        <CardHeader className="py-3.5 px-4 sm:px-6 border-b border-slate-100 flex flex-row items-center justify-between">
-          <CardTitle className="text-sm sm:text-base font-bold text-slate-900">
-            {titulo}s Registrados
+      <Card className="glass-card overflow-hidden border-0">
+        <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
+          <CardTitle className="text-sm font-extrabold text-white sm:text-base">
+            {titulo}s registrados
           </CardTitle>
-          <span className="text-[11px] font-semibold text-slate-500">
+          <span className="text-[11px] font-semibold text-mist-500">
             {items.length} {items.length === 1 ? 'registro' : 'registros'}
           </span>
         </CardHeader>
         <CardContent className="p-0 text-xs">
           {items.length === 0 ? (
-            <div className="p-8 text-center text-slate-500 space-y-1">
-              <p className="font-semibold">No hay {titulo.toLowerCase()}s registrados todavía</p>
-              <p className="text-[11px]">Diligencia el formulario superior para añadir el primero.</p>
+            <div className="space-y-1 p-8 text-center">
+              <p className="font-bold text-mist-300">No hay {titulo.toLowerCase()}s registrados todavía</p>
+              <p className="text-[11px] text-mist-600">Diligencia el formulario superior para añadir el primero.</p>
             </div>
           ) : (
-            <ul className="divide-y divide-slate-100">
+            <ul className="divide-y divide-white/[0.05]">
               {items.map((it) => (
-                <li key={it.id} className="flex items-center justify-between gap-3 p-3 sm:px-6 hover:bg-slate-50/80 transition-colors">
-                  <div className="min-w-0 flex-1">{renderItem(it)}</div>
-                  <div className="flex items-center gap-1 shrink-0">
+                <li key={it.id} className="flex items-center justify-between gap-3 p-3 transition-colors hover:bg-white/[0.03] sm:px-6">
+                  <div className="min-w-0 flex-1 text-mist-100">{renderItem(it)}</div>
+                  <div className="flex shrink-0 items-center gap-1">
                     {actualizar && (
                       <Button
                         size="sm"
                         variant="ghost"
                         onClick={() => editar(it)}
-                        className="h-8 text-xs text-slate-600 hover:text-slate-900 hover:bg-slate-100 gap-1"
+                        className="h-8 cursor-pointer gap-1 text-xs text-mist-500 hover:bg-white/[0.06] hover:text-white"
                       >
-                        <Edit3 className="w-3.5 h-3.5 text-slate-500" />
+                        <Edit3 className="h-3.5 w-3.5" />
                         <span className="hidden sm:inline">Editar</span>
                       </Button>
                     )}
@@ -225,9 +229,9 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                         size="sm"
                         variant="ghost"
                         onClick={() => borrar(it)}
-                        className="h-8 text-xs text-slate-600 hover:text-red-700 hover:bg-red-50 gap-1"
+                        className="h-8 cursor-pointer gap-1 text-xs text-mist-500 hover:bg-red-500/10 hover:text-red-300"
                       >
-                        <Trash2 className="w-3.5 h-3.5 text-slate-400" />
+                        <Trash2 className="h-3.5 w-3.5" />
                         <span className="hidden sm:inline">Eliminar</span>
                       </Button>
                     )}
@@ -238,6 +242,6 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
           )}
         </CardContent>
       </Card>
-    </div>
+    </motion.div>
   )
 }

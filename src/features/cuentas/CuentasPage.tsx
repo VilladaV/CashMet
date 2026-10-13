@@ -73,8 +73,8 @@ export default function CuentasPage() {
               <Input inputMode="numeric" value={saldo} onChange={(e) => setSaldo(e.target.value)} placeholder="0" />
             </label>
           </div>
-          {error && <div className="text-xs text-red-600">{error}</div>}
-          {ok && <div className="text-xs text-green-700">{ok}</div>}
+          {error && <div className="text-xs text-red-300">{error}</div>}
+          {ok && <div className="text-xs text-emerald-300">{ok}</div>}
           <Button size="sm" onClick={guardar}>
             Crear cuenta
           </Button>

@@ -5,7 +5,7 @@ function enLinea(texto: string): ReactNode[] {
   return partes.map((p, i) => {
     if (p.startsWith('**') && p.endsWith('**') && p.length > 4) {
       return (
-        <strong key={i} className="font-semibold text-slate-900">
+        <strong key={i} className="font-semibold text-white">
           {p.slice(2, -2)}
         </strong>
       )
