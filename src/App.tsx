@@ -28,6 +28,7 @@ import {
   Database,
   LogOut,
   SlidersHorizontal,
+  Compass,
   X,
 } from 'lucide-react'
 
@@ -89,8 +90,10 @@ function transicionar(aplicar: () => void) {
 export default function App() {
   const [tab, setTab] = useState<Tab>('chat')
   const [menuGestionAbierto, setMenuGestionAbierto] = useState(false)
+  const [burbujas, setBurbujas] = useState(false)
 
   const cambiar = (t: Tab) => {
+    setBurbujas(false)
     if (t === tab) {
       setMenuGestionAbierto(false)
       return
@@ -116,7 +119,7 @@ export default function App() {
 
       {/* BARRA SUPERIOR FLOTANTE */}
       <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-night-950/70 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
+        <div className="mx-auto flex h-14 max-w-[1500px] items-center justify-between gap-3 px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             <button onClick={() => cambiar('chat')} className="shrink-0 cursor-pointer md:hidden" title="Ir al chat">
               <CashMetLogo size="sm" showText={false} showSubtitle={false} variant="dark" />
@@ -148,9 +151,9 @@ export default function App() {
         </div>
       </header>
 
-      <div className="relative mx-auto flex max-w-[1500px] items-start gap-5 px-4 pb-24 sm:px-6 md:pb-10">
+      <div className={`relative mx-auto flex max-w-[1500px] items-start gap-5 sm:px-6 md:pb-10 ${tab === 'chat' ? 'px-0 pb-0' : 'px-4 pb-24'}`}>
         {/* SIDEBAR ESCRITORIO */}
-        <aside className="sticky top-[57px] hidden max-h-[calc(100vh-77px)] w-60 shrink-0 flex-col overflow-y-auto py-5 pr-1 no-scrollbar md:flex xl:w-64">
+        <aside className="sticky top-14 hidden max-h-[calc(100dvh-76px)] w-60 shrink-0 flex-col overflow-y-auto py-5 pr-1 no-scrollbar md:flex xl:w-64">
           <button onClick={() => cambiar('chat')} className="mb-6 cursor-pointer px-2 text-left">
             <CashMetLogo size="md" showText={true} showSubtitle={true} variant="dark" />
           </button>
@@ -233,7 +236,7 @@ export default function App() {
         </aside>
 
         {/* CONTENIDO */}
-        <main className="min-w-0 flex-1 py-4 sm:py-5">
+        <main className={`min-w-0 flex-1 ${tab === 'chat' ? 'py-0 sm:py-5' : 'py-4 sm:py-5'}`}>
           {tab === 'chat' && <ChatPage />}
           {tab === 'dashboard' && <DashboardPage />}
           {tab === 'calendario' && <CalendarioPage />}
@@ -248,8 +251,8 @@ export default function App() {
         </main>
       </div>
 
-      {/* DOCK MÓVIL */}
-      <nav className="fixed right-0 bottom-0 left-0 z-40 flex items-center justify-around border-t border-white/[0.07] bg-night-950/85 px-2 py-2 backdrop-blur-xl md:hidden">
+      {/* DOCK MÓVIL (se oculta en el chat: ahí mandan las burbujas) */}
+      <nav className={`fixed right-0 bottom-0 left-0 z-40 h-[68px] items-center justify-around border-t border-white/[0.07] bg-night-950/85 px-2 backdrop-blur-xl md:hidden ${tab === 'chat' ? 'hidden' : 'flex'}`}>
         {primaryTabs.map((t) => {
           const Icon = t.icon
           const activo = tab === t.id
@@ -280,6 +283,67 @@ export default function App() {
           <span className="mt-0.5">Gestión</span>
         </button>
       </nav>
+
+      {/* BURBUJAS MÓVILES DEL CHAT */}
+      {tab === 'chat' && (
+        <div className="fixed right-3 bottom-5 z-40 flex flex-col items-end gap-2 md:hidden">
+          <AnimatePresence>
+            {burbujas && (
+              <>
+                {[
+                  { id: 'dashboard' as Tab, label: 'Dashboard', Icon: LayoutDashboard },
+                  { id: 'calendario' as Tab, label: 'Calendario', Icon: Calendar },
+                ].map(({ id, label, Icon }, i) => (
+                  <motion.button
+                    key={id}
+                    initial={{ opacity: 0, x: 24, scale: 0.9 }}
+                    animate={{ opacity: 1, x: 0, scale: 1 }}
+                    exit={{ opacity: 0, x: 24, scale: 0.9 }}
+                    transition={{ type: 'spring', stiffness: 420, damping: 30, delay: i * 0.06 }}
+                    onClick={() => cambiar(id)}
+                    className="flex cursor-pointer items-center gap-2"
+                  >
+                    <span className="rounded-full border border-white/10 bg-night-800/90 px-2.5 py-1 text-[11px] font-bold text-mist-100 backdrop-blur-xl">
+                      {label}
+                    </span>
+                    <span className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-night-800/90 text-mist-100 backdrop-blur-xl">
+                      <Icon className="h-4 w-4" />
+                    </span>
+                  </motion.button>
+                ))}
+                <motion.button
+                  initial={{ opacity: 0, x: 24, scale: 0.9 }}
+                  animate={{ opacity: 1, x: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: 24, scale: 0.9 }}
+                  transition={{ type: 'spring', stiffness: 420, damping: 30, delay: 0.12 }}
+                  onClick={() => {
+                    setBurbujas(false)
+                    setMenuGestionAbierto(true)
+                  }}
+                  className="flex cursor-pointer items-center gap-2"
+                >
+                  <span className="rounded-full border border-white/10 bg-night-800/90 px-2.5 py-1 text-[11px] font-bold text-mist-100 backdrop-blur-xl">
+                    Gestión
+                  </span>
+                  <span className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-night-800/90 text-mist-100 backdrop-blur-xl">
+                    <SlidersHorizontal className="h-4 w-4" />
+                  </span>
+                </motion.button>
+              </>
+            )}
+          </AnimatePresence>
+          <motion.button
+            onClick={() => setBurbujas((v) => !v)}
+            whileTap={{ scale: 0.88 }}
+            title="Ir a otras secciones"
+            className="flex h-12 w-12 cursor-pointer items-center justify-center rounded-full border border-emerald-400/35 bg-gradient-to-br from-emerald-500/30 to-sky-500/20 text-emerald-200 shadow-[0_10px_30px_-8px_rgba(16,185,129,0.7)] backdrop-blur-xl"
+          >
+            <motion.span animate={{ rotate: burbujas ? 45 : 0 }} transition={{ type: 'spring', stiffness: 400, damping: 25 }}>
+              <Compass className="h-5 w-5" />
+            </motion.span>
+          </motion.button>
+        </div>
+      )}
 
       {/* SHEET GESTIÓN MÓVIL */}
       <AnimatePresence>

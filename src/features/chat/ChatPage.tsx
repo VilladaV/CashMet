@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,7 +24,7 @@ import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 import { lineaTasasContexto } from '@/lib/fx'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
-import { Send, Sparkles, CheckCircle2, AlertCircle, User, Trash2, ArrowLeftRight, MessagesSquare, Zap } from 'lucide-react'
+import { Send, CheckCircle2, AlertCircle, User, Trash2, ArrowLeftRight, BarChart3 } from 'lucide-react'
 
 interface Msg {
   id: number
@@ -60,27 +60,13 @@ const normalizarPeriodicidad = (p: string): PerRecurrente => {
   return 'mensual'
 }
 
-const SUGERENCIAS = [
-  'analiza mi estado financiero',
-  '¿cuánto tengo en el banco?',
-  'compré un almuerzo por 25.000 y me regalaron 70.000',
-  'me pagaron 3.000 dólares',
-  '¿a cómo está el dólar?',
-  'resumen de este mes',
-]
+interface PulsoMes {
+  etiqueta: string
+  ingresos: number
+  gastos: number
+}
 
-const SALUDO =
-  `👋 ¡Hola! Soy ${NOMBRE_IA}, tu contadora. Cuéntame cómo te fue con la plata y yo te la organizo.\n\n` +
-  'Puedes escribirme cosas como:\n' +
-  '• "gasté 45.000 en mercado"\n' +
-  '• "compré un almuerzo por 25.000 y me regalaron 70.000" (¡varias en un solo mensaje!)\n' +
-  '• "¿cuánto tengo en mis cuentas?"\n' +
-  '• "me pagaron 3.000 dólares" (convierto a pesos con la tasa del día)\n' +
-  '• "pagué 350.000 de la cuota del crédito"\n' +
-  '• "agrega gasto recurrente internet 120000 mensual"\n' +
-  '• "recuérdame pagar el arriendo el 5"\n' +
-  '• "resumen de este mes"\n\n' +
-  'Y si quieres, solo conversamos: pregúntame lo que necesites. 💛'
+const SALUDO = `👋 ¡Hola! Soy ${NOMBRE_IA}, tu contadora. Cuéntame cómo te fue con la plata y yo te la organizo. 💛`
 
 const CLAVE_CHAT = 'cashmet_chat_v1'
 
@@ -109,6 +95,35 @@ export default function ChatPage() {
   const [pensando, setPensando] = useState(false)
   const [error, setError] = useState('')
   const [tasas, setTasas] = useState<string[]>([])
+  const [pulso, setPulso] = useState<PulsoMes[]>([])
+
+  const cargarPulso = useCallback(async () => {
+    try {
+      const todos = await listarTodosLosMovimientos(400)
+      const ahora = new Date()
+      const meses: PulsoMes[] = []
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1)
+        const clave = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+        let ingresos = 0
+        let gastos = 0
+        for (const m of todos) {
+          if (String(m.fecha).slice(0, 7) !== clave) continue
+          const v = Number(m.monto) || 0
+          if (m.tipo === 'ingreso') ingresos += v
+          else if (m.tipo !== 'transferencia') gastos += v
+        }
+        meses.push({
+          etiqueta: d.toLocaleDateString('es-CO', { month: 'short' }).replace('.', ''),
+          ingresos,
+          gastos,
+        })
+      }
+      setPulso(meses)
+    } catch {
+      /* sin pulso disponible */
+    }
+  }, [])
   const idRef = useRef(1)
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -140,7 +155,8 @@ export default function ChatPage() {
         if (t) setTasas(t.split('\n').filter((l) => l.startsWith('- ')))
       })
       .catch(() => {})
-  }, [])
+    void cargarPulso()
+  }, [cargarPulso])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -420,7 +436,7 @@ export default function ChatPage() {
     setPensando(true)
     try {
       const historial = msgs
-        .filter((m) => m.texto.trim() && m.texto !== SALUDO)
+        .filter((m) => m.texto.trim() && m.id !== 0)
         .slice(-8)
         .map((m) => ({ rol: m.rol, texto: m.texto }))
 
@@ -479,6 +495,7 @@ export default function ChatPage() {
         fuente: 'chat_IA',
       })
       invalidarSnapshotFinanciero()
+      void cargarPulso()
       setMsgs((prev) => prev.map((m) => (m.id === id ? { ...m, estado: 'guardado' } : m)))
       push({
         rol: 'ia',
@@ -503,7 +520,7 @@ export default function ChatPage() {
   return (
     <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
       {/* COLUMNA DEL CHAT */}
-      <Card className="glass-card surface-glow overflow-hidden border-0">
+      <Card className="glass-card surface-glow flex flex-col overflow-hidden border-0 max-md:h-[calc(100vh-56px)] max-md:h-[calc(100dvh-56px)] max-md:rounded-none">
         <div className="flex items-center justify-between border-b border-white/[0.07] bg-white/[0.02] p-3.5 sm:p-4">
           <div className="flex items-center gap-3">
             <motion.div
@@ -535,8 +552,8 @@ export default function ChatPage() {
           </button>
         </div>
 
-        <CardContent className="space-y-3 p-3 sm:p-4">
-          <div className="slim-scroll h-[480px] space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-black/25 p-3 text-sm sm:h-[520px] sm:p-5">
+        <CardContent className="flex min-h-0 flex-1 flex-col space-y-3 p-3 sm:p-4">
+          <div className="slim-scroll h-[480px] space-y-4 overflow-y-auto rounded-2xl border border-white/[0.06] bg-black/25 p-3 text-sm sm:h-[520px] sm:p-5 max-md:h-auto max-md:min-h-0 max-md:flex-1 max-md:rounded-xl">
             <AnimatePresence initial={false}>
               {msgs.map((m) => (
                 <motion.div
@@ -638,25 +655,7 @@ export default function ChatPage() {
             </div>
           )}
 
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center gap-1.5 text-[11px] font-bold text-mist-500">
-              <Sparkles className="h-3 w-3 text-emerald-300" />
-              <span>Sugerencias rápidas</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {SUGERENCIAS.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setMsg(s)}
-                  className="cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-mist-300 transition-all hover:border-emerald-400/40 hover:bg-emerald-400/10 hover:text-emerald-200 active:scale-95"
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex gap-2 pt-1">
+          <div className="flex gap-2 pt-1 max-md:pb-[env(safe-area-inset-bottom)]">
             <Input
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
@@ -707,29 +706,51 @@ export default function ChatPage() {
         </Card>
 
         <Card className="glass-card overflow-hidden border-0">
-          <CardContent className="space-y-2.5 p-4">
+          <CardContent className="space-y-3 p-4">
             <div className="flex items-center gap-2 text-xs font-black tracking-wider text-white uppercase">
-              <MessagesSquare className="h-3.5 w-3.5 text-emerald-300" />
-              <span>Cómo hablarme</span>
+              <BarChart3 className="h-3.5 w-3.5 text-emerald-300" />
+              <span>Últimos 6 meses</span>
             </div>
-            {[
-              'Varias en un mensaje: usa "y", "luego" o comas.',
-              'Monedas: "3.000 dólares", "50 euros".',
-              'Pídeme análisis: "¿cómo voy este mes?".',
-            ].map((t) => (
-              <p key={t} className="text-[11px] leading-relaxed text-mist-500">
-                · {t}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden border-0 bg-gradient-to-br from-emerald-500/[0.16] to-sky-500/[0.08]">
-          <CardContent className="flex items-center gap-2.5 p-4">
-            <Zap className="h-4 w-4 shrink-0 text-emerald-300" />
-            <p className="text-[11px] leading-relaxed text-mist-300">
-              Todo lo que confirmes aquí actualiza saldos y el análisis en vivo.
-            </p>
+            {pulso.length ? (
+              <div className="space-y-2.5">
+                <div className="flex h-28 items-end gap-1.5">
+                  {(() => {
+                    const max = Math.max(1, ...pulso.flatMap((x) => [x.ingresos, x.gastos]))
+                    return pulso.map((p) => (
+                      <div key={p.etiqueta} className="flex flex-1 flex-col items-center gap-1">
+                        <div className="flex h-24 w-full items-end justify-center gap-1">
+                          <motion.div
+                            className="w-full rounded-t-md bg-emerald-400/80"
+                            title={`Ingresos: ${COD(p.ingresos)}`}
+                            initial={{ height: 0 }}
+                            animate={{ height: p.ingresos > 0 ? `${Math.max(4, (p.ingresos / max) * 100)}%` : 0 }}
+                            transition={{ type: 'spring', stiffness: 160, damping: 22 }}
+                          />
+                          <motion.div
+                            className="w-full rounded-t-md bg-rose-400/70"
+                            title={`Gastos: ${COD(p.gastos)}`}
+                            initial={{ height: 0 }}
+                            animate={{ height: p.gastos > 0 ? `${Math.max(4, (p.gastos / max) * 100)}%` : 0 }}
+                            transition={{ type: 'spring', stiffness: 160, damping: 22 }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-bold text-mist-600 capitalize">{p.etiqueta}</span>
+                      </div>
+                    ))
+                  })()}
+                </div>
+                <div className="flex items-center gap-3 text-[10px] font-bold text-mist-500">
+                  <span className="flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-emerald-400" /> Ingresos
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-rose-400" /> Gastos
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="animate-shimmer h-28 rounded-xl" />
+            )}
           </CardContent>
         </Card>
       </aside>
