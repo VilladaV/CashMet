@@ -11,8 +11,8 @@
 **En producción**: https://cashmet-b70e4.web.app (Firebase Hosting, proyecto `cashmet-b70e4`).
 
 ### Funcional hoy
-- **Auth** email/password con registro desde la app. Reglas Firestore desplegadas.
-- **Chat IA con LLM real (Gemini) y fallback local**: si existe `VITE_GEMINI_API_KEY`, el chat usa **Gemini** (`gemini-2.0-flash`) para clasificar la intención en JSON y el cliente ejecuta la acción; si falta la clave o falla la red, cae automáticamente al **motor NL local** (`src/features/chat/engine.ts`). El indicador del chat muestra "IA Gemini" o "IA local".
+- **Auth** email/password (solo inicio de sesión; el registro está deshabilitado por ser app privada de 1 usuario). Reglas Firestore desplegadas.
+- **Chat IA con LLM real (Gemini) y fallback local**: si existe `VITE_GEMINI_API_KEY`, el chat usa **Gemini** (`gemini-3.1-flash-lite` por defecto, con fallback a `gemini-3.5-flash-lite`) para conversar y clasificar la intención en JSON, y el cliente ejecuta la acción; si falta la clave o falla la red, cae automáticamente al **motor NL local** (`src/features/chat/engine.ts`). El indicador del chat muestra "IA Gemini" o "IA local".
   - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes.
 - **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
 - **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes, **impuestos**.
@@ -558,9 +558,9 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 
 ### FASE 0 - Setup + Documento (1-2h) ✓ (este doc)
 - [x] Crear PLAN_COMPLETO.md
-- [ ] Inicializar repo (Vite+React+TS, Tailwind, shadcn)
-- [ ] Firebase project + Firestore + Auth + Functions + Hosting
-- [ ] Genkit init + config Gemini
+- [x] Inicializar repo (Vite+React+TS, Tailwind, shadcn)
+- [x] Firebase project + Firestore + Auth + Hosting (Functions pendiente de plan Blaze)
+- [x] Genkit init + config Gemini (andamiaje; runtime real vía REST en cliente)
 
 ### FASE 1 - Base + Datos (2-4h)
 - [x] Modelos TypeScript (tipos Firestore)
@@ -589,19 +589,20 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 
 ### FASE 5 - Calendario + Google Calendar (2-4h)
 - [x] Modelo eventos + UI calendario (mini/mes)
-- [x] Google OAuth + Calendar API
+- [ ] Google OAuth + Calendar API (OAuth real con Google pendiente; calendario interno funcional)
 - [x] Generación automática vencimientos (SOAT/TM/STR, sueldos, primas, deudas)
-- [x] RRULE + recordatorios
+- [ ] RRULE + recordatorios reales (hoy solo se guardan como datos; sin disparo de avisos ni sync con Google)
 
 ### FASE 6 - PWA + Notificaciones (Push) (1-2h)
 - [x] Vite PWA (manifest, SW)
-- [x] FCM Web Push + VAPID
-- [x] Notificaciones vencimientos (30/7/1 día)
+- [ ] FCM Web Push + VAPID (pendiente de implementar el envío real)
+- [ ] Notificaciones vencimientos (30/7/1 día)
 - [x] Instalable móvil
 
 ### FASE 7 - Despliegue + Acceso fuera casa (1-2h)
-- [x] Firebase Hosting + Functions deploy
-- [x] Cloudflare Tunnel (o Tailscale) setup
+- [x] Firebase Hosting deploy
+- [ ] Cloud Functions deploy (requiere plan Blaze)
+- [ ] Cloudflare Tunnel (innecesario con Hosting público; descartado por ahora)
 - [x] Backup export JSON/CSV
 - [x] Hardening reglas + pruebas
 

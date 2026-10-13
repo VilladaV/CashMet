@@ -53,6 +53,8 @@ const COLOR_TIPO: Record<string, string> = {
   personal: 'bg-slate-50 text-slate-700 border-slate-200',
 }
 
+const HOY_ISO = new Date().toISOString().slice(0, 10)
+
 export default function CalendarioPage() {
   const [generando, setGenerando] = useState(false)
   const [eventos, setEventos] = useState<EventoDoc[]>([])
@@ -116,7 +118,6 @@ export default function CalendarioPage() {
     return out
   }, [mesVista])
 
-  const hoyISO = useMemo(() => new Date().toISOString().slice(0, 10), [])
   const etiquetaMes = useMemo(
     () => mesVista.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' }),
     [mesVista]
@@ -352,7 +353,7 @@ export default function CalendarioPage() {
             {celdas.map((c, i) => {
               if (!c) return <div key={`empty-${i}`} className="min-h-16 sm:min-h-20 rounded-xl bg-slate-50/40" />
               const evs = porDia[c.clave] ?? []
-              const esHoy = c.clave === hoyISO
+              const esHoy = c.clave === HOY_ISO
               const seleccionado = c.clave === diaSel
               return (
                 <button

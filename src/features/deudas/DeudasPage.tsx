@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import CrudPage, { type CampoForm } from '@/components/CrudPage'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -45,7 +45,7 @@ function PagoDeuda() {
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const cargar = () =>
+  const cargar = useCallback(() => {
     listarDeudas()
       .then((d) => {
         const activas = d.filter((x) => x.estado !== 'pagada')
@@ -53,10 +53,11 @@ function PagoDeuda() {
         if (activas.length && !activas.some((x) => x.id === deudaId)) setDeudaId(activas[0].id)
       })
       .catch(() => setError('No se pudieron cargar las deudas.'))
+  }, [deudaId])
 
   useEffect(() => {
     cargar()
-  }, [])
+  }, [cargar])
 
   const pagar = async () => {
     const montoNum = Number(monto.replace(/[^\d.]/g, '')) || 0

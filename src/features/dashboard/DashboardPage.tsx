@@ -123,7 +123,7 @@ export default function DashboardPage() {
   }, [])
 
   useEffect(() => {
-    cargar()
+    void Promise.resolve().then(() => cargar())
   }, [cargar])
 
   const borrar = async (id: string) => {

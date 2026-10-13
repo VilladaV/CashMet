@@ -92,7 +92,7 @@ export function parseFecha(texto: string): string {
     }
   }
 
-  const m2 = t.match(/\b(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?\b/)
+  const m2 = t.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/)
   if (m2) {
     const dia = parseInt(m2[1], 10)
     const mes = parseInt(m2[2], 10)

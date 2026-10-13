@@ -20,7 +20,7 @@ export const db = getFirestore(app)
 export const getFirebaseMessaging = () => {
   try {
     return getMessaging(app)
-  } catch (e) {
+  } catch {
     return null
   }
 }

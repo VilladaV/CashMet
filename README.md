@@ -22,6 +22,7 @@ CashMet es una aplicación web/PWA para gestión económica personal con IA (cha
 - Pestañas: Chat IA / Dashboard / Calendario / Cuentas / Deudas / Vehículos / Propiedades / Nómina / Recurrentes / Impuestos / Backup
 
 ## Seguridad
+- App privada de 1 usuario: el login es solo inicio de sesión (registro deshabilitado)
 - Reglas Firestore estrictas (solo autenticado)
 - Nunca commitear secretos
 - `VITE_GEMINI_API_KEY` viaja en el bundle: **restringirla por HTTP referrer** a los dominios de Hosting. Para clave 100% server-side, migrar a Cloud Functions (plan Blaze).
