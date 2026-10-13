@@ -17,7 +17,8 @@
 - **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
 - **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes, **impuestos**.
 - **Impuestos** (nuevo): colección `impuestos` (predial, vehicular, renta, ICA, otros) con entidad, valor, periodicidad, fecha de vencimiento y estado pagado. Los impuestos no pagados con vencimiento se agregan al calendario y a los recordatorios.
-- **Recurrentes con autogeneración** (nuevo): modelo extendido (`fechaInicio`, `fechaFin`, `cuentaBancoId`, `autoGenerar`) y botón "Generar movimientos y eventos del mes" (idempotente: no duplica lo ya generado). Respeta periodicidad mensual/bimestral/trimestral/semestral/anual.
+- **Recurrentes con autogeneración**: modelo extendido (`fechaInicio`, `fechaFin`, `cuentaBancoId`, `autoGenerar`) y botón "Generar movimientos y eventos del mes" (idempotente: no duplica lo ya generado). Respeta periodicidad mensual/bimestral/trimestral/semestral/anual.
+- **Piloto automático** (nuevo): al iniciar sesión se ejecuta solo (`src/lib/piloto.ts`, idempotente): genera recurrentes del mes, consigna **tu salario** (se configura una vez en Nómina: monto, día y cuenta) y descuenta las **cuotas de deudas marcadas con ⚡ auto**. Lucía te anuncia al entrar lo que aplicó ("Se te consignó tu salario mensual por $X").
 - **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
 - **Backup**: exportar/importar todo Firestore a JSON desde la app (incluye `impuestos`).
 - **PWA** instalable. Build con **code-splitting** (chunks `firebase`/`motion`/`vendor`/`index`, ninguno > 500 kB).
@@ -484,10 +485,11 @@ Mientras la cuenta no esté en plan **Blaze** (Cloud Functions lo requiere), la 
 ## 6. INTEGRACIONES
 
 ### 6.1 Google Calendar API (OAuth 2.0)
-- **Scopes**: `https://www.googleapis.com/auth/calendar.events`, `https://www.googleapis.com/auth/calendar`
-- **Flujo**: Conectar 1 cuenta (propia). Botón "Conectar Google Calendar" → OAuth → guardar tokens (Firestore: `googleAuthTokens` por user con cifrado o usar Firebase Auth + Google? Mejor Google Sign-In opcional o OAuth separado). Para 1 usuario, OAuth clásico funciona.
-- **Eventos**: Crear all-day o día/hora, RRULE para recurrentes (mensual/anual). Recordatorios: email/popup (nativos Calendar).
-- **Sincronización**: Unidireccional preferida (CashMet → Calendar) para evitar loops. Marcar `sincronizadoGoogle`.
+- **Implementado (lado cliente, sin Blaze)**: `src/lib/google/calendar.ts` usa Google Identity Services (token OAuth solo con `VITE_GOOGLE_CALENDAR_CLIENT_ID`; sin secretos en el cliente). Botón "Conectar Google" en la pestaña Calendario, "Sincronizar ahora" (sube eventos futuros sin `googleEventId`, idempotente) y borrado espejado. Al generar/guardar eventos y al crear recordatorios desde el chat, se suben solos si hay sesión. Los recordatorios del evento llegan como **avisos nativos de Google** en el celular.
+- **Scopes**: `https://www.googleapis.com/auth/calendar.events`
+- **Flujo**: Conectar 1 cuenta (propia). Botón "Conectar Google Calendar" → OAuth → token de ~1 h (al expirar, reconectar con un clic). El `googleEventId` se guarda en Firestore (`marcarSincronizadoGoogle`).
+- **Eventos**: día completo, con recordatorios (`minutosAntes` → `overrides`). Sincronización **unidireccional** (CashMet → Calendar) para evitar loops. Marcar `sincronizadoGoogle`.
+- **Requisito manual**: crear el ID de cliente OAuth (tipo "App web") en Google Cloud Console y autorizar orígenes `https://cashmet-b70e4.web.app`, `https://cashmet-b70e4.firebaseapp.com` y `http://localhost:5173`; ponerlo en `.env.local` como `VITE_GOOGLE_CALENDAR_CLIENT_ID` (ver `.env.example`).
 
 ### 6.2 Firebase Cloud Messaging (Web Push)
 - **VAPID**: Generar claves VAPID (web-push). Guardar server-side (Functions env).
@@ -589,7 +591,7 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 
 ### FASE 5 - Calendario + Google Calendar (2-4h)
 - [x] Modelo eventos + UI calendario (mini/mes)
-- [ ] Google OAuth + Calendar API (OAuth real con Google pendiente; calendario interno funcional)
+- [x] Google OAuth + Calendar API (GIS lado cliente, unidireccional CashMet → Google; token por sesión)
 - [x] Generación automática vencimientos (SOAT/TM/STR, sueldos, primas, deudas)
 - [ ] RRULE + recordatorios reales (hoy solo se guardan como datos; sin disparo de avisos ni sync con Google)
 

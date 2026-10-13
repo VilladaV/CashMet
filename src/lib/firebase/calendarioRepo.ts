@@ -33,6 +33,7 @@ export interface EventoDoc extends EventoInput {
   id: string
   activo?: boolean
   sincronizadoGoogle?: boolean
+  googleEventId?: string
 }
 
 function iso(d: Date): string {
@@ -224,4 +225,12 @@ export async function listarEventos(max = 50): Promise<EventoDoc[]> {
 
 export async function eliminarEvento(id: string): Promise<void> {
   await deleteDoc(doc(db, COLLECTIONS.CALENDARIO_EVENTOS, id))
+}
+
+export async function marcarSincronizadoGoogle(id: string, googleEventId: string): Promise<void> {
+  await updateDoc(doc(db, COLLECTIONS.CALENDARIO_EVENTOS, id), {
+    googleEventId,
+    sincronizadoGoogle: true,
+    actualizado: Date.now(),
+  })
 }

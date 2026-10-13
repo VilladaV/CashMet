@@ -15,6 +15,14 @@ import {
   type TipoEvento,
 } from '@/lib/firebase/calendarioRepo'
 import {
+  conectarGoogleCalendar,
+  desconectarGoogleCalendar,
+  eliminarEventoGoogle,
+  estadoGoogleCalendar,
+  googleCalendarConfigurado,
+  sincronizarPendientes,
+} from '@/lib/google/calendar'
+import {
   Calendar as CalendarIcon,
   ChevronLeft,
   ChevronRight,
@@ -25,6 +33,8 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  Cloud,
+  X,
 } from 'lucide-react'
 
 const ETIQUETA: Record<string, string> = {
@@ -69,6 +79,9 @@ export default function CalendarioPage() {
     descripcion: '',
   })
   const [creando, setCreando] = useState(false)
+  const [gconectado, setGconectado] = useState(() => estadoGoogleCalendar().conectado)
+  const [gmsg, setGmsg] = useState('')
+  const [gBusy, setGBusy] = useState(false)
   const [mesVista, setMesVista] = useState(() => {
     const hoy = new Date()
     return new Date(hoy.getFullYear(), hoy.getMonth(), 1)
@@ -144,6 +157,52 @@ export default function CalendarioPage() {
     }
   }
 
+  const conectarGoogle = async () => {
+    setGmsg('')
+    if (!googleCalendarConfigurado) {
+      setGmsg('Falta VITE_GOOGLE_CALENDAR_CLIENT_ID en tu .env.local (cliente OAuth de Google Cloud).')
+      return
+    }
+    setGBusy(true)
+    try {
+      await conectarGoogleCalendar()
+      setGconectado(true)
+      setGmsg('Conectado. Usa "Sincronizar ahora" para subir tus vencimientos a Google.')
+    } catch {
+      setGmsg('No se pudo conectar. Revisa el cliente OAuth y los orígenes autorizados en Google Cloud.')
+    } finally {
+      setGBusy(false)
+    }
+  }
+
+  const sincronizarGoogle = async () => {
+    setGBusy(true)
+    setGmsg('')
+    try {
+      const r = await sincronizarPendientes()
+      setGmsg(
+        r.subidos > 0
+          ? `Subidos ${r.subidos} evento(s) a Google Calendar${r.fallos ? ` (${r.fallos} fallaron)` : ''}.`
+          : 'No había eventos pendientes por subir.'
+      )
+    } catch (e) {
+      if (String((e as Error)?.message ?? '').includes('401')) {
+        setGconectado(false)
+        setGmsg('La sesión con Google expiró. Vuelve a conectar.')
+      } else {
+        setGmsg('No se pudo sincronizar. Inténtalo de nuevo.')
+      }
+    } finally {
+      setGBusy(false)
+    }
+  }
+
+  const desconectarGoogle = () => {
+    desconectarGoogleCalendar()
+    setGconectado(false)
+    setGmsg('Desconectado de Google Calendar.')
+  }
+
   const guardar = async () => {
     if (!preview.length) return
     setGenerando(true)
@@ -153,6 +212,7 @@ export default function CalendarioPage() {
       setMsg(`¡Listo! Se guardaron ${n} eventos en Firestore.`)
       setPreview([])
       cargar()
+      if (estadoGoogleCalendar().conectado) sincronizarPendientes().catch(() => {})
     } catch {
       setError('No se pudieron guardar los eventos.')
     } finally {
@@ -178,6 +238,7 @@ export default function CalendarioPage() {
       setNuevo({ fecha: '', titulo: '', tipo: 'personal', descripcion: '' })
       setMsg('Evento añadido al calendario.')
       cargar()
+      if (estadoGoogleCalendar().conectado) sincronizarPendientes().catch(() => {})
     } catch {
       setError('No se pudo crear el evento.')
     } finally {
@@ -188,7 +249,9 @@ export default function CalendarioPage() {
   const borrarEvento = async (id: string) => {
     if (!confirm('¿Deseas eliminar este evento del calendario?')) return
     try {
+      const ev = eventos.find((x) => x.id === id)
       await eliminarEvento(id)
+      if (ev?.googleEventId) eliminarEventoGoogle(ev.googleEventId).catch(() => {})
       if (editandoId === id) cerrarEdicion()
       cargar()
     } catch {
@@ -299,6 +362,60 @@ export default function CalendarioPage() {
             )}
           </div>
         )}
+      </Card>
+
+      <Card className="glass-card overflow-hidden border-0">
+        <CardContent className="flex flex-col items-start justify-between gap-3 p-4 sm:flex-row sm:items-center sm:p-5">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Cloud className="h-5 w-5 text-sky-300" />
+              <h2 className="text-base font-extrabold tracking-tight text-white">Google Calendar</h2>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${gconectado ? 'bg-emerald-400/15 text-emerald-300' : 'bg-white/[0.06] text-mist-500'}`}>
+                {gconectado ? 'Conectado' : 'Sin conectar'}
+              </span>
+            </div>
+            <p className="max-w-xl text-xs leading-relaxed text-mist-500">
+              Sube tus vencimientos a tu Google Calendar y recibe sus avisos en el celular. Solo CashMet → Google.
+            </p>
+            {gmsg && <p className="text-[11px] font-semibold text-mist-300">{gmsg}</p>}
+          </div>
+
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            {!gconectado ? (
+              <Button
+                size="sm"
+                disabled={gBusy}
+                onClick={conectarGoogle}
+                className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-sky-500 to-emerald-500 px-4 text-xs font-bold text-white hover:brightness-110 sm:flex-initial"
+              >
+                <Cloud className="mr-1.5 h-3.5 w-3.5" />
+                <span>{gBusy ? 'Conectando...' : 'Conectar Google'}</span>
+              </Button>
+            ) : (
+              <>
+                <Button
+                  size="sm"
+                  disabled={gBusy}
+                  onClick={sincronizarGoogle}
+                  className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110 sm:flex-initial"
+                >
+                  <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                  <span>{gBusy ? 'Subiendo...' : 'Sincronizar ahora'}</span>
+                </Button>
+                <Button
+                  size="icon"
+                  variant="outline"
+                  disabled={gBusy}
+                  onClick={desconectarGoogle}
+                  title="Desconectar"
+                  className="h-9 w-9 cursor-pointer border-white/10 bg-transparent text-mist-500 hover:bg-white/5 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </>
+            )}
+          </div>
+        </CardContent>
       </Card>
 
       <Card className="glass-card overflow-hidden border-0">

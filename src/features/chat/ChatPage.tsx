@@ -22,6 +22,8 @@ import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
+import { estadoGoogleCalendar, sincronizarPendientes } from '@/lib/google/calendar'
+import { leerResumenPiloto, marcarPilotoAnunciado } from '@/lib/piloto'
 import { lineaTasasContexto } from '@/lib/fx'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
 import { Send, CheckCircle2, AlertCircle, User, Trash2, ArrowLeftRight, BarChart3 } from 'lucide-react'
@@ -161,6 +163,25 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [msgs, pensando])
+
+  useEffect(() => {
+    const r = leerResumenPiloto()
+    const h = new Date()
+    const hoy = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`
+    if (r && r.fecha === hoy && !r.anunciado && r.aplicados.length) {
+      marcarPilotoAnunciado()
+      const tiempo = h.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+      setMsgs((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          rol: 'ia',
+          texto: `☀️ Piloto automático: dejé todo al día sin que muevas un dedo:\n${r.aplicados.map((a) => `• ${a.texto}`).join('\n')}\n\nAsí vas encaminado. 💪`,
+          timestamp: tiempo,
+        },
+      ])
+    }
+  }, [])
 
   const push = (m: Omit<Msg, 'id'>) => {
     const id = idRef.current++
@@ -418,6 +439,7 @@ export default function ChatPage() {
           relacionado: {},
         })
         invalidarSnapshotFinanciero()
+        if (estadoGoogleCalendar().conectado) sincronizarPendientes().catch(() => {})
         push({ rol: 'ia', texto: `📅 Anoté "${titulo}" para el ${fecha}. Te aviso un día antes.` })
       } catch (e: any) {
         console.error('Error al crear evento:', e)

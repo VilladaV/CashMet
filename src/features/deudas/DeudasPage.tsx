@@ -31,10 +31,11 @@ const CAMPOS: CampoForm[] = [
   { key: 'tasaInteres', label: 'Tasa interés (%)', tipo: 'number' },
   { key: 'fechaVencimientoCuota', label: 'Día de vencimiento (1-31)', tipo: 'number' },
   { key: 'estado', label: 'Estado', tipo: 'select', opciones: ESTADOS_DEUDA.map((t) => ({ value: t, label: t })) },
+  { key: 'autoDescontar', label: 'Descontar cuota automáticamente', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
   { key: 'notas', label: 'Notas', span2: true },
 ]
 
-const VACIO: Record<string, string> = { estado: 'activa' }
+const VACIO: Record<string, string> = { estado: 'activa', autoDescontar: 'no' }
 
 function PagoDeuda() {
   const [deudas, setDeudas] = useState<Deuda[]>([])
@@ -107,8 +108,8 @@ function PagoDeuda() {
             <Input type="date" value={fecha} onChange={(e) => setFecha(e.target.value)} />
           </label>
         </div>
-        {msg && <div className="text-xs text-green-700">{msg}</div>}
-        {error && <div className="text-xs text-red-600">{error}</div>}
+        {msg && <div className="text-xs text-emerald-300">{msg}</div>}
+        {error && <div className="text-xs text-red-300">{error}</div>}
         <Button size="sm" disabled={busy || !deudaId} onClick={pagar}>
           {busy ? '...' : 'Registrar pago'}
         </Button>
@@ -136,6 +137,7 @@ export default function DeudasPage() {
           doc[c.key] = NUMERICOS.has(c.key) ? num(v) : String(v).trim()
         }
         doc.estado = vals.estado || 'activa'
+        doc.autoDescontar = vals.autoDescontar === 'si'
         return doc
       }}
       aForm={(d) => {
@@ -144,6 +146,7 @@ export default function DeudasPage() {
           const v = (d as unknown as Record<string, unknown>)[c.key]
           f[c.key] = v === undefined || v === null ? '' : String(v)
         }
+        f.autoDescontar = d.autoDescontar ? 'si' : 'no'
         return f
       }}
       renderItem={(d) => (
@@ -156,6 +159,7 @@ export default function DeudasPage() {
             Saldo: ${(d.saldoPendiente || 0).toLocaleString('es-CO')}
             {d.cuotaMensual ? ` · Cuota: $${d.cuotaMensual.toLocaleString('es-CO')}` : ''}
             {d.fechaVencimientoCuota ? ` · Día ${d.fechaVencimientoCuota}` : ''}
+            {d.autoDescontar ? ' · ⚡ auto' : ''}
           </div>
         </div>
       )}

@@ -17,6 +17,7 @@ export interface Deuda {
   cuotaMensual?: number
   tasaInteres?: number
   fechaVencimientoCuota?: number
+  autoDescontar?: boolean
   estado: EstadoDeuda
   notas?: string
   actualizado?: number
@@ -47,7 +48,8 @@ export async function registrarPagoDeuda(
   id: string,
   monto: number,
   fecha: string,
-  cuentaBancoId?: string
+  cuentaBancoId?: string,
+  fuente: 'manual' | 'automatico' = 'manual'
 ): Promise<void> {
   const montoAbs = Math.abs(monto)
   await updateDoc(doc(db, COLLECTIONS.DEUDAS, id), {
@@ -62,7 +64,7 @@ export async function registrarPagoDeuda(
     categoria: 'deudas',
     deudaId: id,
     cuentaBancoId,
-    fuente: 'manual',
+    fuente,
   }
   await crearMovimiento(input)
 }
