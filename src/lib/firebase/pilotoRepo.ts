@@ -5,6 +5,7 @@ import { COLLECTIONS } from './collections'
 export interface SalarioPropio {
   activo: boolean
   monto: number
+  moneda?: string
   dia: number
   cuentaBancoId?: string
   concepto?: string
@@ -28,6 +29,8 @@ export async function guardarSalarioPropio(s: SalarioPropio): Promise<void> {
     monto: Math.round(Number(s.monto) || 0),
     dia: Math.min(31, Math.max(1, Math.round(Number(s.dia) || 1))),
   }
+  const moneda = String(s.moneda ?? 'COP').trim().toUpperCase()
+  if (moneda && moneda !== 'COP') salario.moneda = moneda
   if (s.cuentaBancoId) salario.cuentaBancoId = s.cuentaBancoId
   const concepto = (s.concepto ?? '').trim()
   if (concepto) salario.concepto = concepto

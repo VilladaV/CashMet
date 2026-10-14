@@ -2,6 +2,7 @@ import { crearMovimiento, listarMovimientos } from './firebase/movimientosRepo'
 import { generarEventosRecurrentes, generarMovimientosRecurrentes } from './firebase/recurrentesRepo'
 import { listarDeudas, registrarPagoDeuda } from './firebase/deudasRepo'
 import { leerPiloto, type PilotoConfig } from './firebase/pilotoRepo'
+import { convertirACOP } from './fx'
 
 export interface ItemPiloto {
   texto: string
@@ -50,26 +51,44 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
 
   const cfg = await leerPiloto().catch((): PilotoConfig => ({}))
   const sal = cfg.salario
+  const monedaSalario = String(sal?.moneda ?? 'COP').trim().toUpperCase() || 'COP'
   if (sal?.activo && (sal.monto || 0) > 0 && hoy.getDate() >= Math.min(31, Math.max(1, sal.dia || 1))) {
     const ya = movs.some(
       (m) => String(m.fecha).startsWith(mes) && (m as { recurrenteId?: string }).recurrenteId === MARCA_SALARIO
     )
     if (!ya) {
       try {
+        let montoCOP = Math.round(sal.monto)
+        let descripcion: string | undefined
+        if (monedaSalario !== 'COP') {
+          const conv = await convertirACOP(sal.monto, monedaSalario)
+          if (!conv) throw new Error('sin tasa disponible')
+          montoCOP = conv.montoCOP
+          descripcion =
+            `${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} · ` +
+            `tasa 1 ${monedaSalario} = $${Math.round(conv.tasa).toLocaleString('es-CO')}${conv.fecha ? ` del ${conv.fecha}` : ''}`
+        }
         await crearMovimiento({
           fecha: fechaEnMes(mes, sal.dia),
           tipo: 'ingreso',
           concepto: sal.concepto?.trim() || 'Salario mensual',
-          monto: Math.round(sal.monto),
+          monto: montoCOP,
           categoria: 'Salario',
           cuentaBancoId: sal.cuentaBancoId,
           recurrenteId: MARCA_SALARIO,
           fuente: 'automatico',
+          descripcion,
         })
-        aplicados.push({ texto: `Se te consignó tu salario mensual por ${COD(sal.monto)}`, monto: sal.monto })
+        aplicados.push({
+          texto:
+            monedaSalario === 'COP'
+              ? `Se te consignó tu salario mensual por ${COD(sal.monto)}`
+              : `Se te consignó tu salario mensual: ${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} (≈ ${COD(montoCOP)} COP)`,
+          monto: montoCOP,
+        })
         cambio = true
       } catch {
-        /* se reintenta en la próxima apertura */
+        /* sin tasa o sin red: se reintenta en la próxima apertura */
       }
     }
   }

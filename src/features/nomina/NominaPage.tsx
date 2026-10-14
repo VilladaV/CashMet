@@ -47,6 +47,7 @@ const si = (v: string | undefined) => v === 'si'
 function SalarioPropioCard() {
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
   const [monto, setMonto] = useState('')
+  const [moneda, setMoneda] = useState('COP')
   const [dia, setDia] = useState('1')
   const [cuentaId, setCuentaId] = useState('')
   const [concepto, setConcepto] = useState('Salario mensual')
@@ -64,6 +65,7 @@ function SalarioPropioCard() {
         const s = cfg.salario
         if (!s) return
         setMonto(s.monto ? String(s.monto) : '')
+        setMoneda(String(s.moneda ?? 'COP').toUpperCase() || 'COP')
         setDia(String(s.dia || 1))
         setCuentaId(s.cuentaBancoId ?? '')
         setConcepto(s.concepto ?? 'Salario mensual')
@@ -83,7 +85,7 @@ function SalarioPropioCard() {
     }
     setBusy(true)
     try {
-      await guardarSalarioPropio({ activo, monto: montoNum, dia: diaNum, cuentaBancoId: cuentaId || undefined, concepto })
+      await guardarSalarioPropio({ activo, monto: montoNum, moneda, dia: diaNum, cuentaBancoId: cuentaId || undefined, concepto })
       setMsg(activo ? 'Listo: tu salario se consignará solo cada mes.' : 'Salario automático desactivado.')
     } catch {
       setError('No se pudo guardar la configuración.')
@@ -104,17 +106,34 @@ function SalarioPropioCard() {
       <CardContent className="space-y-3 p-4 text-xs sm:p-6">
         <p className="leading-relaxed text-mist-500">
           El piloto automático consigna tu sueldo cada mes sin que hagas nada, y Lucía te avisa al entrar.
+          {moneda !== 'COP'
+            ? ` Se guarda en ${moneda} y se convierte a pesos con la tasa del día de la consignación.`
+            : ''}
         </p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1.5">
-            <span className="font-bold text-mist-300">Monto mensual (COP)</span>
+            <span className="font-bold text-mist-300">Monto mensual</span>
             <Input
               inputMode="numeric"
               value={monto}
               onChange={(e) => setMonto(e.target.value)}
-              placeholder="Ej: 3500000"
+              placeholder={moneda === 'COP' ? 'Ej: 3500000' : 'Ej: 180000'}
               className="field-dark h-10 text-xs shadow-none"
             />
+          </label>
+          <label className="flex flex-col gap-1.5">
+            <span className="font-bold text-mist-300">Moneda</span>
+            <select
+              value={moneda}
+              onChange={(e) => setMoneda(e.target.value)}
+              className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
+            >
+              {['COP', 'USD', 'EUR', 'GBP', 'MXN', 'BRL', 'PEN'].map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="flex flex-col gap-1.5">
             <span className="font-bold text-mist-300">Día de consignación (1-31)</span>
