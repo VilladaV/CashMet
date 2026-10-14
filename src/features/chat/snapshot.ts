@@ -152,7 +152,16 @@ export async function construirSnapshotFinanciero(): Promise<string> {
       const valorVeh = vehiculos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
       lineas.push(`- Vehículos: ${vehiculos.length}${valorVeh ? ` (valor comercial ~${COD(valorVeh)})` : ''}`)
       for (const v of vehiculos.slice(0, 4)) {
-        lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}`)
+        const vv = v as unknown as Record<string, any>
+        const extras: string[] = []
+        if (vv.estado) extras.push(vv.estado)
+        const km = vv.mantenimiento?.kilometrajeActual
+        if (km) extras.push(`${Number(km).toLocaleString('es-CO')} km`)
+        if (vv.soat?.fechaVencimiento) extras.push(`SOAT vence ${vv.soat.fechaVencimiento}`)
+        if (vv.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${vv.tecnicomecanica.fechaVencimiento}`)
+        lineas.push(
+          `  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join(' · ')}` : ''}`
+        )
       }
     }
     if (propiedades.length) {

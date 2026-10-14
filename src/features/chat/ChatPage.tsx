@@ -18,7 +18,7 @@ import {
   type CuentaBanco,
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
-import { crearVehiculo } from '@/lib/firebase/vehiculosRepo'
+import { crearVehiculo, guardarTareaMantenimiento, listarVehiculos, nuevaTareaId, registrarServicioMantenimiento } from '@/lib/firebase/vehiculosRepo'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
@@ -359,6 +359,59 @@ export default function ChatPage() {
       } catch (e: any) {
         console.error('Error al crear vehículo:', e)
         setError(`No se pudo registrar el vehículo (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (op.nombre === 'registrar_mantenimiento') {
+      const monto = Number(p.monto) || 0
+      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const placa = String(p.placa ?? '').trim().toUpperCase()
+      const marca = String(p.marca ?? '').trim().toLowerCase()
+      const concepto = String(p.concepto ?? '').trim() || 'Mantenimiento'
+      try {
+        const vehiculos = await listarVehiculos()
+        let v = placa
+          ? vehiculos.find((x) => (x.placa ?? '').toUpperCase() === placa)
+          : undefined
+        if (!v && marca) v = vehiculos.find((x) => x.marca.toLowerCase().includes(marca))
+        if (!v && vehiculos.length === 1) v = vehiculos[0]
+        if (!v) {
+          push({
+            rol: 'ia',
+            texto:
+              vehiculos.length === 0
+                ? 'Todavía no tienes vehículos registrados. Ve a la pestaña "Vehículos" y lo registramos primero.'
+                : `Tienes varios vehículos:\n${vehiculos.map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`).join('\n')}\n\n¿De cuál fue el mantenimiento? Ej: "cambié el aceite del ${vehiculos[0].marca} por ${monto}".`,
+          })
+          return
+        }
+        const nombre = concepto.slice(0, 60)
+        let tarea = (v.mantenimiento?.tareas ?? []).find(
+          (t) => t.nombre.toLowerCase() === nombre.toLowerCase()
+        )
+        if (!tarea) {
+          tarea = { id: nuevaTareaId(), nombre }
+          await guardarTareaMantenimiento(v.id, tarea)
+        }
+        await registrarServicioMantenimiento(v.id, tarea.id, { fecha })
+        await crearMovimiento({
+          fecha,
+          tipo: 'mantenimiento',
+          concepto: `${nombre} · ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}`,
+          monto,
+          categoria: 'Transporte',
+          vehiculoId: v.id,
+          fuente: 'chat_IA',
+        })
+        invalidarSnapshotFinanciero()
+        push({
+          rol: 'ia',
+          texto: `🔧 Listo, registré el mantenimiento "${nombre}" del ${v.marca} ${v.linea} por ${COD(monto)} (${fecha}). Quedó guardado en su hoja de vida y en tus movimientos.`,
+        })
+      } catch (e: any) {
+        console.error('Error al registrar mantenimiento:', e)
+        setError(`No se pudo registrar el mantenimiento (${e?.code || 'error'}).`)
       }
       return
     }
