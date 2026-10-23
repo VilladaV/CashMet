@@ -686,8 +686,9 @@ export default function ChatPage() {
 
       const registros = ops.filter((o) => o.nombre === 'requiere_confirmacion' && o.borrador)
       const otras = ops.filter((o) => !(o.nombre === 'requiere_confirmacion' && o.borrador))
+      const soloTransferencias = ops.length > 0 && ops.every((o) => o.nombre === 'transferir')
 
-      if (!registros.length && interp.respuesta) {
+      if (!registros.length && interp.respuesta && !soloTransferencias) {
         push({ rol: 'ia', texto: interp.respuesta })
       }
 
