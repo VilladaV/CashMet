@@ -1,4 +1,4 @@
-import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
@@ -134,7 +134,9 @@ export async function listarVehiculos(): Promise<Vehiculo[]> {
 }
 
 export async function obtenerVehiculo(id: string): Promise<Vehiculo | null> {
-  return obtenerVehiculo(id)
+  const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, id))
+  if (!snap.exists()) return null
+  return { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
 }
 
 export async function renovarSoat(id: string): Promise<{ fechaVencimiento: string } | null> {
