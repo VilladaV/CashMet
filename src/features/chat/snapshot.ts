@@ -149,14 +149,14 @@ export async function construirSnapshotFinanciero(): Promise<string> {
   if (vehiculos.length) {
     const valorVeh = vehiculos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
     lineas.push('', `VEHÍCULOS (${vehiculos.length})${valorVeh ? ` · valor comercial ~${COD(valorVeh)}` : ''}`)
-    for (const v of vehiculos.slice(0, 6)) {
+    for (const v of vehiculos) {
       const extras: string[] = []
       if (v.soat?.fechaVencimiento) extras.push(`SOAT vence ${v.soat.fechaVencimiento}`)
       if (v.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${v.tecnicomecanica.fechaVencimiento}`)
       if (v.seguroTodoRiesgo?.fechaVencimiento) extras.push(`STR vence ${v.seguroTodoRiesgo.fechaVencimiento}`)
       lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''}`)
     }
-    lineas.push(`  … (usa la tool "obtener_vehiculo_completo" para detalle de uno)`)
+    lineas.push(`  … (usa la tool "obtener_vehiculo_completo" para detalle completo de uno)`)
   }
 
   if (propiedades.length) {
