@@ -154,9 +154,9 @@ export async function construirSnapshotFinanciero(): Promise<string> {
       if (v.soat?.fechaVencimiento) extras.push(`SOAT vence ${v.soat.fechaVencimiento}`)
       if (v.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${v.tecnicomecanica.fechaVencimiento}`)
       if (v.seguroTodoRiesgo?.fechaVencimiento) extras.push(`STR vence ${v.seguroTodoRiesgo.fechaVencimiento}`)
-      lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''}`)
+      lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''} [id: ${v.id}]`)
     }
-    lineas.push(`  … (usa la tool "obtener_vehiculo_completo" para detalle completo de uno)`)
+    lineas.push(`  … (usa la tool "obtener_vehiculo_completo" con el id para detalle completo)`)
   }
 
   if (propiedades.length) {
