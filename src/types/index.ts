@@ -54,6 +54,7 @@ export interface VehiculoSOAT {
   vigente: boolean;
   aseguradora: string;
   numeroPoliza: string;
+  fechaInicioVigencia?: string;
   fechaVencimiento: string;
   valorPrimaAnual: number;
   cobertura: string;
@@ -63,6 +64,9 @@ export interface VehiculoSOAT {
 export interface VehiculoTecnicomecanica {
   vigente: boolean;
   centroRevision: string;
+  numeroCertificado?: string;
+  cda?: string;
+  fechaExpedicion?: string;
   fechaVencimiento: string;
   costoRevision: number;
   tipo: 'vigente';
@@ -80,6 +84,52 @@ export interface VehiculoSeguroTR {
   deducible?: number;
   cobertura: string;
   fuente: 'investigado_IA' | 'manual';
+}
+
+export type EstadoVehiculo =
+  | 'Disponible'
+  | 'En reparación'
+  | 'Dañado'
+  | 'Decomisado'
+  | 'Vendido'
+  | 'No disponible'
+
+export interface TareaMantenimiento {
+  id: string
+  nombre: string
+  ultimoKm?: number
+  proximoKm?: number
+  ultimaFecha?: string
+  proximaFecha?: string
+  intervaloKm?: number
+  costoEstimado?: number
+}
+
+export interface MantenimientoVehiculo {
+  kilometrajeActual?: number
+  tareas: TareaMantenimiento[]
+}
+
+export interface LicenciaTransito {
+  numeroLicencia?: string
+  fechaExpedicion?: string
+  organismoTransito?: string
+  limitacionesPropiedad?: string
+}
+
+export interface PropietarioDetalle {
+  nombre?: string
+  documento?: string
+  direccion?: string
+  ciudad?: string
+  telefono?: string
+}
+
+export interface DocumentosVehiculo {
+  manualNombre?: string
+  manualUrl?: string
+  fichaNombre?: string
+  fichaUrl?: string
 }
 
 export interface Vehiculo {
@@ -102,6 +152,21 @@ export interface Vehiculo {
   notas: string;
   actualizado: TimestampLike;
   investigadoIA?: TimestampLike;
+  estado?: EstadoVehiculo;
+  fotoUrl?: string;
+  color?: string;
+  servicio?: string;
+  carroceria?: string;
+  numPuertas?: number;
+  numMotor?: string;
+  numSerie?: string;
+  numChasis?: string;
+  capacidad?: string;
+  avaluoComercial?: number;
+  licenciaTransito?: LicenciaTransito;
+  propietarioDetalle?: PropietarioDetalle;
+  documentos?: DocumentosVehiculo;
+  mantenimiento?: MantenimientoVehiculo;
 }
 
 export interface Propiedad {
