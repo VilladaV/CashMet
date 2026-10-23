@@ -45,6 +45,9 @@ Acciones permitidas y sus params:
 - crear_evento: {titulo:"...", fecha:"YYYY-MM-DD"}
 - investigar_vehiculo: {marca:"...", linea:"...", modelo:numero, cilindraje:numero}
 - crear_vehiculo: {placa:"...", marca:"...", linea:"...", modelo:numero, tipo:"carro"|"moto"|"camion"|"otro", cilindraje:numero}
+- obtener_vehiculo_completo: {vehiculoId:"..."}
+- renovar_soat: {vehiculoId:"..."}
+- renovar_tecnomecanica: {vehiculoId:"..."}
 - registrar_mantenimiento: {monto:numero, fecha:"YYYY-MM-DD", placa:"ABC123" (opcional), marca:"..." (opcional), concepto:"cambio de aceite"}
 - ayuda: {}
 
@@ -189,6 +192,10 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     }
     if (nombre === 'resumen_mes') {
       params.mes = String(params.mes ?? contexto.hoy.slice(0, 7)).slice(0, 7)
+    }
+
+    if (nombre === 'obtener_vehiculo_completo' || nombre === 'renovar_soat' || nombre === 'renovar_tecnomecanica') {
+      params.vehiculoId = String(params.vehiculoId ?? '').trim()
     }
 
     if ('moneda' in params) {

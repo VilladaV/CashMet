@@ -18,7 +18,7 @@ import {
   type CuentaBanco,
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
-import { crearVehiculo, guardarTareaMantenimiento, listarVehiculos, nuevaTareaId, registrarServicioMantenimiento } from '@/lib/firebase/vehiculosRepo'
+import { crearVehiculo, guardarTareaMantenimiento, listarVehiculos, nuevaTareaId, obtenerVehiculo, registrarServicioMantenimiento, renovarSoat, renovarTecnicomecanica } from '@/lib/firebase/vehiculosRepo'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
@@ -412,6 +412,75 @@ export default function ChatPage() {
       } catch (e: any) {
         console.error('Error al registrar mantenimiento:', e)
         setError(`No se pudo registrar el mantenimiento (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (op.nombre === 'obtener_vehiculo_completo') {
+      const vehiculoId = String(p.vehiculoId ?? '').trim()
+      if (!vehiculoId) {
+        push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres ver (puedes usar la placa o decirme "el primero").' })
+        return
+      }
+      try {
+        const v = await obtenerVehiculo(vehiculoId)
+        if (!v) {
+          push({ rol: 'ia', texto: 'No encontré ese vehículo. Verifica el ID o la placa.' })
+          return
+        }
+        const partes = [
+          `🚗 ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}`,
+          `Tipo: ${v.tipo}${v.cilindraje ? ` · ${v.cilindraje} cc` : ''}${v.valorComercial ? ` · Valor: ${COD(v.valorComercial || 0)}` : ''}`,
+          `Estado: ${v.estado ?? 'Disponible'}`,
+        ]
+        if (v.soat?.fechaVencimiento) partes.push(`SOAT: ${v.soat.vigente ? 'vigente' : 'vencido'} · vence ${v.soat.fechaVencimiento}${v.soat.valorPrimaAnual ? ` · prima ${COD(v.soat.valorPrimaAnual)}` : ''}${v.soat.aseguradora ? ` · ${v.soat.aseguradora}` : ''}`)
+        if (v.tecnicomecanica?.fechaVencimiento) partes.push(`TM: ${v.tecnicomecanica.vigente ? 'vigente' : 'vencida'} · vence ${v.tecnicomecanica.fechaVencimiento}${v.tecnicomecanica.costoRevision ? ` · costo ${COD(v.tecnicomecanica.costoRevision)}` : ''}${v.tecnicomecanica.cda ? ` · CDA: ${v.tecnicomecanica.cda}` : ''}`)
+        if (v.seguroTodoRiesgo?.tiene) partes.push(`STR: ${v.seguroTodoRiesgo.vigente ? 'vigente' : 'vencido'} · vence ${v.seguroTodoRiesgo.fechaVencimiento}${v.seguroTodoRiesgo.valorPrimaAnual ? ` · prima ${COD(v.seguroTodoRiesgo.valorPrimaAnual)}` : ''}`)
+        if (v.mantenimiento?.kilometrajeActual) partes.push(`Kilometraje: ${v.mantenimiento.kilometrajeActual.toLocaleString('es-CO')} km`)
+        if (v.mantenimiento?.tareas?.length) partes.push(`Tareas de mantenimiento: ${v.mantenimiento.tareas.length}`)
+        push({ rol: 'ia', texto: partes.join('\n') })
+      } catch {
+        push({ rol: 'ia', texto: 'No pude obtener el detalle del vehículo.' })
+      }
+      return
+    }
+
+    if (op.nombre === 'renovar_soat') {
+      const vehiculoId = String(p.vehiculoId ?? '').trim()
+      if (!vehiculoId) {
+        push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres renovar.' })
+        return
+      }
+      try {
+        const r = await renovarSoat(vehiculoId)
+        if (!r) {
+          push({ rol: 'ia', texto: 'Ese vehículo no tiene SOAT con fecha de vencimiento para renovar.' })
+          return
+        }
+        invalidarSnapshotFinanciero()
+        push({ rol: 'ia', texto: `✅ SOAT renovado. Nueva fecha de vencimiento: ${r.fechaVencimiento}.` })
+      } catch (e: any) {
+        push({ rol: 'ia', texto: `No pude renovar el SOAT: ${e?.message ?? 'error'}` })
+      }
+      return
+    }
+
+    if (op.nombre === 'renovar_tecnomecanica') {
+      const vehiculoId = String(p.vehiculoId ?? '').trim()
+      if (!vehiculoId) {
+        push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres renovar.' })
+        return
+      }
+      try {
+        const r = await renovarTecnicomecanica(vehiculoId)
+        if (!r) {
+          push({ rol: 'ia', texto: 'Ese vehículo no tiene Tecnicomecánica con fecha de vencimiento para renovar.' })
+          return
+        }
+        invalidarSnapshotFinanciero()
+        push({ rol: 'ia', texto: `✅ Tecnicomecánica renovada. Nueva fecha de vencimiento: ${r.fechaVencimiento}.` })
+      } catch (e: any) {
+        push({ rol: 'ia', texto: `No pude renovar la TM: ${e?.message ?? 'error'}` })
       }
       return
     }

@@ -1,4 +1,4 @@
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
@@ -134,9 +134,35 @@ export async function listarVehiculos(): Promise<Vehiculo[]> {
 }
 
 export async function obtenerVehiculo(id: string): Promise<Vehiculo | null> {
-  const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, id))
-  if (!snap.exists()) return null
-  return { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+  return obtenerVehiculo(id)
+}
+
+export async function renovarSoat(id: string): Promise<{ fechaVencimiento: string } | null> {
+  const actual = await obtenerVehiculo(id)
+  if (!actual?.soat?.fechaVencimiento) return null
+  const fecha = new Date(actual.soat.fechaVencimiento)
+  fecha.setFullYear(fecha.getFullYear() + 1)
+  const nueva = fecha.toISOString().slice(0, 10)
+  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), {
+    'soat.fechaVencimiento': nueva,
+    'soat.vigente': true,
+    actualizado: Date.now(),
+  })
+  return { fechaVencimiento: nueva }
+}
+
+export async function renovarTecnicomecanica(id: string): Promise<{ fechaVencimiento: string } | null> {
+  const actual = await obtenerVehiculo(id)
+  if (!actual?.tecnicomecanica?.fechaVencimiento) return null
+  const fecha = new Date(actual.tecnicomecanica.fechaVencimiento)
+  fecha.setFullYear(fecha.getFullYear() + 1)
+  const nueva = fecha.toISOString().slice(0, 10)
+  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), {
+    'tecnicomecanica.fechaVencimiento': nueva,
+    'tecnicomecanica.vigente': true,
+    actualizado: Date.now(),
+  })
+  return { fechaVencimiento: nueva }
 }
 
 export async function crearVehiculo(v: Partial<Vehiculo>): Promise<string> {
