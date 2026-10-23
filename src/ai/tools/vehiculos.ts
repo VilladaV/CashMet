@@ -1,6 +1,6 @@
 ﻿import { z } from 'zod'
 import { ai } from '../genkit'
-import { addDoc, collection, doc, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
 
@@ -93,5 +93,85 @@ export const crearEditarVehiculoTool = ai.defineTool(
       const ref = await addDoc(collection(db, COLLECTIONS.VEHICULOS), payload)
       return { id: ref.id, ok: true }
     }
+  }
+)
+
+export const obtenerVehiculoCompletoTool = ai.defineTool(
+  {
+    name: 'obtener_vehiculo_completo',
+    description: 'Obtiene TODOS los datos de un vehículo por su ID (SOAT, TM, STR, cilindraje, valor, documentos, mantenimiento). Úsalo cuando necesites detalle completo que no esté en el snapshot.',
+    inputSchema: z.object({ vehiculoId: z.string().min(1) }),
+    outputSchema: z.object({
+      id: z.string(),
+      placa: z.string().optional(),
+      marca: z.string(),
+      linea: z.string(),
+      modelo: z.number(),
+      tipo: z.string(),
+      cilindraje: z.number().optional(),
+      valorComercial: z.number().optional(),
+      estado: z.string().optional(),
+      soat: z.object({ vigente: z.boolean(), fechaVencimiento: z.string().optional(), valorPrimaAnual: z.number().optional(), aseguradora: z.string().optional(), numeroPoliza: z.string().optional() }).optional(),
+      tecnicomecanica: z.object({ vigente: z.boolean(), fechaVencimiento: z.string().optional(), costoRevision: z.number().optional(), cda: z.string().optional(), numeroCertificado: z.string().optional() }).optional(),
+      seguroTodoRiesgo: z.object({ tiene: z.boolean(), vigente: z.boolean(), fechaVencimiento: z.string().optional(), valorPrimaAnual: z.number().optional(), aseguradora: z.string().optional() }).optional(),
+      gastosMensualesCalculados: z.number().optional(),
+      mantenimiento: z.object({ kilometrajeActual: z.number().optional(), tareas: z.array(z.any()) }).optional(),
+      documentos: z.object({ manualUrl: z.string().optional(), fichaUrl: z.string().optional() }).optional(),
+      licenciaTransito: z.object({ numeroLicencia: z.string().optional(), organismoTransito: z.string().optional() }).optional(),
+      actualizado: z.number().optional(),
+    }),
+  },
+  async (input) => {
+    const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId))
+    if (!snap.exists()) throw new Error('Vehículo no encontrado')
+    return { id: snap.id, ...snap.data() } as any
+  }
+)
+
+export const renovarSoatTool = ai.defineTool(
+  {
+    name: 'renovar_soat',
+    description: 'Renueva el SOAT del vehículo sumando 1 año a la fecha de vencimiento actual. Requiere que el vehículo ya tenga SOAT con fecha de vencimiento.',
+    inputSchema: z.object({ vehiculoId: z.string().min(1) }),
+    outputSchema: z.object({ ok: z.boolean(), fechaVencimiento: z.string() }),
+  },
+  async (input) => {
+    const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId))
+    if (!snap.exists()) throw new Error('Vehículo no encontrado')
+    const v = snap.data() as any
+    if (!v.soat?.fechaVencimiento) throw new Error('El vehículo no tiene SOAT con fecha de vencimiento')
+    const fecha = new Date(v.soat.fechaVencimiento)
+    fecha.setFullYear(fecha.getFullYear() + 1)
+    const nueva = fecha.toISOString().slice(0, 10)
+    await updateDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId), {
+      'soat.fechaVencimiento': nueva,
+      'soat.vigente': true,
+      actualizado: Date.now(),
+    })
+    return { ok: true, fechaVencimiento: nueva }
+  }
+)
+
+export const renovarTecnicomecanicaTool = ai.defineTool(
+  {
+    name: 'renovar_tecnomecanica',
+    description: 'Renueva la Tecnicomecánica del vehículo sumando 1 año a la fecha de vencimiento actual. Requiere que el vehículo ya tenga TM con fecha de vencimiento.',
+    inputSchema: z.object({ vehiculoId: z.string().min(1) }),
+    outputSchema: z.object({ ok: z.boolean(), fechaVencimiento: z.string() }),
+  },
+  async (input) => {
+    const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId))
+    if (!snap.exists()) throw new Error('Vehículo no encontrado')
+    const v = snap.data() as any
+    if (!v.tecnicomecanica?.fechaVencimiento) throw new Error('El vehículo no tiene Tecnicomecánica con fecha de vencimiento')
+    const fecha = new Date(v.tecnicomecanica.fechaVencimiento)
+    fecha.setFullYear(fecha.getFullYear() + 1)
+    const nueva = fecha.toISOString().slice(0, 10)
+    await updateDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId), {
+      'tecnicomecanica.fechaVencimiento': nueva,
+      'tecnicomecanica.vigente': true,
+      actualizado: Date.now(),
+    })
+    return { ok: true, fechaVencimiento: nueva }
   }
 )
