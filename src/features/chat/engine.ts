@@ -31,6 +31,7 @@ const AYUDA =
   'listar movimientos, registrar pagos de deudas, pagar nómina, crear gastos recurrentes y eventos, ' +
   'convertir otras monedas a pesos con la tasa del día ("me pagaron 3.000 dólares", "gasté 50 euros"), ' +
   'registrar vehículos, estimar SOAT/tecnicomecánica/seguros en Colombia, generar el calendario de vencimientos y ' +
+  'registrar mantenimientos con su costo ("cambié el aceite por 180.000", "pagué 250.000 de frenos"), ' +
   'darte el resumen del mes. Cuéntame con confianza cómo te fue con la plata. 💛'
 
 const MESES: Record<string, number> = {
@@ -230,6 +231,23 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
         monto,
         fecha: parseFecha(mensaje),
         deudaNombre: nombre ? nombre[1].trim().replace(/\s+\d.*$/, '').trim() : undefined,
+        moneda,
+      },
+    }
+  }
+
+  if (monto && monto > 0 && /(mantenimiento|aceite|frenos?|llantas?|bateria|revision|reparacion|taller|alineacion|balanceo|correa|pastillas)/.test(t)) {
+    const { marca, linea } = extraerMarcaLinea(mensaje)
+    return {
+      respuesta: 'Registrando el mantenimiento...',
+      acciones: ['registrar_mantenimiento'],
+      params: {
+        monto,
+        fecha: parseFecha(mensaje),
+        placa: extraerPlaca(mensaje),
+        marca: marca || undefined,
+        linea: linea || undefined,
+        concepto: limpiarConcepto(mensaje),
         moneda,
       },
     }

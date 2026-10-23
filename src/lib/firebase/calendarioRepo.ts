@@ -11,6 +11,7 @@ export type TipoEvento =
   | 'soat'
   | 'tecnicomecanica'
   | 'seguro_tr'
+  | 'mantenimiento'
   | 'predial'
   | 'impuesto'
   | 'cuota_deuda'
@@ -105,6 +106,24 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
         recordatorios: recDefault,
         relacionado: { vehiculoId: v.id },
       })
+    }
+    const tareas = (v.mantenimiento?.tareas ?? []) as Array<{
+      nombre?: string
+      proximaFecha?: string
+    }>
+    for (const t of tareas) {
+      const f = t?.proximaFecha
+      if (f && enProximoAnio(f, meses)) {
+        eventos.push({
+          titulo: `Mantenimiento ${t?.nombre ?? ''} ${nombre}`.trim(),
+          tipo: 'mantenimiento',
+          fechaInicio: f,
+          allDay: true,
+          recurrente: false,
+          recordatorios: recDefault,
+          relacionado: { vehiculoId: v.id },
+        })
+      }
     }
   }
 

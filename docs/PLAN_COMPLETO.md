@@ -22,6 +22,7 @@
 - **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
 - **Backup**: exportar/importar todo Firestore a JSON desde la app (incluye `impuestos`).
 - **PWA** instalable. Build con **code-splitting** (chunks `firebase`/`motion`/`vendor`/`index`, ninguno > 500 kB).
+- **Billetera vehicular**: la pestaña Vehículos es ahora el detalle completo (port de BilleteraVehicular): selector + 4 tabs (Resumen con foto/estado/vigencias, Documentos con SOAT/TM ampliados y PDFs nativos, Tarjeta de propiedad frente/reverso, Mantenimiento con odómetro/tareas/progreso). Fotos y PDFs en Firebase Storage (`storage.rules`). Las tareas con `proximaFecha` generan eventos de calendario tipo `mantenimiento`. Registrar un servicio con costo crea automáticamente el movimiento tipo `mantenimiento` vinculado. Lucía entiende "cambié el aceite por 180.000" (`registrar_mantenimiento`, con multidivisa) y el snapshot incluye estado, km y vencimientos.
 
 ### Pendiente para el 100%
 - **Google Calendar (OAuth)** — opcional, no bloquea el objetivo central.

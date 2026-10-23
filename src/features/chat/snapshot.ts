@@ -146,24 +146,27 @@ export async function construirSnapshotFinanciero(): Promise<string> {
     if (prox) lineas.push(`- Próximo vencimiento: ${prox.nombre} el ${prox.fechaVencimiento}`)
   }
 
-  if (vehiculos.length || propiedades.length) {
-    lineas.push('', 'PATRIMONIO')
-    if (vehiculos.length) {
-      const valorVeh = vehiculos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
-      lineas.push(`- Vehículos: ${vehiculos.length}${valorVeh ? ` (valor comercial ~${COD(valorVeh)})` : ''}`)
-      for (const v of vehiculos.slice(0, 4)) {
-        lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}`)
-      }
+  if (vehiculos.length) {
+    const valorVeh = vehiculos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
+    lineas.push('', `VEHÍCULOS (${vehiculos.length})${valorVeh ? ` · valor comercial ~${COD(valorVeh)}` : ''}`)
+    for (const v of vehiculos.slice(0, 6)) {
+      const extras: string[] = []
+      if (v.soat?.fechaVencimiento) extras.push(`SOAT vence ${v.soat.fechaVencimiento}`)
+      if (v.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${v.tecnicomecanica.fechaVencimiento}`)
+      if (v.seguroTodoRiesgo?.fechaVencimiento) extras.push(`STR vence ${v.seguroTodoRiesgo.fechaVencimiento}`)
+      lineas.push(`  · ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''}`)
     }
-    if (propiedades.length) {
-      const valorProp = propiedades.reduce(
-        (s, p) => s + (Number(p.valorPatrimonial) || Number(p.valorComercialEstimado) || 0),
-        0,
-      )
-      lineas.push(`- Propiedades: ${propiedades.length}${valorProp ? ` (valor ~${COD(valorProp)})` : ''}`)
-      for (const p of propiedades.slice(0, 4)) {
-        lineas.push(`  · ${p.nombre} (${p.tipo})`)
-      }
+    lineas.push(`  … (usa la tool "obtener_vehiculo_completo" para detalle de uno)`)
+  }
+
+  if (propiedades.length) {
+    const valorProp = propiedades.reduce(
+      (s, p) => s + (Number(p.valorPatrimonial) || Number(p.valorComercialEstimado) || 0),
+      0,
+    )
+    lineas.push(`- Propiedades: ${propiedades.length}${valorProp ? ` (valor ~${COD(valorProp)})` : ''}`)
+    for (const p of propiedades.slice(0, 4)) {
+      lineas.push(`  · ${p.nombre} (${p.tipo})`)
     }
   }
 
