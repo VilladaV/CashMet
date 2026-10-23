@@ -243,6 +243,7 @@ export interface Movimiento {
   categoria: string;
   subcategoria?: string;
   cuentaBancoId?: string;
+  cuentaDestinoId?: string;
   deudaId?: string;
   vehiculoId?: string;
   propiedadId?: string;

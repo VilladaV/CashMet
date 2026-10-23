@@ -123,7 +123,7 @@ export default function DashboardPage() {
       for (const m of movimientos) {
         if (!m.fecha?.startsWith(prefijoMes)) continue
         if (m.tipo === 'ingreso') ing += Number(m.monto) || 0
-        else gas += Number(m.monto) || 0
+        else if (m.tipo !== 'transferencia') gas += Number(m.monto) || 0
       }
       setIngresosMes(ing)
       setGastosMes(gas)

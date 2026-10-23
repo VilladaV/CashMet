@@ -15,6 +15,7 @@ import {
   listarMovimientos,
   listarTodosLosMovimientos,
   obtenerResumenSaldos,
+  transferirEntreCuentas,
   type CuentaBanco,
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
@@ -38,6 +39,13 @@ interface Msg {
 }
 
 const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
+
+const normalizarNombreCuenta = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
 
 type CatRecurrente = 'hogar' | 'transporte' | 'salud' | 'educacion' | 'servicios' | 'otro'
 type PerRecurrente = 'mensual' | 'bimestral' | 'trimestral' | 'semestral' | 'anual'
@@ -207,6 +215,88 @@ export default function ChatPage() {
         }
       } catch {
         push({ rol: 'ia', texto: 'No pude consultar los saldos en este momento.' })
+      }
+      return
+    }
+
+    if (op.nombre === 'transferir') {
+      const monto = Number(p.monto) || 0
+      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const concepto = String(p.concepto ?? '').trim()
+      let listaCuentas: CuentaBanco[] = cuentas
+      try {
+        listaCuentas = await listarCuentasBanco()
+      } catch {
+        listaCuentas = cuentas
+      }
+      const resolver = (valor: unknown): CuentaBanco | undefined => {
+        const raw = String(valor ?? '').trim()
+        const v = normalizarNombreCuenta(raw)
+        if (!v) return undefined
+        return (
+          listaCuentas.find((c) => c.id === raw) ??
+          listaCuentas.find((c) => normalizarNombreCuenta(c.nombre) === v) ??
+          listaCuentas.find((c) => {
+            const n = normalizarNombreCuenta(c.nombre)
+            return n.includes(v) || v.includes(n)
+          })
+        )
+      }
+      const origen = resolver(p.cuentaOrigenId ?? p.cuentaOrigen ?? p.origenId ?? p.origen)
+      const destino = resolver(p.cuentaDestinoId ?? p.cuentaDestino ?? p.destinoId ?? p.destino)
+
+      if (!monto || monto <= 0) {
+        push({ rol: 'ia', texto: '¿De cuánto es la transferencia? Dime el monto y de qué cuenta a cuál la paso.' })
+        return
+      }
+      if (!origen || !destino) {
+        const lista = listaCuentas.length
+          ? listaCuentas.map((c) => `• ${c.nombre}: ${COD(Number(c.saldoActual) || 0)}`).join('\n')
+          : 'Todavía no tienes cuentas registradas.'
+        push({
+          rol: 'ia',
+          texto:
+            `Necesito saber de qué cuenta a cuál. Estas son las que tengo:\n\n${lista}\n\n` +
+            (listaCuentas.length >= 2
+              ? `Dime por ejemplo: "pasa 200.000 de ${listaCuentas[0].nombre} a ${listaCuentas[1].nombre}".`
+              : 'Ve a la pestaña "Cuentas" y agrega al menos dos para poder transferir.'),
+        })
+        return
+      }
+
+      try {
+        const r = await transferirEntreCuentas({
+          origenId: origen.id,
+          destinoId: destino.id,
+          monto,
+          fecha,
+          concepto,
+        })
+        if (!r.ok) {
+          const mensajes: Record<string, string> = {
+            monto_invalido: 'El monto debe ser mayor a cero.',
+            misma_cuenta: 'La cuenta de origen y la de destino son la misma. Dime dos cuentas distintas.',
+            cuenta_no_encontrada: 'No encontré una de las cuentas. Revisa la pestaña "Cuentas" y lo intentamos de nuevo.',
+            saldo_insuficiente: `La cuenta "${origen.nombre}" tiene ${COD(r.saldoDisponible ?? 0)}, no alcanza para mover ${COD(monto)}.`,
+          }
+          push({ rol: 'ia', texto: mensajes[r.error] ?? 'No pude hacer la transferencia.' })
+          return
+        }
+        invalidarSnapshotFinanciero()
+        setCuentas((prev) =>
+          prev.map((c) => (c.id === r.origen.id ? r.origen : c.id === r.destino.id ? r.destino : c))
+        )
+        void cargarPulso()
+        push({
+          rol: 'ia',
+          texto:
+            `✅ Transferencia lista: ${COD(monto)} de ${r.origen.nombre} a ${r.destino.nombre} (${fecha}).\n\n` +
+            `• ${r.origen.nombre}: ${COD(r.origen.saldoActual)}\n` +
+            `• ${r.destino.nombre}: ${COD(r.destino.saldoActual)}`,
+        })
+      } catch (e: any) {
+        console.error('Error al transferir entre cuentas:', e)
+        push({ rol: 'ia', texto: `No pude hacer la transferencia: ${e?.message ?? 'error'}` })
       }
       return
     }

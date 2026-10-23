@@ -4,7 +4,7 @@
 
 ---
 
-## 0. ESTADO DE AVANCE REAL (actualizado 2026-10-12)
+## 0. ESTADO DE AVANCE REAL (actualizado 2026-10-23)
 
 > Las casillas de la sección 10 son el **plan original**. Esta sección refleja lo que **realmente funciona hoy**.
 
@@ -13,7 +13,8 @@
 ### Funcional hoy
 - **Auth** email/password (solo inicio de sesión; el registro está deshabilitado por ser app privada de 1 usuario). Reglas Firestore desplegadas.
 - **Chat IA con LLM real (Gemini) y fallback local**: si existe `VITE_GEMINI_API_KEY`, el chat usa **Gemini** (`gemini-3.1-flash-lite` por defecto, con fallback a `gemini-3.5-flash-lite`) para conversar y clasificar la intención en JSON, y el cliente ejecuta la acción; si falta la clave o falla la red, cae automáticamente al **motor NL local** (`src/features/chat/engine.ts`). El indicador del chat muestra "IA Gemini" o "IA local".
-  - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; pagar deudas; **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; generar calendario; resumen del mes.
+  - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; **transferir dinero entre cuentas** ("pasa 500.000 de Citigold a Efectivo", con validación de saldo y actualización atómica de ambos saldos); pagar deudas; **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; renovar SOAT/TM; consultar el detalle completo de un vehículo; generar calendario; resumen del mes.
+- **Transferencias entre cuentas** (nuevo): Lucía mueve plata de una cuenta a otra por chat. Se registra un movimiento `tipo: 'transferencia'` con `cuentaBancoId` (origen) y `cuentaDestinoId` (destino), y ambos saldos se actualizan en un `writeBatch` atómico. Valida que las cuentas sean distintas, que existan y que el saldo de origen alcance; nunca cuenta la transferencia como gasto ni ingreso en los reportes. Al editar o eliminar el movimiento, el repositorio revierte/reaplica ambos saldos. Si Gemini no está disponible, el motor local también reconoce "pasa/transfiere/mueve X de la cuenta A a la B".
 - **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
 - **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes, **impuestos**.
 - **Impuestos** (nuevo): colección `impuestos` (predial, vehicular, renta, ICA, otros) con entidad, valor, periodicidad, fecha de vencimiento y estado pagado. Los impuestos no pagados con vencimiento se agregan al calendario y a los recordatorios.
@@ -310,6 +311,7 @@ movimientos/{id}
   categoria: string
   subcategoria?: string
   cuentaBancoId?: string
+  cuentaDestinoId?: string  // solo en transferencias: cuenta que recibe
   deudaId?: string
   vehiculoId?: string
   propiedadId?: string
@@ -470,7 +472,8 @@ Mientras la cuenta no esté en plan **Blaze** (Cloud Functions lo requiere), la 
 
 - **`src/ai/gemini.ts`**: llama a la API REST de Gemini (`v1beta/models/{modelo}:generateContent`) con `responseMimeType: application/json`. La IA tiene identidad: **Lucía**, contadora colombiana cercana que conversa con naturalidad y da una opinión breve. El *system instruction* pide `{mensaje, acciones:[{accion, params}]}` — es decir, **varias transacciones por mensaje** (una entrada por cada movimiento detectado). Normaliza fechas/montos. Usa `gemini-3.1-flash-lite` (por defecto) con fallback a `gemini-3.5-flash-lite`. Se eligieron estos dos porque son los que dan cupo diario utilizable en el plan gratuito: los modelos tope (`gemini-3.8-flash`, `3.7-flash`) solo permiten ~20 solicitudes/día, mientras que los *flash-lite* tienen un cupo diario mucho mayor. La cuota es por modelo, así que la cadena suma. Si todos fallan por cuota (HTTP 429), el chat muestra un aviso claro de "cuota agotada" en vez de caer silenciosamente al motor local.
 - **`src/features/chat/interpretar.ts`**: orquestador. Si `geminiDisponible` (hay `VITE_GEMINI_API_KEY`) usa Gemini; ante cualquier error hace *fallback* al motor local (`interpretarLote`, que divide el mensaje por conectores "y / , / luego" y produce varios borradores; si no, `interpretarMensaje`).
-- **`src/features/chat/snapshot.ts`**: arma un "Contexto financiero actual" en vivo (saldos, resumen del mes, deudas, recurrentes, impuestos, patrimonio, nómina, próximos vencimientos y **tasas de cambio del día**) leyendo Firestore con `Promise.allSettled` (una colección que falle no rompe el resto) y lo inyecta en cada consulta a Gemini. Cacheado ~20 s e invalidado al escribir (`invalidarSnapshotFinanciero`). Con esto Lucía **analiza y conversa** sobre el estado real; la instrucción del sistema dirige los pedidos de análisis ("analiza mi estado") a `mensaje` con `acciones` vacía, en vez de disparar un listado.
+- **`src/features/chat/snapshot.ts`**: arma un "Contexto financiero actual" en vivo (saldos, resumen del mes, deudas, recurrentes, impuestos, patrimonio, nómina, próximos vencimientos y **tasas de cambio del día**) leyendo Firestore con `Promise.allSettled` (una colección que falle no rompe el resto) y lo inyecta en cada consulta a Gemini. Cacheado ~20 s e invalidado al escribir (`invalidarSnapshotFinanciero`). Con esto Lucía **analiza y conversa** sobre el estado real; la instrucción del sistema dirige los pedidos de análisis ("analiza mi estado") a `mensaje` con `acciones` vacía, en vez de disparar un listado. Las cuentas se listan con su `[id: ...]` para que Lucía pueda transferir entre ellas sin inventar identificadores.
+- **Transferencias (`transferir`)**: Gemini devuelve `{monto, cuentaOrigenId, cuentaDestinoId, fecha}` usando los IDs del snapshot; `ChatPage.tsx` resuelve las cuentas (por ID o por nombre, tolerante a tildes), llama a `transferirEntreCuentas` y muestra los saldos resultantes. Es la única acción que se ejecuta sin tarjeta de confirmación, porque el usuario la pide de forma explícita; el movimiento queda visible en el Dashboard y se puede eliminar (lo que revierte ambos saldos).
 - **`src/lib/fx.ts` (multidivisa)**: convierte cualquier moneda a COP con la **tasa del día**. Usa la API gratuita y sin clave `@fawazahmed0/currency-api` (con dominio espejo `currency-api.pages.dev`), cacheada 6 h en memoria y en `localStorage` (`cashmet_fx_v1`), con degradación al último valor conocido si no hay red. Lucía detecta la moneda (nómina en dólares, gastos en euros, etc.), deja el monto original y su código ISO en el campo `moneda`, y **la app** hace la conversión a COP al construir el borrador (`interpretar.ts`), mostrando en la tarjeta "Monto original: USD 3.000 · tasa: 1 USD = $3.190 COP". Si la tasa no está disponible, deja el monto en 0 y avisa para que el usuario lo escriba en pesos. También responde preguntas tipo "¿a cómo está el dólar?".
 - **`src/features/chat/ChatPage.tsx`**: muestra el `mensaje` humano de Lucía y ejecuta cada acción del lote. Cada `registrar_movimiento` genera **su propia tarjeta de confirmación** (se pueden confirmar varias en un mismo mensaje); el resto se persiste directo (recurrente, evento, pago de nómina, pagos de deuda, etc.). **Memoria de conversación**: envía los últimos ~8 turnos (sin el saludo) a Gemini como historial (`contents` con roles `user`/`model`), persiste el chat en `localStorage` (`cashmet_chat_v1`) para conservarlo al recargar, e incluye botón de "nueva conversación". Incluye indicador "escribiendo…". Las burbujas de la IA se renderizan con `TextoEnriquecido.tsx` (negrita/itálica y viñetas sin librerías externas) y el prompt pide un estilo conversado, sin Markdown visible. En pantallas anchas muestra un panel lateral con las tasas del día y una **gráfica de ingresos vs gastos de los últimos 6 meses** (CSS+motion, sin librerías). En móvil el chat ocupa toda la pantalla con barra de escritura fija.
 - **Variables**: `VITE_GEMINI_API_KEY` (obligatoria para IA real), `VITE_GEMINI_MODEL` (por defecto `gemini-3.1-flash-lite`). Ver `.env.example`.
@@ -631,6 +634,7 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 | `Pagar sueldo a Juan Pérez 1500000 COP hoy` | Crear movimiento pago_nomina, vincular nómina Juan. |
 | `Genera calendario vencimientos este año` | Crear eventos: SOAT/TM/STR, primas julio/diciembre, sueldos, predial, cuotas deudas. |
 | `Muéstrame resumen octubre 2026` | Resumen mensual: ingresos/gastos/balance + categorías. |
+| `Pasa 500.000 de Citigold a Efectivo` | Transferencia entre cuentas: movimiento `tipo: 'transferencia'` con origen/destino, descuenta origen y suma destino en un lote atómico. |
 
 ---
 

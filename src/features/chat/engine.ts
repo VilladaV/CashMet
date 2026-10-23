@@ -28,6 +28,7 @@ export const NOMBRE_IA = 'Lucía'
 const AYUDA =
   '¡Hola! Soy Lucía, tu contadora. Puedo registrar gastos e ingresos ("gasté 50.000 en mercado", "me regalaron 70.000"), ' +
   'varios en un mismo mensaje ("compré un almuerzo por 25.000 y pagué 30.000 de taxi"), consultar saldos ("¿cuánto tengo?"), ' +
+  'mover plata entre tus cuentas ("pasa 500.000 de la cuenta A a la B"), ' +
   'listar movimientos, registrar pagos de deudas, pagar nómina, crear gastos recurrentes y eventos, ' +
   'convertir otras monedas a pesos con la tasa del día ("me pagaron 3.000 dólares", "gasté 50 euros"), ' +
   'registrar vehículos, estimar SOAT/tecnicomecánica/seguros en Colombia, generar el calendario de vencimientos y ' +
@@ -316,6 +317,36 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
 }
 
 const CONECTORES_LOTE = /\s+y\s+|\s*[,;]\s*|\s+luego\s+|\s+despues\s+|\s+tambien\s+|\s+ademas\s+/i
+
+export function interpretarTransferencia(mensaje: string, cuentas: string[]): Interpretacion | null {
+  if (cuentas.length < 2) return null
+  const t = normalizarTexto(mensaje)
+  if (!/\b(transferi|transfiere|transferir|pasa|pasar|mueve|mover|envia|enviar|consigna|consignar)\b/.test(t)) return null
+  const monto = parseMontoCO(mensaje)
+  if (!monto || monto <= 0) return null
+
+  const encontradas = cuentas
+    .map((nombre) => ({ nombre, indice: t.indexOf(normalizarTexto(nombre)) }))
+    .filter((x) => x.indice >= 0)
+    .sort((a, b) => a.indice - b.indice)
+
+  if (encontradas.length < 2) return null
+  const origen = encontradas[0].nombre
+  const destino = encontradas[1].nombre
+  if (normalizarTexto(origen) === normalizarTexto(destino)) return null
+
+  return {
+    respuesta: `Voy a pasar ${monto.toLocaleString('es-CO')} de ${origen} a ${destino}.`,
+    acciones: ['transferir'],
+    params: {
+      monto,
+      cuentaOrigenId: origen,
+      cuentaDestinoId: destino,
+      fecha: parseFecha(mensaje),
+      moneda: detectarMoneda(mensaje),
+    },
+  }
+}
 
 export function interpretarLote(mensaje: string): Interpretacion | null {
   const segmentos = mensaje

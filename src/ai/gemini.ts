@@ -37,6 +37,7 @@ Ejemplo: "compré un almuerzo por 25k y luego me regalaron 70k" → DOS acciones
 
 Acciones permitidas y sus params:
 - registrar_movimiento: {tipo:"gasto"|"ingreso", fecha:"YYYY-MM-DD", concepto:"...", monto:numero (en su moneda original, sin símbolos), categoria:"...", moneda:"USD" (opcional, solo si NO es COP)}
+- transferir: {monto:numero, cuentaOrigenId:"...", cuentaDestinoId:"...", fecha:"YYYY-MM-DD", concepto:"...", moneda:"USD" (opcional)}
 - consulta_saldos: {}
 - busqueda_movimientos: {}
 - resumen_mes: {mes:"YYYY-MM"}
@@ -62,8 +63,14 @@ Reglas:
   * Si el usuario dice "renueva el SOAT" y tú llamas a renovar_tecnomecanica, ESTÁS FALLANDO.
 - ANÁLISIS Y CONSEJO: si el usuario pide analizar, revisar, evaluar su estado ("¿cómo voy?", "analiza mi estado", "dame un diagnóstico", "en qué puedo mejorar", "cómo está mi plata"), responde ÚNICAMENTE con tu análisis en "mensaje", en lenguaje natural y conversado (puedes apoyarte en 2-4 guiones simples si ayuda) con las cifras reales del contexto, y deja "acciones" VACÍA. No uses busqueda_movimientos ni resumen_mes para esto.
 - Usa busqueda_movimientos SOLO si pide explícitamente ver/listar movimientos.
-- Nunca digas que ya guardaste o registraste un movimiento: se le muestra al usuario una tarjeta para que lo confirme. Invítalo a revisarlo (ej: "te lo dejo para que lo confirmes").
+- Nunca digas que ya guardaste o registraste un movimiento: se le muestra al usuario una tarjeta para que lo confirme. Invítalo a revisarlo (ej: "te lo dejo para que lo confirmes"). La única excepción son las transferencias entre cuentas: esas se ejecutan al instante y puedes decir que estás haciendo el movimiento.
 - Gasto o ingreso normal → registrar_movimiento. Sueldos/salarios → pago_nomina; cuotas, créditos, tarjetas o préstamos → pago_deuda.
+- TRANSFERENCIAS ENTRE CUENTAS (crítico): usa la acción transferir SOLO cuando el usuario pida mover plata de una cuenta suya a otra ("pasa 500.000 de Citigold a Efectivo", "transfiere 2 millones de la cuenta de ahorros al banco X", "mueve 100 dólares de Wise a Bancolombia").
+  * NO es un gasto ni un ingreso: es un traslado entre cuentas y no cambia su patrimonio. Nunca uses registrar_movimiento para esto.
+  * Usa exactamente los IDs que aparecen como [id: ...] en el bloque "DINERO EN CUENTAS". Copia el ID de la cuenta de origen en "cuentaOrigenId" y el de la cuenta de destino en "cuentaDestinoId".
+  * Si no puedes identificar con claridad la cuenta de origen o la de destino, NO inventes ni adivines: pregunta cuál es en "mensaje" y deja "acciones" vacía.
+  * La app ejecuta la transferencia al instante, así que no digas "te la dejo para confirmar"; di con naturalidad que estás haciendo el movimiento.
+  * Si el monto supera el saldo de la cuenta de origen, la app te avisará y se lo dirás al usuario sin regañar.
 - crear_recurrente si menciona "recurrente", "mensual", "fijo", "cada mes" o "todos los meses" con un gasto.
 - registrar_mantenimiento si menciona mantenimiento del vehículo con costo (aceite, frenos, llantas, revisión, taller, reparación): usa placa o marca/línea si las dice.
 - crear_evento si pide agendar, recordar, una cita/reunión, o algo que "vence el día N".
@@ -192,6 +199,16 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     if (nombre === 'pago_deuda' || nombre === 'pago_nomina') {
       params.fecha = fechaValida(params.fecha, contexto.hoy)
       params.monto = num(params.monto)
+    }
+    if (nombre === 'transferir') {
+      params.monto = num(params.monto)
+      params.fecha = fechaValida(params.fecha, contexto.hoy)
+      params.cuentaOrigenId = String(
+        params.cuentaOrigenId ?? params.cuentaOrigen ?? params.origenId ?? params.origen ?? ''
+      ).trim()
+      params.cuentaDestinoId = String(
+        params.cuentaDestinoId ?? params.cuentaDestino ?? params.destinoId ?? params.destino ?? ''
+      ).trim()
     }
     if (nombre === 'crear_recurrente') {
       params.monto = num(params.monto)

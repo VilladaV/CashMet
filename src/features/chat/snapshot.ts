@@ -71,8 +71,11 @@ export async function construirSnapshotFinanciero(): Promise<string> {
 
   const totalCuentas = cuentas.reduce((s, c) => s + (Number(c.saldoActual) || 0), 0)
   lineas.push('', `DINERO EN CUENTAS: ${COD(totalCuentas)} (${cuentas.length} cuentas)`)
-  for (const c of cuentas.slice(0, 8)) {
-    lineas.push(`  · ${c.nombre}: ${COD(Number(c.saldoActual) || 0)}`)
+  for (const c of cuentas) {
+    lineas.push(`  · ${c.nombre}: ${COD(Number(c.saldoActual) || 0)} [id: ${c.id}]`)
+  }
+  if (cuentas.length > 1) {
+    lineas.push(`  … (para transferir entre cuentas usa el [id: ...] de origen y destino en la acción transferir)`)
   }
 
   const mes = mesActual()

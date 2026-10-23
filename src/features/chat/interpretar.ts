@@ -1,4 +1,4 @@
-import { interpretarLote, interpretarMensaje, type Interpretacion } from './engine'
+import { interpretarLote, interpretarMensaje, interpretarTransferencia, type Interpretacion } from './engine'
 import { geminiDisponible, interpretarConGemini } from '@/ai/gemini'
 import { convertirACOP } from '@/lib/fx'
 
@@ -80,7 +80,8 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
       })
     } catch (e) {
       console.warn('Gemini no disponible; usando parser local.', e)
-      const local = interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
+      const local =
+        interpretarTransferencia(mensaje, contexto.cuentas) ?? interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
       const sinAccion = !local.acciones.length && !local.lote?.length
       if ((e as Error)?.message === 'gemini_cuota' && sinAccion) {
         return { respuesta: MENSAJE_CUOTA, acciones: [] }
@@ -88,7 +89,13 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
       interp = local
     }
   } else {
-    interp = interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
+    interp =
+      interpretarTransferencia(mensaje, contexto.cuentas) ?? interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
+  }
+
+  if (!interp.acciones.length && !interp.lote?.length) {
+    const transferencia = interpretarTransferencia(mensaje, contexto.cuentas)
+    if (transferencia) interp = transferencia
   }
 
   return convertirExtranjeras(interp)
