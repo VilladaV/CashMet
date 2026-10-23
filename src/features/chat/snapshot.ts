@@ -147,6 +147,15 @@ export async function construirSnapshotFinanciero(): Promise<string> {
     lineas.push('', `IMPUESTOS PENDIENTES (${impuestos.length})`)
     lineas.push(`- Valor total pendiente: ${COD(totalImp)}`)
     if (prox) lineas.push(`- Próximo vencimiento: ${prox.nombre} el ${prox.fechaVencimiento}`)
+    for (const i of impuestos) {
+      const extras: string[] = []
+      if (i.fechaVencimiento) extras.push(`vence ${i.fechaVencimiento}`)
+      if (i.autoPagar) extras.push('⚡ auto')
+      lineas.push(
+        `  · ${i.nombre}: ${COD(Number(i.valor) || 0)} (${i.periodicidad})${extras.length ? ` — ${extras.join('; ')}` : ''} [id: ${i.id}]`
+      )
+    }
+    lineas.push(`  … (para pagar uno usa el [id: ...] en la acción pagar_impuesto)`)
   }
 
   if (vehiculos.length) {

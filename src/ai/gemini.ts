@@ -44,6 +44,7 @@ Acciones permitidas y sus params:
 - generar_calendario: {}
 - pago_deuda: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto", moneda:"USD" (opcional)}
 - pago_nomina: {monto:numero, fecha:"YYYY-MM-DD", nombre:"texto", moneda:"USD" (opcional)}
+- pagar_impuesto: {impuestoId:"...", nombre:"..." (opcional), fecha:"YYYY-MM-DD" (opcional)}
 - crear_recurrente: {concepto:"...", monto:numero, categoria:"hogar"|"transporte"|"salud"|"educacion"|"servicios"|"otro", periodicidad:"mensual"|"bimestral"|"trimestral"|"semestral"|"anual", diaVencimiento:numero, moneda:"USD" (opcional)}
 - crear_evento: {titulo:"...", fecha:"YYYY-MM-DD"}
 - investigar_vehiculo: {marca:"...", linea:"...", modelo:numero, cilindraje:numero}
@@ -71,6 +72,7 @@ Reglas:
   * Si no puedes identificar con claridad la cuenta de origen o la de destino, NO inventes ni adivines: pregunta cuál es en "mensaje" y deja "acciones" vacía.
   * La app ejecuta la transferencia al instante, así que no digas "te la dejo para confirmar"; di con naturalidad que estás haciendo el movimiento.
   * Si el monto supera el saldo de la cuenta de origen, la app te avisará y se lo dirás al usuario sin regañar.
+- IMPUESTOS: si el usuario dice que pagó un impuesto ("pagué el predial", "paga el vehicular", "ya pagué la renta") y ese impuesto aparece en "IMPUESTOS PENDIENTES" con su [id: ...], usa la acción pagar_impuesto con ese ID. NO lo registres como un gasto normal. Si no aparece en la lista, o hay varios y no sabes cuál es, pregunta en "mensaje" y deja "acciones" vacía. Si el usuario menciona un monto distinto al valor registrado del impuesto, NO lo pagues: pregúntale si quiere que actualices el valor antes de registrarlo.
 - crear_recurrente si menciona "recurrente", "mensual", "fijo", "cada mes" o "todos los meses" con un gasto.
 - registrar_mantenimiento si menciona mantenimiento del vehículo con costo (aceite, frenos, llantas, revisión, taller, reparación): usa placa o marca/línea si las dice.
 - crear_evento si pide agendar, recordar, una cita/reunión, o algo que "vence el día N".
@@ -209,6 +211,11 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
       params.cuentaDestinoId = String(
         params.cuentaDestinoId ?? params.cuentaDestino ?? params.destinoId ?? params.destino ?? ''
       ).trim()
+    }
+    if (nombre === 'pagar_impuesto') {
+      params.impuestoId = String(params.impuestoId ?? params.id ?? '').trim()
+      params.nombre = String(params.nombre ?? params.impuesto ?? '').trim()
+      params.fecha = fechaValida(params.fecha, contexto.hoy)
     }
     if (nombre === 'crear_recurrente') {
       params.monto = num(params.monto)

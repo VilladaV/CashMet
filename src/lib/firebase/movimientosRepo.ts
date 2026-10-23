@@ -43,6 +43,7 @@ export interface MovimientoInput {
   vehiculoId?: string
   propiedadId?: string
   nominaId?: string
+  impuestoId?: string
   recurrenteId?: string
   etiquetas?: string[]
   fuente?: 'chat_IA' | 'manual' | 'automatico'
@@ -73,6 +74,7 @@ export interface MovimientoDoc {
   vehiculoId?: string
   propiedadId?: string
   nominaId?: string
+  impuestoId?: string
   recurrenteId?: string
   etiquetas?: string[]
   creado?: number

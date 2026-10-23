@@ -13,13 +13,14 @@
 ### Funcional hoy
 - **Auth** email/password (solo inicio de sesión; el registro está deshabilitado por ser app privada de 1 usuario). Reglas Firestore desplegadas.
 - **Chat IA con LLM real (Gemini) y fallback local**: si existe `VITE_GEMINI_API_KEY`, el chat usa **Gemini** (`gemini-3.1-flash-lite` por defecto, con fallback a `gemini-3.5-flash-lite`) para conversar y clasificar la intención en JSON, y el cliente ejecuta la acción; si falta la clave o falla la red, cae automáticamente al **motor NL local** (`src/features/chat/engine.ts`). El indicador del chat muestra "IA Gemini" o "IA local".
-  - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; **transferir dinero entre cuentas** ("pasa 500.000 de Citigold a Efectivo", con validación de saldo y actualización atómica de ambos saldos); pagar deudas; **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; renovar SOAT/TM; consultar el detalle completo de un vehículo; generar calendario; resumen del mes.
+  - Acciones: registrar ingresos/gastos con confirmación editable; consultar saldos; listar movimientos; **transferir dinero entre cuentas** ("pasa 500.000 de Citigold a Efectivo", con validación de saldo y actualización atómica de ambos saldos); pagar deudas; **pagar impuestos** (vinculado al impuesto pendiente, marca pagado y descuenta la cuenta); **pago de nómina** (vinculado a trabajador si coincide); **crear gasto recurrente**; **crear evento de calendario** (agenda/recordatorio/"vence el día N"); registrar vehículo; estimar SOAT/TM/STR Colombia; renovar SOAT/TM; consultar el detalle completo de un vehículo; generar calendario; resumen del mes.
 - **Transferencias entre cuentas** (nuevo): Lucía mueve plata de una cuenta a otra por chat. Se registra un movimiento `tipo: 'transferencia'` con `cuentaBancoId` (origen) y `cuentaDestinoId` (destino), y ambos saldos se actualizan en un `writeBatch` atómico. Valida que las cuentas sean distintas, que existan y que el saldo de origen alcance; nunca cuenta la transferencia como gasto ni ingreso en los reportes. Al editar o eliminar el movimiento, el repositorio revierte/reaplica ambos saldos. Si Gemini no está disponible, el motor local también reconoce "pasa/transfiere/mueve X de la cuenta A a la B".
 - **Dashboard**: saldo total, cuentas, ingresos/gastos del mes, últimos movimientos (con **editar** y eliminar; editar ajusta el saldo de la cuenta afectada).
 - **CRUD** completo: cuentas, deudas (+ registro de pago de cuota), vehículos, propiedades, nómina, gastos recurrentes, **impuestos**.
 - **Impuestos** (nuevo): colección `impuestos` (predial, vehicular, renta, ICA, otros) con entidad, valor, periodicidad, fecha de vencimiento y estado pagado. Los impuestos no pagados con vencimiento se agregan al calendario y a los recordatorios.
 - **Recurrentes con autogeneración**: modelo extendido (`fechaInicio`, `fechaFin`, `cuentaBancoId`, `autoGenerar`) y botón "Generar movimientos y eventos del mes" (idempotente: no duplica lo ya generado). Respeta periodicidad mensual/bimestral/trimestral/semestral/anual.
-- **Piloto automático** (nuevo): al iniciar sesión se ejecuta solo (`src/lib/piloto.ts`, idempotente): genera recurrentes del mes, consigna **tu salario** (se configura una vez en Nómina: monto, moneda, día y cuenta; si es en USD u otra moneda, se convierte a COP con la tasa del día de la consignación y se guarda la tasa usada) y descuenta las **cuotas de deudas marcadas con ⚡ auto**. Lucía te anuncia al entrar lo que aplicó ("Se te consignó tu salario mensual por $X").
+- **Piloto automático** (nuevo): al iniciar sesión se ejecuta solo (`src/lib/piloto.ts`, idempotente): genera recurrentes del mes, consigna **tu salario** (se configura una vez en Nómina: monto, moneda, día y cuenta; si es en USD u otra moneda, se convierte a COP con la tasa del día de la consignación y se guarda la tasa usada), descuenta las **cuotas de deudas marcadas con ⚡ auto** y **paga los impuestos marcados con ⚡ auto** cuando llega su fecha de vencimiento. Lucía te anuncia al entrar lo que aplicó ("Se te consignó tu salario mensual por $X", "Se registró el pago del impuesto Predial por $Y") y te avisa si un impuesto no se pudo pagar por saldo insuficiente o por no tener cuenta asignada.
+- **Impuestos automáticos** (nuevo): cada impuesto puede marcarse con **⚡ Pagar automáticamente al vencer** y elegir la **cuenta para descontar**. Al cumplirse `fechaVencimiento`, el piloto crea un movimiento `tipo: 'impuesto'` vinculado (`impuestoId`), marca el impuesto como pagado, guarda `fechaPago` y descuenta el saldo en un `writeBatch` atómico. Si el saldo no alcanza, no lo marca pagado y avisa. Lucía también puede registrarlo por chat: "pagué el predial".
 - **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
 - **Backup**: exportar/importar todo Firestore a JSON desde la app (incluye `impuestos`).
 - **PWA** instalable. Build con **code-splitting** (chunks `firebase`/`motion`/`vendor`/`index`, ninguno > 500 kB).
@@ -316,6 +317,7 @@ movimientos/{id}
   vehiculoId?: string
   propiedadId?: string
   nominaId?: string
+  impuestoId?: string  // en movimientos tipo 'impuesto'
   recurrenteId?: string
   etiquetas: string[]
   fuente: 'chat_IA'|'manual'|'automatico'
@@ -390,12 +392,17 @@ impuestos/{id}
   periodicidad: 'anual'|'semestral'|'bimestral'|'trimestral'|'mensual'|'unico'
   fechaVencimiento?: string  // YYYY-MM-DD
   pagado: boolean
+  autoPagar?: boolean  // ⚡ el piloto lo paga al vencer
+  cuentaBancoId?: string  // cuenta de la que se descuenta
+  fechaPago?: string  // YYYY-MM-DD del último pago registrado
   notas?: string
   actualizado?: number
 }
 ```
 
 > Los impuestos **no pagados** con `fechaVencimiento` se agregan automáticamente al calendario (`construirEventos`) con `tipo: 'impuesto'` y `relacionado.impuestoId`.
+>
+> **Pago automático**: si `autoPagar` es `true`, al llegar `fechaVencimiento` el piloto llama a `registrarPagoImpuesto` (`src/lib/firebase/impuestosRepo.ts`), que en un solo `writeBatch` crea el movimiento `tipo: 'impuesto'`, marca `pagado: true`, guarda `fechaPago` y descuenta `valor` de `cuentaBancoId` (si está definida). Es idempotente: un impuesto ya pagado no se vuelve a cobrar.
 
 ---
 
@@ -474,6 +481,7 @@ Mientras la cuenta no esté en plan **Blaze** (Cloud Functions lo requiere), la 
 - **`src/features/chat/interpretar.ts`**: orquestador. Si `geminiDisponible` (hay `VITE_GEMINI_API_KEY`) usa Gemini; ante cualquier error hace *fallback* al motor local (`interpretarLote`, que divide el mensaje por conectores "y / , / luego" y produce varios borradores; si no, `interpretarMensaje`).
 - **`src/features/chat/snapshot.ts`**: arma un "Contexto financiero actual" en vivo (saldos, resumen del mes, deudas, recurrentes, impuestos, patrimonio, nómina, próximos vencimientos y **tasas de cambio del día**) leyendo Firestore con `Promise.allSettled` (una colección que falle no rompe el resto) y lo inyecta en cada consulta a Gemini. Cacheado ~20 s e invalidado al escribir (`invalidarSnapshotFinanciero`). Con esto Lucía **analiza y conversa** sobre el estado real; la instrucción del sistema dirige los pedidos de análisis ("analiza mi estado") a `mensaje` con `acciones` vacía, en vez de disparar un listado. Las cuentas se listan con su `[id: ...]` para que Lucía pueda transferir entre ellas sin inventar identificadores.
 - **Transferencias (`transferir`)**: Gemini devuelve `{monto, cuentaOrigenId, cuentaDestinoId, fecha}` usando los IDs del snapshot; `ChatPage.tsx` resuelve las cuentas (por ID o por nombre, tolerante a tildes), llama a `transferirEntreCuentas` y muestra los saldos resultantes. Es la única acción que se ejecuta sin tarjeta de confirmación, porque el usuario la pide de forma explícita; el movimiento queda visible en el Dashboard y se puede eliminar (lo que revierte ambos saldos).
+- **Pago de impuestos (`pagar_impuesto`)**: el snapshot lista cada impuesto pendiente con su `[id: ...]`; si el usuario dice "pagué el predial", Gemini devuelve `pagar_impuesto` con ese ID y `ChatPage.tsx` llama a `registrarPagoImpuesto` (movimiento `tipo: 'impuesto'`, marca pagado y descuenta la cuenta si tiene una asignada). Si el monto mencionado no coincide con el registrado, Lucía pregunta antes de pagar.
 - **`src/lib/fx.ts` (multidivisa)**: convierte cualquier moneda a COP con la **tasa del día**. Usa la API gratuita y sin clave `@fawazahmed0/currency-api` (con dominio espejo `currency-api.pages.dev`), cacheada 6 h en memoria y en `localStorage` (`cashmet_fx_v1`), con degradación al último valor conocido si no hay red. Lucía detecta la moneda (nómina en dólares, gastos en euros, etc.), deja el monto original y su código ISO en el campo `moneda`, y **la app** hace la conversión a COP al construir el borrador (`interpretar.ts`), mostrando en la tarjeta "Monto original: USD 3.000 · tasa: 1 USD = $3.190 COP". Si la tasa no está disponible, deja el monto en 0 y avisa para que el usuario lo escriba en pesos. También responde preguntas tipo "¿a cómo está el dólar?".
 - **`src/features/chat/ChatPage.tsx`**: muestra el `mensaje` humano de Lucía y ejecuta cada acción del lote. Cada `registrar_movimiento` genera **su propia tarjeta de confirmación** (se pueden confirmar varias en un mismo mensaje); el resto se persiste directo (recurrente, evento, pago de nómina, pagos de deuda, etc.). **Memoria de conversación**: envía los últimos ~8 turnos (sin el saludo) a Gemini como historial (`contents` con roles `user`/`model`), persiste el chat en `localStorage` (`cashmet_chat_v1`) para conservarlo al recargar, e incluye botón de "nueva conversación". Incluye indicador "escribiendo…". Las burbujas de la IA se renderizan con `TextoEnriquecido.tsx` (negrita/itálica y viñetas sin librerías externas) y el prompt pide un estilo conversado, sin Markdown visible. En pantallas anchas muestra un panel lateral con las tasas del día y una **gráfica de ingresos vs gastos de los últimos 6 meses** (CSS+motion, sin librerías). En móvil el chat ocupa toda la pantalla con barra de escritura fija.
 - **Variables**: `VITE_GEMINI_API_KEY` (obligatoria para IA real), `VITE_GEMINI_MODEL` (por defecto `gemini-3.1-flash-lite`). Ver `.env.example`.
@@ -635,6 +643,7 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 | `Genera calendario vencimientos este año` | Crear eventos: SOAT/TM/STR, primas julio/diciembre, sueldos, predial, cuotas deudas. |
 | `Muéstrame resumen octubre 2026` | Resumen mensual: ingresos/gastos/balance + categorías. |
 | `Pasa 500.000 de Citigold a Efectivo` | Transferencia entre cuentas: movimiento `tipo: 'transferencia'` con origen/destino, descuenta origen y suma destino en un lote atómico. |
+| `Pagué el predial` | `pagar_impuesto` sobre el impuesto pendiente: movimiento `tipo: 'impuesto'`, marca pagado y descuenta la cuenta asignada. |
 
 ---
 

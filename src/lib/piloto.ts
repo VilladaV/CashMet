@@ -1,6 +1,7 @@
 import { crearMovimiento, listarMovimientos } from './firebase/movimientosRepo'
 import { generarEventosRecurrentes, generarMovimientosRecurrentes } from './firebase/recurrentesRepo'
 import { listarDeudas, registrarPagoDeuda } from './firebase/deudasRepo'
+import { listarImpuestos, registrarPagoImpuesto } from './firebase/impuestosRepo'
 import { leerPiloto, type PilotoConfig } from './firebase/pilotoRepo'
 import { convertirACOP } from './fx'
 
@@ -12,6 +13,7 @@ export interface ItemPiloto {
 export interface ResumenPiloto {
   fecha: string
   aplicados: ItemPiloto[]
+  avisos: string[]
   cambio: boolean
 }
 
@@ -35,6 +37,7 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
   const hoy = new Date()
   const mes = hoyISO().slice(0, 7)
   const aplicados: ItemPiloto[] = []
+  const avisos: string[] = []
   let cambio = false
 
   const movsRec = await generarMovimientosRecurrentes(mes)
@@ -111,7 +114,36 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
     }
   }
 
-  const resumen: ResumenPiloto = { fecha: hoyISO(), aplicados, cambio }
+  const impuestos = await listarImpuestos()
+  const hoyStr = hoyISO()
+  for (const imp of impuestos) {
+    if (!imp.autoPagar || imp.pagado) continue
+    const valor = Number(imp.valor) || 0
+    if (valor <= 0) continue
+    const vence = String(imp.fechaVencimiento ?? '').slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(vence) || vence > hoyStr) continue
+    const ya = movs.some((m) => (m as { impuestoId?: string }).impuestoId === imp.id)
+    if (ya) continue
+    try {
+      const r = await registrarPagoImpuesto(imp.id, { fuente: 'automatico' })
+      if (r.ok) {
+        aplicados.push({ texto: `Se registró el pago del impuesto "${imp.nombre}" por ${COD(valor)}`, monto: valor })
+        if (!imp.cuentaBancoId) {
+          avisos.push(`"${imp.nombre}" quedó pagado, pero no desconté saldo porque no tiene una cuenta asignada.`)
+        }
+        cambio = true
+      } else if (r.saldoInsuficiente) {
+        avisos.push(
+          `No pude pagar "${imp.nombre}" (${COD(valor)}): la cuenta "${r.cuentaNombre ?? ''}" solo tiene ${COD(r.saldoDisponible ?? 0)}.`
+        )
+        cambio = true
+      }
+    } catch {
+      /* se reintenta en la próxima apertura */
+    }
+  }
+
+  const resumen: ResumenPiloto = { fecha: hoyISO(), aplicados, avisos, cambio }
   try {
     localStorage.setItem(CLAVE, JSON.stringify({ ...resumen, anunciado: false }))
   } catch {

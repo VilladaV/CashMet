@@ -19,6 +19,7 @@ import {
   type CuentaBanco,
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
+import { listarImpuestos, registrarPagoImpuesto } from '@/lib/firebase/impuestosRepo'
 import { crearVehiculo, guardarTareaMantenimiento, listarVehiculos, nuevaTareaId, obtenerVehiculo, registrarServicioMantenimiento, renovarSoat, renovarTecnicomecanica } from '@/lib/firebase/vehiculosRepo'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
@@ -173,21 +174,39 @@ export default function ChatPage() {
   }, [msgs, pensando])
 
   useEffect(() => {
-    const r = leerResumenPiloto()
-    const h = new Date()
-    const hoy = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`
-    if (r && r.fecha === hoy && !r.anunciado && r.aplicados.length) {
-      marcarPilotoAnunciado()
-      const tiempo = h.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
-      setMsgs((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          rol: 'ia',
-          texto: `☀️ Piloto automático: dejé todo al día sin que muevas un dedo:\n${r.aplicados.map((a) => `• ${a.texto}`).join('\n')}\n\nAsí vas encaminado. 💪`,
-          timestamp: tiempo,
-        },
-      ])
+    let cancelado = false
+    let intentos = 0
+
+    const revisar = () => {
+      if (cancelado) return
+      const r = leerResumenPiloto()
+      const h = new Date()
+      const hoy = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')}`
+      const avisos = r?.avisos ?? []
+
+      if (r && r.fecha === hoy && !r.anunciado && (r.aplicados.length || avisos.length)) {
+        marcarPilotoAnunciado()
+        const tiempo = h.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+        const texto = [
+          r.aplicados.length ? '☀️ Piloto automático: dejé esto al día por ti:' : '☀️ Piloto automático:',
+          ...r.aplicados.map((a) => `• ${a.texto}`),
+          ...(avisos.length ? ['', ...avisos.map((a) => `⚠️ ${a}`)] : []),
+          '',
+          avisos.length ? 'Revisa esos pendientes cuando puedas. 💛' : 'Así vas encaminado. 💪',
+        ].join('\n')
+        setMsgs((prev) => [...prev, { id: Date.now(), rol: 'ia', texto, timestamp: tiempo }])
+        return
+      }
+
+      if ((!r || r.fecha !== hoy) && intentos < 15) {
+        intentos++
+        window.setTimeout(revisar, 700)
+      }
+    }
+
+    revisar()
+    return () => {
+      cancelado = true
     }
   }, [])
 
@@ -412,6 +431,80 @@ export default function ChatPage() {
       } catch (e: any) {
         console.error('Error al pagar deuda:', e)
         setError(`No se pudo registrar el pago (${e?.code || 'error'}).`)
+      }
+      return
+    }
+
+    if (op.nombre === 'pagar_impuesto') {
+      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const impuestoId = String(p.impuestoId ?? '').trim()
+      const nombreBuscado = normalizarNombreCuenta(String(p.nombre ?? p.impuesto ?? ''))
+      try {
+        const todos = await listarImpuestos()
+        const pendientes = todos.filter((i) => !i.pagado)
+        const impuesto = impuestoId
+          ? todos.find((i) => i.id === impuestoId)
+          : nombreBuscado
+            ? pendientes.find((i) => {
+                const n = normalizarNombreCuenta(i.nombre)
+                return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
+              }) ??
+              todos.find((i) => {
+                const n = normalizarNombreCuenta(i.nombre)
+                return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
+              })
+            : pendientes.length === 1
+              ? pendientes[0]
+              : undefined
+
+        if (!impuesto) {
+          push({
+            rol: 'ia',
+            texto:
+              pendientes.length === 0
+                ? 'No tienes impuestos pendientes registrados. Ve a la pestaña "Impuestos" y los agregamos.'
+                : `Tienes varios impuestos pendientes:\n${pendientes
+                    .map(
+                      (i) =>
+                        `• ${i.nombre}: ${COD(Number(i.valor) || 0)}${i.fechaVencimiento ? ` (vence ${i.fechaVencimiento})` : ''}`
+                    )
+                    .join('\n')}\n\n¿Cuál pago?`,
+          })
+          return
+        }
+
+        if (impuesto.pagado) {
+          push({ rol: 'ia', texto: `"${impuesto.nombre}" ya estaba marcado como pagado.` })
+          return
+        }
+
+        const r = await registrarPagoImpuesto(impuesto.id, { fecha, fuente: 'chat_IA' })
+        if (!r.ok) {
+          if (r.yaPagado) {
+            push({ rol: 'ia', texto: `"${impuesto.nombre}" ya estaba marcado como pagado.` })
+          } else if (r.saldoInsuficiente) {
+            push({
+              rol: 'ia',
+              texto: `No pude pagar "${impuesto.nombre}": la cuenta "${r.cuentaNombre ?? ''}" solo tiene ${COD(r.saldoDisponible ?? 0)} y el impuesto es ${COD(Number(impuesto.valor) || 0)}.`,
+            })
+          } else {
+            push({ rol: 'ia', texto: `No pude registrar el pago de "${impuesto.nombre}".` })
+          }
+          return
+        }
+
+        invalidarSnapshotFinanciero()
+        listarCuentasBanco().then(setCuentas).catch(() => {})
+        void cargarPulso()
+        push({
+          rol: 'ia',
+          texto:
+            `✅ Pago registrado: "${impuesto.nombre}" por ${COD(r.monto ?? 0)} (${fecha}).` +
+            (impuesto.cuentaBancoId ? '' : '\n\nOjo: no tenía una cuenta asociada, así que no desconté saldo.'),
+        })
+      } catch (e: any) {
+        console.error('Error al pagar impuesto:', e)
+        push({ rol: 'ia', texto: `No pude registrar el pago del impuesto: ${e?.message ?? 'error'}` })
       }
       return
     }
