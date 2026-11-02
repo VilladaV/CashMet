@@ -252,7 +252,7 @@ export default function App() {
       </div>
 
       {/* DOCK MÓVIL (se oculta en el chat: ahí mandan las burbujas) */}
-      <nav className={`fixed right-0 bottom-0 left-0 z-40 h-[68px] items-center justify-around border-t border-white/[0.07] bg-night-950/85 px-2 backdrop-blur-xl md:hidden ${tab === 'chat' ? 'hidden' : 'flex'}`}>
+      <nav className={`fixed right-0 bottom-0 left-0 z-40 h-[68px] items-center border-t border-white/[0.07] bg-night-950/85 px-1 backdrop-blur-xl md:hidden ${tab === 'chat' ? 'hidden' : 'flex'}`}>
         {primaryTabs.map((t) => {
           const Icon = t.icon
           const activo = tab === t.id
@@ -260,27 +260,27 @@ export default function App() {
             <button
               key={t.id}
               onClick={() => cambiar(t.id)}
-              className={`flex cursor-pointer flex-col items-center justify-center rounded-xl px-3 py-1 text-[10px] font-bold transition-colors ${
+              className={`flex min-w-0 flex-1 cursor-pointer flex-col items-center justify-center rounded-xl px-1 py-1 text-[10px] font-bold transition-colors ${
                 activo ? 'text-white' : 'text-mist-600'
               }`}
             >
               <span className={`rounded-xl p-1.5 transition-all ${activo ? 'bg-emerald-400/20 text-emerald-300' : ''}`}>
                 <Icon className="h-[18px] w-[18px]" />
               </span>
-              <span className="mt-0.5">{t.label}</span>
+              <span className="mt-0.5 max-w-full truncate">{t.label}</span>
             </button>
           )
         })}
         <button
           onClick={() => setMenuGestionAbierto(true)}
-          className={`flex cursor-pointer flex-col items-center justify-center rounded-xl px-3 py-1 text-[10px] font-bold transition-colors ${
+          className={`flex min-w-0 flex-1 cursor-pointer flex-col items-center justify-center rounded-xl px-1 py-1 text-[10px] font-bold transition-colors ${
             esGestionActual ? 'text-emerald-300' : 'text-mist-600'
           }`}
         >
           <span className={`rounded-xl p-1.5 transition-all ${esGestionActual ? 'bg-emerald-400/20' : ''}`}>
             <SlidersHorizontal className="h-[18px] w-[18px]" />
           </span>
-          <span className="mt-0.5">Gestión</span>
+          <span className="mt-0.5 max-w-full truncate">Gestión</span>
         </button>
       </nav>
 

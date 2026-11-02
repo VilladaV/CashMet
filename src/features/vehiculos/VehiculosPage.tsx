@@ -37,7 +37,7 @@ const FILTROS: Array<{ id: Filtro; label: string }> = [
   { id: 'activos', label: 'Activos' },
   { id: 'soat', label: 'SOAT' },
   { id: 'tm', label: 'Tecnomecánica' },
-  { id: 'vendidos', label: 'Vendidos' },
+  { id: 'vendidos', label: 'Inactivos' },
 ]
 
 const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
@@ -290,7 +290,7 @@ export default function VehiculosPage() {
 
   const seleccionar = (id: string) => {
     setSeleccionId(id)
-    if (window.innerWidth < 1024) {
+    if (window.innerWidth < 1280) {
       window.setTimeout(() => detalleRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
     }
   }
@@ -343,132 +343,139 @@ export default function VehiculosPage() {
             </span>
             <span className="inline-flex items-center gap-1 rounded-full border border-white/[0.07] bg-white/[0.02] px-2 py-1">
               <Gauge className="h-3 w-3 text-emerald-300" />
-              Vendidos: <b className="text-white">{vehiculos.length - activos.length}</b>
+              Inactivos: <b className="text-white">{vehiculos.length - activos.length}</b>
             </span>
           </div>
         </CardContent>
       </Card>
 
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative w-full sm:max-w-xs">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mist-500" />
-          <Input
-            value={busqueda}
-            onChange={(e) => setBusqueda(e.target.value)}
-            placeholder="Buscar por placa, marca, línea..."
-            className="field-dark h-10 pl-9 pr-8 text-xs"
-          />
-          {busqueda && (
-            <button
-              onClick={() => setBusqueda('')}
-              className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full text-mist-500 hover:bg-white/[0.06] hover:text-white"
-              aria-label="Limpiar búsqueda"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {FILTROS.map((f) => (
-            <button
-              key={f.id}
-              onClick={() => setFiltro(f.id)}
-              className={`cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-                filtro === f.id
-                  ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200'
-                  : 'border-white/[0.07] bg-white/[0.02] text-mist-400 hover:border-white/15 hover:text-white'
-              }`}
-            >
-              {f.label}
-              {f.id === 'alertas' && stats.alertas > 0 ? ` (${stats.alertas})` : ''}
-            </button>
-          ))}
-        </div>
-      </div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)] xl:items-start">
+        <div className="space-y-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative w-full sm:max-w-xs">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-mist-500" />
+              <Input
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value)}
+                placeholder="Buscar por placa, marca, línea..."
+                className="field-dark h-10 pl-9 pr-8 text-xs"
+              />
+              {busqueda && (
+                <button
+                  onClick={() => setBusqueda('')}
+                  className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full text-mist-500 hover:bg-white/[0.06] hover:text-white"
+                  aria-label="Limpiar búsqueda"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {FILTROS.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setFiltro(f.id)}
+                  className={`cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+                    filtro === f.id
+                      ? 'border-emerald-400/40 bg-emerald-400/10 text-emerald-200'
+                      : 'border-white/[0.07] bg-white/[0.02] text-mist-400 hover:border-white/15 hover:text-white'
+                  }`}
+                >
+                  {f.label}
+                  {f.id === 'alertas' && stats.alertas > 0 ? ` (${stats.alertas})` : ''}
+                </button>
+              ))}
+            </div>
+          </div>
 
-      {error && (
-        <Card className="glass-card border-0">
-          <CardContent className="flex flex-wrap items-center justify-between gap-2 p-4 text-xs text-red-200">
-            <span>{error}</span>
-            <Button variant="ghost" onClick={() => void cargar()} className="h-8 cursor-pointer">
-              Reintentar
-            </Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {cargando ? (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-36 animate-pulse rounded-2xl border border-white/[0.06] bg-white/[0.02]" />
-          ))}
-        </div>
-      ) : filtrados.length === 0 ? (
-        <Card className="glass-card border-0">
-          <CardContent className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-            <Car className="h-8 w-8 text-mist-500" />
-            <p className="text-sm font-semibold text-white">
-              {vehiculos.length === 0 ? 'Todavía no tienes vehículos registrados.' : 'No encontré vehículos con ese filtro.'}
-            </p>
-            <p className="max-w-sm text-[11px] text-mist-500">
-              {vehiculos.length === 0
-                ? 'Crea el primero para llevar SOAT, tecnomecánica, seguro y mantenimiento en un solo lugar.'
-                : 'Prueba con otra búsqueda o cambia el filtro.'}
-            </p>
-            {vehiculos.length === 0 ? (
-              <Button onClick={abrirNuevo} className="mt-2 h-9 cursor-pointer">
-                <Plus className="h-4 w-4" />
-                Crear vehículo
-              </Button>
-            ) : (
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setBusqueda('')
-                  setFiltro('todos')
-                }}
-                className="mt-2 h-8 cursor-pointer"
-              >
-                Limpiar filtros
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {filtrados.map((v) => (
-            <VehiculoCard
-              key={v.id}
-              vehiculo={v}
-              seleccionado={v.id === seleccionId}
-              onSeleccionar={() => seleccionar(v.id)}
-              onEditar={() => abrirEditar(v)}
-            />
-          ))}
-        </div>
-      )}
-
-      <div ref={detalleRef} className="scroll-mt-24">
-        {seleccionado ? (
-          <VehiculoDetalle
-            key={seleccionado.id}
-            vehiculo={seleccionado}
-            onCambio={cargar}
-            onEditar={() => abrirEditar(seleccionado)}
-          />
-        ) : (
-          !cargando && (
+          {error && (
             <Card className="glass-card border-0">
-              <CardContent className="flex flex-col items-center gap-2 px-4 py-8 text-center">
-                <Car className="h-7 w-7 text-mist-500" />
-                <p className="text-sm font-semibold text-white">Selecciona un vehículo para ver su detalle.</p>
-                <p className="text-[11px] text-mist-500">
-                  Aquí verás documentos, tarjeta de propiedad y el plan de mantenimiento.
-                </p>
+              <CardContent className="flex flex-wrap items-center justify-between gap-2 p-4 text-xs text-red-200">
+                <span>{error}</span>
+                <Button variant="ghost" onClick={() => void cargar()} className="h-8 cursor-pointer">
+                  Reintentar
+                </Button>
               </CardContent>
             </Card>
-          )
-        )}
+          )}
+
+          {cargando ? (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="h-36 animate-pulse rounded-2xl border border-white/[0.06] bg-white/[0.02]" />
+              ))}
+            </div>
+          ) : filtrados.length === 0 ? (
+            <Card className="glass-card border-0">
+              <CardContent className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+                <Car className="h-8 w-8 text-mist-500" />
+                <p className="text-sm font-semibold text-white">
+                  {vehiculos.length === 0 ? 'Todavía no tienes vehículos registrados.' : 'No encontré vehículos con ese filtro.'}
+                </p>
+                <p className="max-w-sm text-[11px] text-mist-500">
+                  {vehiculos.length === 0
+                    ? 'Crea el primero para llevar SOAT, tecnomecánica, seguro y mantenimiento en un solo lugar.'
+                    : 'Prueba con otra búsqueda o cambia el filtro.'}
+                </p>
+                {vehiculos.length === 0 ? (
+                  <Button onClick={abrirNuevo} className="mt-2 h-9 cursor-pointer">
+                    <Plus className="h-4 w-4" />
+                    Crear vehículo
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setBusqueda('')
+                      setFiltro('todos')
+                    }}
+                    className="mt-2 h-8 cursor-pointer"
+                  >
+                    Limpiar filtros
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              {filtrados.map((v) => (
+                <VehiculoCard
+                  key={v.id}
+                  vehiculo={v}
+                  seleccionado={v.id === seleccionId}
+                  onSeleccionar={() => seleccionar(v.id)}
+                  onEditar={() => abrirEditar(v)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={detalleRef}
+          className="scroll-mt-24 xl:sticky xl:top-20 xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto xl:pr-1"
+        >
+          {seleccionado ? (
+            <VehiculoDetalle
+              key={seleccionado.id}
+              vehiculo={seleccionado}
+              onCambio={cargar}
+              onEditar={() => abrirEditar(seleccionado)}
+            />
+          ) : (
+            !cargando && (
+              <Card className="glass-card border-0">
+                <CardContent className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                  <Car className="h-7 w-7 text-mist-500" />
+                  <p className="text-sm font-semibold text-white">Selecciona un vehículo para ver su detalle.</p>
+                  <p className="text-[11px] text-mist-500">
+                    Aquí verás documentos, tarjeta de propiedad y el plan de mantenimiento.
+                  </p>
+                </CardContent>
+              </Card>
+            )
+          )}
+        </div>
       </div>
 
       {formAbierto && (
