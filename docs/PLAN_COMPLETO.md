@@ -24,7 +24,7 @@
 - **Calendario**: vista de **cuadrícula mensual** con navegación de meses y detalle por día; evento manual; generar/guardar vencimientos; **editar** y eliminar.
 - **Backup**: exportar/importar todo Firestore a JSON desde la app (incluye `impuestos`).
 - **PWA** instalable. Build con **code-splitting** (chunks `firebase`/`motion`/`vendor`/`index`, ninguno > 500 kB).
-- **Billetera vehicular**: la pestaña Vehículos es ahora el detalle completo (port de BilleteraVehicular): selector + 4 tabs (Resumen con foto/estado/vigencias, Documentos con SOAT/TM ampliados y PDFs nativos, Tarjeta de propiedad frente/reverso, Mantenimiento con odómetro/tareas/progreso). Fotos y PDFs en Firebase Storage (`storage.rules`). Las tareas con `proximaFecha` generan eventos de calendario tipo `mantenimiento`. Registrar un servicio con costo crea automáticamente el movimiento tipo `mantenimiento` vinculado. Lucía entiende "cambié el aceite por 180.000" (`registrar_mantenimiento`, con multidivisa) y el snapshot incluye estado, km y vencimientos.
+- **Garaje (Vehículos)**: sección rediseñada y auditada. Encabezado con estadísticas (activos, valor comercial, costo mensual y alertas), búsqueda y filtros (todos, alertas, activos, SOAT, tecnomecánica, vendidos). Tarjetas con foto, estado, placas, vigencias SOAT/TM/STR, próximo mantenimiento, kilometraje y costo mensual. Alta/edición en un **formulario modal dedicado** (identificación, SOAT, tecnomecánica, todo riesgo, documentos y notas) con validación de placa, modelo, números y URLs. Detalle con selección persistente y 4 pestañas: Resumen (estado, foto, notas y desglose de costo), Documentos (SOAT/TM/STR y PDFs con visor), Tarjeta de propiedad (licencia, propietario y datos técnicos) y Mantenimiento (odómetro, tareas por km/meses, progreso y registro de servicios). Fotos y PDFs en Firebase Storage (`storage.rules`). Las tareas con `proximaFecha` generan eventos de calendario tipo `mantenimiento`; al borrar una tarea o un vehículo se eliminan sus eventos. Registrar un servicio con costo crea automáticamente el movimiento tipo `mantenimiento` vinculado y, si se elige cuenta, descuenta el saldo. Lucía entiende "cambié el aceite por 180.000" (`registrar_mantenimiento`, con km, cuenta y multidivisa), evita duplicar vehículos por placa, pregunta si hay varios coincidentes y el snapshot incluye estado, km y vencimientos.
 
 ### Pendiente para el 100%
 - **Google Calendar (OAuth)** — opcional, no bloquea el objetivo central.
@@ -161,55 +161,75 @@ Crítico Colombia: SOAT, Tecnicomecánica (RTM), Seguro Todo Riesgo.
 ```ts
 vehiculos/{id}
 {
-  placa: string
+  placa?: string
   marca: string
   linea: string
   modelo: number  // año
   tipo: 'carro'|'moto'|'camion'|'otro'
+  estado: 'Disponible'|'En reparación'|'Dañado'|'Decomisado'|'Vendido'|'No disponible'
   cilindraje?: number
   claseVehiculo?: string  // Colombia (particular, público, carga...)
-  valorComercial: number  // COP (estimado/actual)
-  valorPatrimonial?: number  // para balance
-  propietario: string
-  activo: boolean
-  soat: {
+  color?: string
+  valorComercial?: number  // COP (estimado/actual)
+  activo?: boolean
+  fotoUrl?: string
+  soat?: {
     vigente: boolean
-    aseguradora: string
-    numeroPoliza: string
-    fechaVencimiento: string  // YYYY-MM-DD
-    valorPrimaAnual: number  // COP
-    cobertura: string
-    fuente: 'investigado_IA'|'manual'
+    aseguradora?: string
+    numeroPoliza?: string
+    fechaInicioVigencia?: string  // YYYY-MM-DD
+    fechaVencimiento?: string  // YYYY-MM-DD
+    valorPrimaAnual?: number  // COP
+    fuente?: string
   }
-  tecnicomecanica: {
+  tecnicomecanica?: {
     vigente: boolean
-    centroRevision: string
-    fechaVencimiento: string  // YYYY-MM-DD
-    costoRevision: number  // COP (aprox)
-    tipo: 'vigente'
-    fuente: 'investigado_IA'|'manual'
+    centroRevision?: string
+    cda?: string
+    numeroCertificado?: string
+    fechaExpedicion?: string
+    fechaVencimiento?: string  // YYYY-MM-DD
+    costoRevision?: number  // COP (aprox)
+    fuente?: string
   }
-  seguroTodoRiesgo: {
+  seguroTodoRiesgo?: {
     tiene: boolean
     vigente: boolean
-    aseguradora: string
-    numeroPoliza: string
-    fechaVencimiento: string  // YYYY-MM-DD
-    valorPrimaAnual: number  // COP (o mensual)
-    periodicidad: 'anual'|'mensual'|'semestral'
-    deducible?: number
-    cobertura: string
-    fuente: 'investigado_IA'|'manual'
+    aseguradora?: string
+    numeroPoliza?: string
+    fechaVencimiento?: string  // YYYY-MM-DD
+    valorPrimaAnual?: number  // COP (o valor del periodo)
+    periodicidad?: 'mensual'|'bimestral'|'trimestral'|'semestral'|'anual'
+    fuente?: string
   }
-  otrosGastos: Array<{ concepto: string, periodicidad: 'mensual'|'trimestral'|'anual', valor: number }>
-  gastosMensualesCalculados: number  // SOAT/12 + STR/12 + TM + otros (pro-rata)
-  notas: string
-  actualizado: Timestamp
-  investigadoIA: Timestamp  // última investigación
+  otrosGastos?: Array<{ concepto: string, periodicidad: 'mensual'|'bimestral'|'trimestral'|'semestral'|'anual', valor: number }>
+  gastosMensualesCalculados: number  // SOAT/12 + TM/12 + STR según periodicidad + otros pro-rata
+  mantenimiento?: {
+    kilometrajeActual?: number
+    tareas: Array<{
+      id: string
+      nombre: string
+      ultimoKm?: number
+      proximoKm?: number
+      ultimaFecha?: string
+      proximaFecha?: string
+      intervaloKm?: number
+      intervaloMeses?: number
+      costoEstimado?: number
+    }>
+  }
+  licenciaTransito?: { numeroLicencia?: string, fechaExpedicion?: string, organismoTransito?: string, limitacionesPropiedad?: string }
+  propietarioDetalle?: { nombre?: string, documento?: string, direccion?: string, ciudad?: string, telefono?: string }
+  documentos?: { manualNombre?: string, manualUrl?: string, fichaNombre?: string, fichaUrl?: string }
+  notas?: string
+  actualizado?: number
+  investigadoIA?: number  // última investigación
 }
 ```
 
 > **Investigación IA Colombia**: Debe consultar rangos/costos aproximados vigentes (SOAT: tarifa por cilindraje/clase, tecnicomecánica: tarifas centros, STR: según valor comercial/modelo). Usar herramientas con búsqueda/instrucciones + pedir confirmación antes de fijar valores definitivos.
+>
+> **Fechas y Firestore**: las vigencias y renovaciones usan fecha local (`src/lib/fechas.ts`) para evitar corrimientos por UTC. Antes de escribir se aplica `limpio` recursivo (`src/lib/firebase/repoUtils.ts`), que elimina `undefined`/strings vacíos y objetos vacíos, pero conserva `null`, `Timestamp`, `FieldValue`, `Date` y arrays. Los campos que el usuario vacía se guardan como `null` para borrarlos de verdad.
 
 ### 4.5 `propiedades` (Propiedades + valor patrimonial + intereses)
 ```ts
@@ -593,7 +613,8 @@ Objetivo: Usar app fuera de red local (trabajo/viaje) de forma privada.
 - [x] CRUD Vehículos (SOAT/TM/STR)
 - [ ] Tool `investigarVehiculoCO` (estimados + requiereConfirmacion)
 - [x] UI confirmación sugeridos
-- [x] Cálculo gastos mensuales vehículos
+- [x] Cálculo gastos mensuales vehículos (SOAT y TM /12, STR según periodicidad, otros pro-rata)
+- [x] Auditoría y rediseño de Vehículos: garaje con estadísticas/filtros, formulario modal, detalle por pestañas, mantenimiento con cuentas y calendario idempotente
 
 ### FASE 4 - Propiedades + Nómina + Recurrentes (3-5h)
 - [x] Propiedades (valor patrimonial, predial)

@@ -3,6 +3,12 @@ import { ai } from '../genkit'
 import { addDoc, collection, doc, getDoc, updateDoc } from 'firebase/firestore'
 import { db } from '../../lib/firebase/config'
 import { COLLECTIONS } from '../../lib/firebase/collections'
+import { limpio } from '../../lib/firebase/repoUtils'
+import {
+  calcularGastosMensuales,
+  renovarSoat,
+  renovarTecnicomecanica,
+} from '../../lib/firebase/vehiculosRepo'
 
 export const InvestigarVehiculoInput = z.object({
   marca: z.string().min(1).max(40),
@@ -80,15 +86,17 @@ export const crearEditarVehiculoTool = ai.defineTool(
     outputSchema: z.object({ id: z.string(), ok: z.boolean() }),
   },
   async (input) => {
-    const payload: any = {
-      ...input,
-      gastosMensualesCalculados: 0,
+    const { vehiculoId, investigadoIA, ...datos } = input
+    const payload = limpio({
+      ...datos,
+      ...(vehiculoId ? {} : { activo: true, estado: 'Disponible' }),
+      gastosMensualesCalculados: calcularGastosMensuales(datos),
       actualizado: Date.now(),
-      investigadoIA: input.investigadoIA ? Date.now() : undefined,
-    }
-    if (input.vehiculoId) {
-      await updateDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId), payload)
-      return { id: input.vehiculoId, ok: true }
+      ...(investigadoIA ? { investigadoIA: Date.now() } : {}),
+    } as Record<string, unknown>)
+    if (vehiculoId) {
+      await updateDoc(doc(db, COLLECTIONS.VEHICULOS, vehiculoId), payload)
+      return { id: vehiculoId, ok: true }
     } else {
       const ref = await addDoc(collection(db, COLLECTIONS.VEHICULOS), payload)
       return { id: ref.id, ok: true }
@@ -136,19 +144,9 @@ export const renovarSoatTool = ai.defineTool(
     outputSchema: z.object({ ok: z.boolean(), fechaVencimiento: z.string() }),
   },
   async (input) => {
-    const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId))
-    if (!snap.exists()) throw new Error('Vehículo no encontrado')
-    const v = snap.data() as any
-    if (!v.soat?.fechaVencimiento) throw new Error('El vehículo no tiene SOAT con fecha de vencimiento')
-    const fecha = new Date(v.soat.fechaVencimiento)
-    fecha.setFullYear(fecha.getFullYear() + 1)
-    const nueva = fecha.toISOString().slice(0, 10)
-    await updateDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId), {
-      'soat.fechaVencimiento': nueva,
-      'soat.vigente': true,
-      actualizado: Date.now(),
-    })
-    return { ok: true, fechaVencimiento: nueva }
+    const r = await renovarSoat(input.vehiculoId)
+    if (!r) throw new Error('El vehículo no tiene SOAT con fecha de vencimiento')
+    return { ok: true, fechaVencimiento: r.fechaVencimiento }
   }
 )
 
@@ -160,18 +158,8 @@ export const renovarTecnicomecanicaTool = ai.defineTool(
     outputSchema: z.object({ ok: z.boolean(), fechaVencimiento: z.string() }),
   },
   async (input) => {
-    const snap = await getDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId))
-    if (!snap.exists()) throw new Error('Vehículo no encontrado')
-    const v = snap.data() as any
-    if (!v.tecnicomecanica?.fechaVencimiento) throw new Error('El vehículo no tiene Tecnicomecánica con fecha de vencimiento')
-    const fecha = new Date(v.tecnicomecanica.fechaVencimiento)
-    fecha.setFullYear(fecha.getFullYear() + 1)
-    const nueva = fecha.toISOString().slice(0, 10)
-    await updateDoc(doc(db, COLLECTIONS.VEHICULOS, input.vehiculoId), {
-      'tecnicomecanica.fechaVencimiento': nueva,
-      'tecnicomecanica.vigente': true,
-      actualizado: Date.now(),
-    })
-    return { ok: true, fechaVencimiento: nueva }
+    const r = await renovarTecnicomecanica(input.vehiculoId)
+    if (!r) throw new Error('El vehículo no tiene Tecnicomecánica con fecha de vencimiento')
+    return { ok: true, fechaVencimiento: r.fechaVencimiento }
   }
 )

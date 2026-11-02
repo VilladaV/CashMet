@@ -52,7 +52,7 @@ Acciones permitidas y sus params:
 - obtener_vehiculo_completo: {vehiculoId:"..."}
 - renovar_soat: {vehiculoId:"..."} — SOLO para renovar SOAT (seguro obligatorio). El usuario dirá "renueva el SOAT", "renueva el seguro obligatorio", "SOAT vencido".
 - renovar_tecnomecanica: {vehiculoId:"..."} — SOLO para renovar Tecnicomecánica (revisión técnico-mecánica). El usuario dirá "renueva la tecnomecánica", "renueva la TM", "revisión técnico-mecánica vencida".
-- registrar_mantenimiento: {monto:numero, fecha:"YYYY-MM-DD", placa:"ABC123" (opcional), marca:"..." (opcional), concepto:"cambio de aceite"}
+- registrar_mantenimiento: {monto:numero, fecha:"YYYY-MM-DD", placa:"ABC123" (opcional), marca:"..." (opcional), linea:"..." (opcional), concepto:"cambio de aceite", km:numero (opcional), cuentaBancoId:"..." (opcional)}
 - ayuda: {}
 
 Reglas:
@@ -74,7 +74,8 @@ Reglas:
   * Si el monto supera el saldo de la cuenta de origen, la app te avisará y se lo dirás al usuario sin regañar.
 - IMPUESTOS: si el usuario dice que pagó un impuesto ("pagué el predial", "paga el vehicular", "ya pagué la renta") y ese impuesto aparece en "IMPUESTOS PENDIENTES" con su [id: ...], usa la acción pagar_impuesto con ese ID. NO lo registres como un gasto normal. Si no aparece en la lista, o hay varios y no sabes cuál es, pregunta en "mensaje" y deja "acciones" vacía. Si el usuario menciona un monto distinto al valor registrado del impuesto, NO lo pagues: pregúntale si quiere que actualices el valor antes de registrarlo.
 - crear_recurrente si menciona "recurrente", "mensual", "fijo", "cada mes" o "todos los meses" con un gasto.
-- registrar_mantenimiento si menciona mantenimiento del vehículo con costo (aceite, frenos, llantas, revisión, taller, reparación): usa placa o marca/línea si las dice.
+- registrar_mantenimiento si menciona mantenimiento del vehículo (aceite, frenos, llantas, revisión, taller, reparación): usa placa o marca/línea si las dice. Si hay varios vehículos y no puedes identificar uno solo, pregunta cuál en "mensaje" y deja "acciones" vacía; no adivines. Si el usuario menciona el kilometraje, ponlo en "km". Si dice de qué cuenta salió el dinero, copia su [id: ...] de "DINERO EN CUENTAS" en "cuentaBancoId"; si no, omítelo. Si no da monto, usa 0 y pídelo, pero no inventes un costo.
+- crear_vehiculo: si la placa ya aparece en el bloque "VEHÍCULOS", NO crees otro vehículo; avísale al usuario y deja "acciones" vacía.
 - crear_evento si pide agendar, recordar, una cita/reunión, o algo que "vence el día N".
 - Si falta el monto, usa monto 0 y pídelo amablemente en "mensaje".
 - Interpreta fechas relativas (hoy, mañana, ayer, "el 15") usando la fecha actual entregada.
@@ -227,6 +228,34 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
 
     if (nombre === 'obtener_vehiculo_completo' || nombre === 'renovar_soat' || nombre === 'renovar_tecnomecanica') {
       params.vehiculoId = String(params.vehiculoId ?? '').trim()
+    }
+
+    if (nombre === 'crear_vehiculo') {
+      params.placa = String(params.placa ?? '').trim().toUpperCase()
+      params.marca = String(params.marca ?? '').trim()
+      params.linea = String(params.linea ?? '').trim()
+      params.modelo = num(params.modelo)
+      if (params.cilindraje !== undefined && String(params.cilindraje).trim() !== '') {
+        params.cilindraje = num(params.cilindraje)
+      } else {
+        delete params.cilindraje
+      }
+      params.tipo = String(params.tipo ?? '').trim().toLowerCase()
+    }
+
+    if (nombre === 'registrar_mantenimiento') {
+      params.monto = num(params.monto)
+      params.fecha = fechaValida(params.fecha, contexto.hoy)
+      params.placa = String(params.placa ?? '').trim().toUpperCase()
+      params.marca = String(params.marca ?? '').trim()
+      params.linea = String(params.linea ?? '').trim()
+      params.concepto = String(params.concepto ?? '').trim()
+      params.cuentaBancoId = String(params.cuentaBancoId ?? '').trim()
+      if (params.km !== undefined && String(params.km).trim() !== '') {
+        params.km = num(params.km)
+      } else {
+        delete params.km
+      }
     }
 
     if ('moneda' in params) {

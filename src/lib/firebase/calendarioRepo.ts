@@ -1,7 +1,8 @@
-import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs, query, updateDoc, where } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
+import { parseFechaLocal } from '../fechas'
 
 export type TipoEvento =
   | 'pago_sueldo'
@@ -45,12 +46,13 @@ function iso(d: Date): string {
 }
 
 function enProximoAnio(fecha: string, meses = 12): boolean {
-  const f = new Date(fecha)
-  if (Number.isNaN(f.getTime())) return false
+  const f = parseFechaLocal(fecha)
+  if (!f) return false
   const hoy = new Date()
-  const limite = new Date()
+  hoy.setHours(0, 0, 0, 0)
+  const limite = new Date(hoy)
   limite.setMonth(limite.getMonth() + meses)
-  return f >= new Date(hoy.toDateString()) && f <= limite
+  return f.getTime() >= hoy.getTime() && f.getTime() <= limite.getTime()
 }
 
 async function leerColeccion(nombre: string): Promise<any[]> {
@@ -70,6 +72,7 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
   ])
 
   for (const v of vehiculos) {
+    if (v.activo === false || v.estado === 'Vendido') continue
     const nombre = `${v.marca ?? ''} ${v.linea ?? ''} ${v.placa ? '(' + v.placa + ')' : ''}`.trim()
     const soat = v.soat?.fechaVencimiento
     if (soat && enProximoAnio(soat, meses)) {
@@ -108,6 +111,7 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
       })
     }
     const tareas = (v.mantenimiento?.tareas ?? []) as Array<{
+      id?: string
       nombre?: string
       proximaFecha?: string
     }>
@@ -121,7 +125,7 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
           allDay: true,
           recurrente: false,
           recordatorios: recDefault,
-          relacionado: { vehiculoId: v.id },
+          relacionado: { vehiculoId: v.id, tareaId: t.id },
         })
       }
     }
@@ -206,25 +210,56 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
   return eventos
 }
 
+function claveEvento(e: EventoInput): string {
+  const r = e.relacionado ?? {}
+  return [
+    e.tipo,
+    String(e.fechaInicio ?? '').slice(0, 10),
+    e.titulo,
+    r.vehiculoId ?? '',
+    r.tareaId ?? '',
+    r.deudaId ?? '',
+    r.impuestoId ?? '',
+    r.recurrenteId ?? '',
+    r.nominaId ?? '',
+  ].join('|')
+}
+
 export async function guardarEventos(eventos: EventoInput[]): Promise<number> {
+  const existentes = await listarEventos(2000)
+  const vistas = new Set(existentes.map((e) => claveEvento(e)))
   let creados = 0
   for (const e of eventos) {
+    const k = claveEvento(e)
+    if (vistas.has(k)) continue
     await crearEvento(e)
+    vistas.add(k)
     creados++
   }
   return creados
 }
 
+export async function eliminarEventosTarea(tareaId: string): Promise<number> {
+  const eventos = await getDocs(
+    query(collection(db, COLLECTIONS.CALENDARIO_EVENTOS), where('relacionado.tareaId', '==', tareaId))
+  )
+  await Promise.all(eventos.docs.map((d) => deleteDoc(d.ref)))
+  return eventos.size
+}
+
 export async function crearEvento(input: EventoInput): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.CALENDARIO_EVENTOS), {
-    ...input,
-    recordatorios: input.recordatorios ?? [{ minutosAntes: 60 }],
-    relacionado: input.relacionado ?? {},
-    sincronizadoGoogle: false,
-    activo: true,
-    creado: Date.now(),
-    actualizado: Date.now(),
-  })
+  const ref = await addDoc(
+    collection(db, COLLECTIONS.CALENDARIO_EVENTOS),
+    limpio({
+      ...input,
+      recordatorios: input.recordatorios ?? [{ minutosAntes: 60 }],
+      relacionado: input.relacionado ?? {},
+      sincronizadoGoogle: false,
+      activo: true,
+      creado: Date.now(),
+      actualizado: Date.now(),
+    } as Record<string, unknown>)
+  )
   return ref.id
 }
 

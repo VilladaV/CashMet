@@ -2,7 +2,7 @@ import { listarCuentasBanco, listarTodosLosMovimientos } from '@/lib/firebase/mo
 import { listarDeudas } from '@/lib/firebase/deudasRepo'
 import { listarRecurrentes } from '@/lib/firebase/recurrentesRepo'
 import { listarImpuestos } from '@/lib/firebase/impuestosRepo'
-import { listarVehiculos } from '@/lib/firebase/vehiculosRepo'
+import { calcularGastosMensuales, listarVehiculos } from '@/lib/firebase/vehiculosRepo'
 import { listarPropiedades } from '@/lib/firebase/propiedadesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { listarEventos } from '@/lib/firebase/calendarioRepo'
@@ -159,10 +159,19 @@ export async function construirSnapshotFinanciero(): Promise<string> {
   }
 
   if (vehiculos.length) {
-    const valorVeh = vehiculos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
-    lineas.push('', `VEHÍCULOS (${vehiculos.length})${valorVeh ? ` · valor comercial ~${COD(valorVeh)}` : ''}`)
+    const activos = vehiculos.filter((v) => v.activo !== false && v.estado !== 'Vendido')
+    const valorVeh = activos.reduce((s, v) => s + (Number(v.valorComercial) || 0), 0)
+    const costoVeh = activos.reduce((s, v) => s + calcularGastosMensuales(v), 0)
+    lineas.push(
+      '',
+      `VEHÍCULOS (${vehiculos.length} registrados · ${activos.length} activos)${valorVeh ? ` · valor comercial ~${COD(valorVeh)}` : ''} · costo estimado ${COD(costoVeh)}/mes`
+    )
     for (const v of vehiculos) {
       const extras: string[] = []
+      if (v.estado && v.estado !== 'Disponible') extras.push(v.estado)
+      if (v.mantenimiento?.kilometrajeActual !== undefined) {
+        extras.push(`${Math.round(v.mantenimiento.kilometrajeActual).toLocaleString('es-CO')} km`)
+      }
       if (v.soat?.fechaVencimiento) extras.push(`SOAT vence ${v.soat.fechaVencimiento}`)
       if (v.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${v.tecnicomecanica.fechaVencimiento}`)
       if (v.seguroTodoRiesgo?.fechaVencimiento) extras.push(`STR vence ${v.seguroTodoRiesgo.fechaVencimiento}`)

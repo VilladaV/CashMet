@@ -1,14 +1,21 @@
+import { parseFechaLocal } from '@/lib/fechas'
+import type { TareaMantenimiento } from '@/lib/firebase/vehiculosRepo'
+
 export type Vigencia = 'vencido' | 'por-vencer' | 'vigente' | 'sin-dato'
 
-export function vigenciaDe(fecha?: string): Vigencia {
-  if (!fecha) return 'sin-dato'
-  const f = new Date(`${fecha}T00:00:00`)
-  if (Number.isNaN(f.getTime())) return 'sin-dato'
+export function diasParaVencer(fecha?: string): number | null {
+  const f = parseFechaLocal(fecha)
+  if (!f) return null
   const hoy = new Date()
   hoy.setHours(0, 0, 0, 0)
-  const diff = Math.round((f.getTime() - hoy.getTime()) / 86400000)
-  if (diff < 0) return 'vencido'
-  if (diff <= 30) return 'por-vencer'
+  return Math.round((f.getTime() - hoy.getTime()) / 86400000)
+}
+
+export function vigenciaDe(fecha?: string): Vigencia {
+  const dias = diasParaVencer(fecha)
+  if (dias === null) return 'sin-dato'
+  if (dias < 0) return 'vencido'
+  if (dias <= 30) return 'por-vencer'
   return 'vigente'
 }
 
@@ -26,32 +33,31 @@ export function claseVigencia(v: Vigencia): string {
   return 'border-white/10 bg-white/[0.04] text-mist-500'
 }
 
+export function claseEstado(estado?: string): string {
+  if (estado === 'Vendido') return 'border-sky-400/30 bg-sky-500/10 text-sky-300'
+  if (estado === 'En reparación') return 'border-amber-400/30 bg-amber-400/10 text-amber-300'
+  if (estado === 'Dañado' || estado === 'Decomisado') return 'border-red-400/30 bg-red-500/10 text-red-300'
+  if (estado === 'No disponible') return 'border-white/15 bg-white/[0.06] text-mist-300'
+  return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'
+}
+
 export function formatoKm(km?: number): string {
-  if (km === undefined || km === null) return 'N/A'
-  return `${Math.round(km).toLocaleString('es-CO')} km`
+  if (km === undefined || km === null || !Number.isFinite(Number(km))) return 'N/A'
+  return `${Math.round(Number(km)).toLocaleString('es-CO')} km`
 }
 
 export function formatoFecha(fecha?: string): string {
-  if (!fecha) return 'N/A'
-  const f = new Date(`${fecha}T00:00:00`)
-  if (Number.isNaN(f.getTime())) return fecha
+  const f = parseFechaLocal(fecha)
+  if (!f) return fecha || 'N/A'
   return f.toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })
 }
 
-export function progresoTarea(tarea: {
-  ultimoKm?: number
-  proximoKm?: number
-  intervaloKm?: number
-  costoEstimado?: number
-  ultimaFecha?: string
-  proximaFecha?: string
-  nombre: string
-  id: string
-}, kmActual?: number): number {
-  if (tarea.ultimoKm === undefined || tarea.proximoKm === undefined) return 0
-  if (tarea.proximoKm <= tarea.ultimoKm) return 100
-  const actual = kmActual ?? tarea.ultimoKm
-  const total = tarea.proximoKm - tarea.ultimoKm
-  const avance = actual - tarea.ultimoKm
+export function progresoTarea(tarea: TareaMantenimiento, kmActual?: number): number {
+  const ultimo = tarea.ultimoKm ?? (tarea.proximoKm !== undefined && tarea.intervaloKm ? tarea.proximoKm - tarea.intervaloKm : undefined)
+  if (ultimo === undefined || tarea.proximoKm === undefined) return 0
+  if (tarea.proximoKm <= ultimo) return 100
+  const actual = kmActual ?? ultimo
+  const total = tarea.proximoKm - ultimo
+  const avance = actual - ultimo
   return Math.min(100, Math.max(0, Math.round((avance / total) * 100)))
 }

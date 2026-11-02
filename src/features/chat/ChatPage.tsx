@@ -20,7 +20,21 @@ import {
 } from '@/lib/firebase/movimientosRepo'
 import { listarDeudas, registrarPagoDeuda } from '@/lib/firebase/deudasRepo'
 import { listarImpuestos, registrarPagoImpuesto } from '@/lib/firebase/impuestosRepo'
-import { crearVehiculo, guardarTareaMantenimiento, listarVehiculos, nuevaTareaId, obtenerVehiculo, registrarServicioMantenimiento, renovarSoat, renovarTecnicomecanica } from '@/lib/firebase/vehiculosRepo'
+import {
+  calcularGastosMensuales,
+  crearVehiculo,
+  guardarTareaMantenimiento,
+  listarVehiculos,
+  nuevaTareaId,
+  obtenerVehiculo,
+  registrarServicioMantenimiento,
+  renovarSoat,
+  renovarTecnicomecanica,
+  TIPOS_VEHICULO,
+  type TipoVehiculo,
+} from '@/lib/firebase/vehiculosRepo'
+import { etiquetaVigencia, formatoFecha, formatoKm, vigenciaDe } from '@/features/vehiculos/vehiculoUtils'
+import { hoyISO } from '@/lib/fechas'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
 import { listarNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
@@ -517,7 +531,7 @@ export default function ChatPage() {
           `🚗 Estimados en Colombia para ${String(p.marca)} ${String(p.linea)} (Modelo ${p.modelo ?? '?'}):\n\n` +
           `• SOAT anual estimado: ${COD(est.soatAnualEstimadoCOP)} (rango ${COD(est.soatRango.min)} - ${COD(est.soatRango.max)})\n` +
           `• Tecnicomecánica (RTM): ~${COD(est.tecnicomecanicaCostoEstimadoCOP)}\n` +
-          `• Seguro todo riesgo: ~${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} anual\n\n` +
+          `• Seguro todo riesgo: ~${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} anual (rango ${COD(est.rangoSTR.min)} - ${COD(est.rangoSTR.max)})\n\n` +
           `💡 Es un estimativo (confianza media). Puedes afinarlo y guardarlo en la pestaña "Vehículos".`,
       })
       return
@@ -525,19 +539,42 @@ export default function ChatPage() {
 
     if (op.nombre === 'crear_vehiculo') {
       const yearDefault = new Date().getFullYear()
+      const marca = String(p.marca ?? '').trim()
+      const linea = String(p.linea ?? '').trim()
+      const placa = String(p.placa ?? '').trim().toUpperCase()
+      const modelo = Number(p.modelo) || yearDefault
+      if (!marca || !linea) {
+        push({ rol: 'ia', texto: 'Necesito al menos la marca y la línea del vehículo para registrarlo.' })
+        return
+      }
       try {
+        const vehiculos = await listarVehiculos()
+        if (placa) {
+          const existente = vehiculos.find((x) => (x.placa ?? '').toUpperCase() === placa)
+          if (existente) {
+            push({
+              rol: 'ia',
+              texto: `Ya tienes un vehículo con la placa ${placa}: ${existente.marca} ${existente.linea}. No creé otro.`,
+            })
+            return
+          }
+        }
+        const tipoTexto = String(p.tipo ?? '').trim()
+        const tipo: TipoVehiculo = TIPOS_VEHICULO.includes(tipoTexto as TipoVehiculo)
+          ? (tipoTexto as TipoVehiculo)
+          : 'carro'
         await crearVehiculo({
-          placa: String(p.placa ?? '').trim() || undefined,
-          marca: String(p.marca),
-          linea: String(p.linea),
-          modelo: Number(p.modelo) || yearDefault,
-          tipo: String(p.tipo) as 'carro' | 'moto' | 'camion' | 'otro',
+          placa: placa || undefined,
+          marca,
+          linea,
+          modelo,
+          tipo,
           cilindraje: Number(p.cilindraje) || undefined,
         })
         invalidarSnapshotFinanciero()
         push({
           rol: 'ia',
-          texto: `✅ Registré tu vehículo: ${String(p.marca)} ${String(p.linea)} (${p.modelo}). Puedes afinar SOAT, RTM y seguros en la pestaña "Vehículos".`,
+          texto: `✅ Registré tu vehículo: ${marca} ${linea} (${modelo})${placa ? ` · ${placa}` : ''}. Puedes afinar SOAT, TM y seguros en la pestaña "Vehículos".`,
         })
       } catch (e: any) {
         console.error('Error al crear vehículo:', e)
@@ -548,49 +585,76 @@ export default function ChatPage() {
 
     if (op.nombre === 'registrar_mantenimiento') {
       const monto = Number(p.monto) || 0
-      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const placa = String(p.placa ?? '').trim().toUpperCase()
       const marca = String(p.marca ?? '').trim().toLowerCase()
+      const linea = String(p.linea ?? '').trim().toLowerCase()
       const concepto = String(p.concepto ?? '').trim() || 'Mantenimiento'
+      const km = p.km !== undefined ? Number(p.km) : undefined
+      const cuentaId = String(p.cuentaBancoId ?? '').trim() || undefined
       try {
         const vehiculos = await listarVehiculos()
-        let v = placa
-          ? vehiculos.find((x) => (x.placa ?? '').toUpperCase() === placa)
-          : undefined
-        if (!v && marca) v = vehiculos.find((x) => x.marca.toLowerCase().includes(marca))
-        if (!v && vehiculos.length === 1) v = vehiculos[0]
+        const activos = vehiculos.filter((x) => x.activo !== false && x.estado !== 'Vendido')
+        let v = placa ? activos.find((x) => (x.placa ?? '').toUpperCase() === placa) : undefined
+        if (!v && (marca || linea)) {
+          const candidatos = activos.filter(
+            (x) =>
+              (!marca || x.marca.toLowerCase().includes(marca)) &&
+              (!linea || x.linea.toLowerCase().includes(linea))
+          )
+          if (candidatos.length === 1) {
+            v = candidatos[0]
+          } else if (candidatos.length > 1) {
+            push({
+              rol: 'ia',
+              texto: `Encontré varios vehículos que coinciden:\n${candidatos
+                .map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`)
+                .join('\n')}\n\n¿De cuál fue el mantenimiento?`,
+            })
+            return
+          }
+        }
+        if (!v && activos.length === 1) v = activos[0]
         if (!v) {
           push({
             rol: 'ia',
             texto:
-              vehiculos.length === 0
-                ? 'Todavía no tienes vehículos registrados. Ve a la pestaña "Vehículos" y lo registramos primero.'
-                : `Tienes varios vehículos:\n${vehiculos.map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`).join('\n')}\n\n¿De cuál fue el mantenimiento? Ej: "cambié el aceite del ${vehiculos[0].marca} por ${monto}".`,
+              activos.length === 0
+                ? 'Todavía no tienes vehículos activos registrados. Ve a la pestaña "Vehículos" y lo registramos primero.'
+                : `Tienes varios vehículos:\n${activos
+                    .map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`)
+                    .join('\n')}\n\n¿De cuál fue el mantenimiento?`,
           })
           return
         }
         const nombre = concepto.slice(0, 60)
-        let tarea = (v.mantenimiento?.tareas ?? []).find(
-          (t) => t.nombre.toLowerCase() === nombre.toLowerCase()
-        )
+        let tarea = (v.mantenimiento?.tareas ?? []).find((t) => t.nombre.toLowerCase() === nombre.toLowerCase())
         if (!tarea) {
           tarea = { id: nuevaTareaId(), nombre }
           await guardarTareaMantenimiento(v.id, tarea)
         }
-        await registrarServicioMantenimiento(v.id, tarea.id, { fecha })
-        await crearMovimiento({
+        await registrarServicioMantenimiento(v.id, tarea.id, {
+          km: Number.isFinite(km) ? km : undefined,
           fecha,
-          tipo: 'mantenimiento',
-          concepto: `${nombre} · ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}`,
-          monto,
-          categoria: 'Transporte',
-          vehiculoId: v.id,
-          fuente: 'chat_IA',
         })
+        if (monto > 0) {
+          await crearMovimiento({
+            fecha,
+            tipo: 'mantenimiento',
+            concepto: `${nombre} · ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}`,
+            monto,
+            categoria: 'Transporte',
+            vehiculoId: v.id,
+            cuentaBancoId: cuentaId,
+            fuente: 'chat_IA',
+          })
+        }
         invalidarSnapshotFinanciero()
+        const detalleKm = Number.isFinite(km) ? ` a los ${formatoKm(km)}` : ''
+        const avisoCuenta = monto > 0 && !cuentaId ? '\n\nNo desconté de ninguna cuenta porque no me dijiste de cuál.' : ''
         push({
           rol: 'ia',
-          texto: `🔧 Listo, registré el mantenimiento "${nombre}" del ${v.marca} ${v.linea} por ${COD(monto)} (${fecha}). Quedó guardado en su hoja de vida y en tus movimientos.`,
+          texto: `🔧 Listo, registré "${nombre}" del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}${detalleKm}${monto > 0 ? ` por ${COD(monto)}` : ' (sin costo)'} (${formatoFecha(fecha)}). Quedó en su hoja de vida${monto > 0 ? ' y en tus movimientos' : ''}.${avisoCuenta}`,
         })
       } catch (e: any) {
         console.error('Error al registrar mantenimiento:', e)
@@ -611,16 +675,47 @@ export default function ChatPage() {
           push({ rol: 'ia', texto: 'No encontré ese vehículo. Verifica el ID o la placa.' })
           return
         }
+        const soatV = vigenciaDe(v.soat?.fechaVencimiento)
+        const tmV = vigenciaDe(v.tecnicomecanica?.fechaVencimiento)
+        const strV = vigenciaDe(v.seguroTodoRiesgo?.fechaVencimiento)
         const partes = [
           `🚗 ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}`,
-          `Tipo: ${v.tipo}${v.cilindraje ? ` · ${v.cilindraje} cc` : ''}${v.valorComercial ? ` · Valor: ${COD(v.valorComercial || 0)}` : ''}`,
-          `Estado: ${v.estado ?? 'Disponible'}`,
+          `Tipo: ${v.tipo}${v.cilindraje ? ` · ${v.cilindraje} cc` : ''}${v.valorComercial ? ` · Valor: ${COD(v.valorComercial)}` : ''}`,
+          `Estado: ${v.estado ?? 'Disponible'} · Costo estimado: ${COD(calcularGastosMensuales(v))}/mes`,
         ]
-        if (v.soat?.fechaVencimiento) partes.push(`SOAT: ${v.soat.vigente ? 'vigente' : 'vencido'} · vence ${v.soat.fechaVencimiento}${v.soat.valorPrimaAnual ? ` · prima ${COD(v.soat.valorPrimaAnual)}` : ''}${v.soat.aseguradora ? ` · ${v.soat.aseguradora}` : ''}`)
-        if (v.tecnicomecanica?.fechaVencimiento) partes.push(`TM: ${v.tecnicomecanica.vigente ? 'vigente' : 'vencida'} · vence ${v.tecnicomecanica.fechaVencimiento}${v.tecnicomecanica.costoRevision ? ` · costo ${COD(v.tecnicomecanica.costoRevision)}` : ''}${v.tecnicomecanica.cda ? ` · CDA: ${v.tecnicomecanica.cda}` : ''}`)
-        if (v.seguroTodoRiesgo?.tiene) partes.push(`STR: ${v.seguroTodoRiesgo.vigente ? 'vigente' : 'vencido'} · vence ${v.seguroTodoRiesgo.fechaVencimiento}${v.seguroTodoRiesgo.valorPrimaAnual ? ` · prima ${COD(v.seguroTodoRiesgo.valorPrimaAnual)}` : ''}`)
-        if (v.mantenimiento?.kilometrajeActual) partes.push(`Kilometraje: ${v.mantenimiento.kilometrajeActual.toLocaleString('es-CO')} km`)
-        if (v.mantenimiento?.tareas?.length) partes.push(`Tareas de mantenimiento: ${v.mantenimiento.tareas.length}`)
+        if (v.soat) {
+          partes.push(
+            `SOAT: ${etiquetaVigencia(soatV)}${v.soat.fechaVencimiento ? ` · vence ${formatoFecha(v.soat.fechaVencimiento)}` : ''}${v.soat.valorPrimaAnual ? ` · prima ${COD(v.soat.valorPrimaAnual)}` : ''}${v.soat.aseguradora ? ` · ${v.soat.aseguradora}` : ''}`
+          )
+        }
+        if (v.tecnicomecanica) {
+          partes.push(
+            `TM: ${etiquetaVigencia(tmV)}${v.tecnicomecanica.fechaVencimiento ? ` · vence ${formatoFecha(v.tecnicomecanica.fechaVencimiento)}` : ''}${v.tecnicomecanica.costoRevision ? ` · costo ${COD(v.tecnicomecanica.costoRevision)}` : ''}${v.tecnicomecanica.cda ? ` · CDA: ${v.tecnicomecanica.cda}` : ''}`
+          )
+        }
+        if (v.seguroTodoRiesgo?.tiene) {
+          partes.push(
+            `STR: ${etiquetaVigencia(strV)}${v.seguroTodoRiesgo.fechaVencimiento ? ` · vence ${formatoFecha(v.seguroTodoRiesgo.fechaVencimiento)}` : ''}${v.seguroTodoRiesgo.valorPrimaAnual ? ` · prima ${COD(v.seguroTodoRiesgo.valorPrimaAnual)}` : ''}`
+          )
+        }
+        if (v.mantenimiento?.kilometrajeActual !== undefined) {
+          partes.push(`Kilometraje: ${formatoKm(v.mantenimiento.kilometrajeActual)}`)
+        }
+        if (v.mantenimiento?.tareas?.length) {
+          partes.push('Mantenimiento:')
+          for (const t of v.mantenimiento.tareas.slice(0, 8)) {
+            partes.push(
+              `- ${t.nombre}: último ${formatoKm(t.ultimoKm)}${t.ultimaFecha ? ` (${formatoFecha(t.ultimaFecha)})` : ''} → próximo ${formatoKm(t.proximoKm)}${t.proximaFecha ? ` (${formatoFecha(t.proximaFecha)})` : ''}`
+            )
+          }
+        }
+        if (v.licenciaTransito?.numeroLicencia) {
+          partes.push(`Licencia de tránsito: ${v.licenciaTransito.numeroLicencia}${v.licenciaTransito.organismoTransito ? ` · ${v.licenciaTransito.organismoTransito}` : ''}`)
+        }
+        if (v.notas) partes.push(`Notas: ${v.notas}`)
+        if (v.documentos?.manualUrl || v.documentos?.fichaUrl) {
+          partes.push(`Documentos: ${[v.documentos.manualUrl ? 'manual' : '', v.documentos.fichaUrl ? 'ficha técnica' : ''].filter(Boolean).join(' · ')}`)
+        }
         push({ rol: 'ia', texto: partes.join('\n') })
       } catch {
         push({ rol: 'ia', texto: 'No pude obtener el detalle del vehículo.' })
@@ -635,13 +730,18 @@ export default function ChatPage() {
         return
       }
       try {
+        const v = await obtenerVehiculo(vehiculoId)
         const r = await renovarSoat(vehiculoId)
         if (!r) {
           push({ rol: 'ia', texto: 'Ese vehículo no tiene SOAT con fecha de vencimiento para renovar.' })
           return
         }
         invalidarSnapshotFinanciero()
-        push({ rol: 'ia', texto: `✅ SOAT renovado. Nueva fecha de vencimiento: ${r.fechaVencimiento}.` })
+        const nombre = v ? ` del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}` : ''
+        push({
+          rol: 'ia',
+          texto: `✅ SOAT renovado${nombre}. Nuevo vencimiento: ${formatoFecha(r.fechaVencimiento)} (inicio ${formatoFecha(r.fechaInicioVigencia)}).`,
+        })
       } catch (e: any) {
         push({ rol: 'ia', texto: `No pude renovar el SOAT: ${e?.message ?? 'error'}` })
       }
@@ -655,13 +755,18 @@ export default function ChatPage() {
         return
       }
       try {
+        const v = await obtenerVehiculo(vehiculoId)
         const r = await renovarTecnicomecanica(vehiculoId)
         if (!r) {
           push({ rol: 'ia', texto: 'Ese vehículo no tiene Tecnicomecánica con fecha de vencimiento para renovar.' })
           return
         }
         invalidarSnapshotFinanciero()
-        push({ rol: 'ia', texto: `✅ Tecnicomecánica renovada. Nueva fecha de vencimiento: ${r.fechaVencimiento}.` })
+        const nombre = v ? ` del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}` : ''
+        push({
+          rol: 'ia',
+          texto: `✅ Tecnicomecánica renovada${nombre}. Nuevo vencimiento: ${formatoFecha(r.fechaVencimiento)} (expedición ${formatoFecha(r.fechaExpedicion)}).`,
+        })
       } catch (e: any) {
         push({ rol: 'ia', texto: `No pude renovar la TM: ${e?.message ?? 'error'}` })
       }
