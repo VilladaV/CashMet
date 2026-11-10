@@ -118,7 +118,7 @@ function PagoDeuda({ cuentas }: { cuentas: CuentaBanco[] }) {
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Monto (COP)</span>
-            <Input inputMode="numeric" value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" />
+            <Input cifra value={monto} onChange={(e) => setMonto(e.target.value)} placeholder="0" />
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-muted-foreground">Fecha</span>
@@ -149,9 +149,9 @@ export default function DeudasPage() {
       { key: 'nombre', label: 'Nombre', required: true },
       { key: 'tipo', label: 'Tipo', tipo: 'select', opciones: TIPOS_DEUDA.map((t) => ({ value: t, label: t })) },
       { key: 'entidad', label: 'Entidad' },
-      { key: 'montoInicial', label: 'Monto inicial (COP)', tipo: 'number' },
-      { key: 'saldoPendiente', label: 'Saldo pendiente (COP)', tipo: 'number', required: true },
-      { key: 'cuotaMensual', label: 'Cuota mensual (COP)', tipo: 'number' },
+      { key: 'montoInicial', label: 'Monto inicial (COP)', tipo: 'cifra' },
+      { key: 'saldoPendiente', label: 'Saldo pendiente (COP)', tipo: 'cifra', required: true },
+      { key: 'cuotaMensual', label: 'Cuota mensual (COP)', tipo: 'cifra' },
       { key: 'tasaInteres', label: 'Tasa interés (%)', tipo: 'number' },
       { key: 'fechaVencimientoCuota', label: 'Día de vencimiento (1-31)', tipo: 'number' },
       {

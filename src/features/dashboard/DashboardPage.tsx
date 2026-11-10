@@ -177,7 +177,7 @@ export default function DashboardPage() {
 
   const guardarEdicion = async () => {
     if (!editandoId || !form) return
-    const monto = Number(form.monto)
+    const monto = Number(String(form.monto).replace(/[^\d.-]/g, ''))
     if (!form.fecha || !form.concepto.trim() || !form.categoria.trim() || !Number.isFinite(monto) || monto <= 0) {
       setError('Completa fecha, concepto, categoría y un monto válido mayor a 0.')
       return
@@ -404,8 +404,7 @@ export default function DashboardPage() {
                 <label className="flex flex-col gap-1">
                   <span className="font-bold text-mist-300">Monto (COP)</span>
                   <Input
-                    type="number"
-                    min="0"
+                    cifra
                     value={form.monto}
                     onChange={(e) => setForm({ ...form, monto: e.target.value })}
                     className="field-dark h-9 text-xs font-bold"

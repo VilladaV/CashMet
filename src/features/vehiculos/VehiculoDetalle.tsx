@@ -31,6 +31,7 @@ import {
   progresoTarea,
   vigenciaDe,
 } from './vehiculoUtils'
+import SelectorTarifa from './SelectorTarifa'
 import {
   AlertCircle,
   Camera,
@@ -142,7 +143,8 @@ export default function VehiculoDetalle({
             )}
             <span className="min-w-0">
               <span className="block truncate">
-                {vehiculo.marca} {vehiculo.linea} <span className="text-mist-500">({vehiculo.modelo})</span>
+                {vehiculo.marca} {vehiculo.linea}{' '}
+                {vehiculo.modelo ? <span className="text-mist-500">({vehiculo.modelo})</span> : null}
               </span>
               <span className="block text-[11px] font-medium text-mist-500">
                 {vehiculo.placa ? `${vehiculo.placa} · ` : ''}
@@ -431,12 +433,14 @@ function CampoEditable({
   valor,
   onChange,
   tipo = 'text',
+  cifra,
   placeholder,
 }: {
   label: string
   valor: string
   onChange: (v: string) => void
   tipo?: 'text' | 'number' | 'date'
+  cifra?: boolean
   placeholder?: string
 }) {
   return (
@@ -444,6 +448,7 @@ function CampoEditable({
       <span className="font-bold text-mist-300">{label}</span>
       <Input
         type={tipo}
+        cifra={cifra}
         value={valor}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -660,12 +665,21 @@ function DocumentosTab({
             <ShieldCheck className="h-4 w-4 text-sky-300" />
             SOAT
           </h3>
+          <div className="mb-3">
+            <SelectorTarifa
+              tipoTarifa="soat"
+              tipoVehiculo={vehiculo.tipo}
+              cilindraje={vehiculo.cilindraje}
+              modelo={vehiculo.modelo}
+              onSeleccionar={(val) => setSoat((prev) => ({ ...prev, valorPrimaAnual: String(val) }))}
+            />
+          </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <CampoEditable label="Aseguradora" valor={soat.aseguradora} onChange={(v) => setSoat({ ...soat, aseguradora: v })} />
             <CampoEditable label="Número de póliza" valor={soat.numeroPoliza} onChange={(v) => setSoat({ ...soat, numeroPoliza: v })} />
             <CampoEditable label="Inicio de vigencia" valor={soat.fechaInicioVigencia} tipo="date" onChange={(v) => setSoat({ ...soat, fechaInicioVigencia: v })} />
             <CampoEditable label="Vencimiento" valor={soat.fechaVencimiento} tipo="date" onChange={(v) => setSoat({ ...soat, fechaVencimiento: v })} />
-            <CampoEditable label="Prima anual (COP)" valor={soat.valorPrimaAnual} tipo="number" onChange={(v) => setSoat({ ...soat, valorPrimaAnual: v })} />
+            <CampoEditable label="Prima anual (COP)" valor={soat.valorPrimaAnual} cifra onChange={(v) => setSoat({ ...soat, valorPrimaAnual: v })} />
           </div>
         </div>
 
@@ -674,12 +688,20 @@ function DocumentosTab({
             <Wrench className="h-4 w-4 text-amber-300" />
             Tecnicomecánica
           </h3>
+          <div className="mb-3">
+            <SelectorTarifa
+              tipoTarifa="tm"
+              tipoVehiculo={vehiculo.tipo}
+              modelo={vehiculo.modelo}
+              onSeleccionar={(val) => setTm((prev) => ({ ...prev, costoRevision: String(val) }))}
+            />
+          </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <CampoEditable label="CDA / Centro" valor={tm.cda} onChange={(v) => setTm({ ...tm, cda: v })} />
             <CampoEditable label="Número de certificado" valor={tm.numeroCertificado} onChange={(v) => setTm({ ...tm, numeroCertificado: v })} />
             <CampoEditable label="Fecha de expedición" valor={tm.fechaExpedicion} tipo="date" onChange={(v) => setTm({ ...tm, fechaExpedicion: v })} />
             <CampoEditable label="Vencimiento" valor={tm.fechaVencimiento} tipo="date" onChange={(v) => setTm({ ...tm, fechaVencimiento: v })} />
-            <CampoEditable label="Costo revisión (COP)" valor={tm.costoRevision} tipo="number" onChange={(v) => setTm({ ...tm, costoRevision: v })} />
+            <CampoEditable label="Costo revisión (COP)" valor={tm.costoRevision} cifra onChange={(v) => setTm({ ...tm, costoRevision: v })} />
           </div>
         </div>
 
@@ -716,7 +738,7 @@ function DocumentosTab({
             <CampoEditable label="Aseguradora" valor={str.aseguradora} onChange={(v) => setStr({ ...str, aseguradora: v })} />
             <CampoEditable label="Número de póliza" valor={str.numeroPoliza} onChange={(v) => setStr({ ...str, numeroPoliza: v })} />
             <CampoEditable label="Vencimiento" valor={str.fechaVencimiento} tipo="date" onChange={(v) => setStr({ ...str, fechaVencimiento: v })} />
-            <CampoEditable label="Prima" valor={str.valorPrimaAnual} tipo="number" onChange={(v) => setStr({ ...str, valorPrimaAnual: v })} />
+            <CampoEditable label="Prima" valor={str.valorPrimaAnual} cifra onChange={(v) => setStr({ ...str, valorPrimaAnual: v })} />
           </div>
         </div>
 
@@ -871,7 +893,7 @@ function TarjetaTab({
             Licencia de tránsito · frente
           </div>
           <div className="text-base font-extrabold text-white">
-            {vehiculo.marca} {vehiculo.linea} · {vehiculo.modelo}
+            {vehiculo.marca} {vehiculo.linea}{vehiculo.modelo ? ` · ${vehiculo.modelo}` : ''}
           </div>
           <div className="mt-1 inline-block rounded-lg border border-white/15 bg-black/40 px-3 py-1 font-mono text-sm font-black tracking-[0.25em] text-amber-100">
             {vehiculo.placa || 'SIN PLACA'}
@@ -915,7 +937,7 @@ function TarjetaTab({
             <CampoEditable label="Nº serie" valor={tec.numSerie} onChange={(v) => setTec({ ...tec, numSerie: v })} />
             <CampoEditable label="Nº chasis" valor={tec.numChasis} onChange={(v) => setTec({ ...tec, numChasis: v })} />
             <CampoEditable label="Capacidad" valor={tec.capacidad} onChange={(v) => setTec({ ...tec, capacidad: v })} />
-            <CampoEditable label="Avalúo comercial (COP)" valor={tec.avaluoComercial} tipo="number" onChange={(v) => setTec({ ...tec, avaluoComercial: v })} />
+            <CampoEditable label="Avalúo comercial (COP)" valor={tec.avaluoComercial} cifra onChange={(v) => setTec({ ...tec, avaluoComercial: v })} />
           </div>
         </div>
 
@@ -970,7 +992,7 @@ function MantenimientoTab({
   }
 
   const guardarKm = async () => {
-    const n = Number(nuevoKm)
+    const n = Number(String(nuevoKm).replace(/[^\d.-]/g, ''))
     if (!Number.isFinite(n) || n < 0) {
       setError('El kilometraje debe ser un número positivo.')
       return
@@ -1003,7 +1025,7 @@ function MantenimientoTab({
       setError('Ya existe una tarea con ese nombre.')
       return
     }
-    const kmIntervalo = intervalo ? Number(intervalo) : undefined
+    const kmIntervalo = intervalo ? Number(String(intervalo).replace(/[^\d.-]/g, '')) : undefined
     if (intervalo && (!Number.isFinite(kmIntervalo) || (kmIntervalo ?? 0) <= 0)) {
       setError('El intervalo en kilómetros no es válido.')
       return
@@ -1045,13 +1067,13 @@ function MantenimientoTab({
 
   const registrarServicio = async (t: TareaMantenimiento) => {
     const f = servicio[t.id] ?? { km: '', fecha: '', costo: '' }
-    const kmNum = f.km.trim() ? Number(f.km) : undefined
+    const kmNum = f.km.trim() ? Number(String(f.km).replace(/[^\d.-]/g, '')) : undefined
     if (kmNum !== undefined && (!Number.isFinite(kmNum) || kmNum < 0)) {
       setError('El kilometraje del servicio no es válido.')
       return
     }
     const fecha = f.fecha || hoyISO()
-    const costo = f.costo.trim() ? Number(f.costo) : undefined
+    const costo = f.costo.trim() ? Number(String(f.costo).replace(/[^\d.-]/g, '')) : undefined
     if (costo !== undefined && (!Number.isFinite(costo) || costo < 0)) {
       setError('El costo del servicio no es válido.')
       return
@@ -1117,7 +1139,7 @@ function MantenimientoTab({
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
             <Input
-              type="number"
+              cifra
               value={nuevoKm}
               onChange={(e) => setNuevoKm(e.target.value)}
               placeholder="Nuevo kilometraje"
@@ -1164,10 +1186,10 @@ function MantenimientoTab({
             <label className="flex flex-col gap-1.5">
               <span className="font-bold text-mist-300">Cada (km)</span>
               <Input
-                type="number"
+                cifra
                 value={intervalo}
                 onChange={(e) => setIntervalo(e.target.value)}
-                placeholder="5000"
+                placeholder="5,000"
                 className="field-dark h-10 text-xs shadow-none"
               />
             </label>
@@ -1282,7 +1304,7 @@ function MantenimientoTab({
                 )}
                 <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
                   <Input
-                    type="number"
+                    cifra
                     value={f.km}
                     onChange={(e) => setServicio((s) => ({ ...s, [t.id]: { ...f, km: e.target.value } }))}
                     placeholder={`Km (${km !== undefined ? Math.round(km).toLocaleString('es-CO') : '?'})`}
@@ -1295,7 +1317,7 @@ function MantenimientoTab({
                     className="field-dark h-9 text-xs shadow-none"
                   />
                   <Input
-                    type="number"
+                    cifra
                     value={f.costo}
                     onChange={(e) => setServicio((s) => ({ ...s, [t.id]: { ...f, costo: e.target.value } }))}
                     placeholder="Costo $"

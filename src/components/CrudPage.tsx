@@ -8,7 +8,7 @@ import { PlusCircle, Edit3, Trash2, Check, AlertCircle } from 'lucide-react'
 export interface CampoForm {
   key: string
   label: string
-  tipo?: 'text' | 'number' | 'date' | 'select'
+  tipo?: 'text' | 'number' | 'date' | 'select' | 'cifra'
   opciones?: { value: string; label: string }[]
   required?: boolean
   span2?: boolean
@@ -142,6 +142,7 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                 ) : (
                   <Input
                     type={c.tipo === 'number' ? 'number' : c.tipo === 'date' ? 'date' : 'text'}
+                    cifra={c.tipo === 'cifra'}
                     value={formEfectivo[c.key] ?? ''}
                     onChange={(e) => setForm({ ...formEfectivo, [c.key]: e.target.value })}
                     className="field-dark h-10 text-xs shadow-none"

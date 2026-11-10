@@ -136,7 +136,7 @@ export interface Vehiculo {
   placa: string;
   marca: string;
   linea: string;
-  modelo: number;
+  modelo?: number;
   tipo: 'carro' | 'moto' | 'camion' | 'otro';
   cilindraje?: number;
   claseVehiculo?: string;

@@ -15,6 +15,7 @@ import {
   type VehiculoUpdate,
 } from '@/lib/firebase/vehiculosRepo'
 import { fechaFutura } from '@/lib/fechas'
+import SelectorTarifa from './SelectorTarifa'
 import { Car, FileText, Gauge, Loader2, Save, ShieldCheck, StickyNote, Trash2, Wrench, X } from 'lucide-react'
 
 interface Props {
@@ -87,6 +88,7 @@ function Campo({
   valor,
   onChange,
   tipo = 'text',
+  cifra,
   placeholder,
   span2,
   required,
@@ -95,6 +97,7 @@ function Campo({
   valor: string
   onChange: (v: string) => void
   tipo?: 'text' | 'number' | 'date' | 'url'
+  cifra?: boolean
   placeholder?: string
   span2?: boolean
   required?: boolean
@@ -107,6 +110,7 @@ function Campo({
       </span>
       <Input
         type={tipo}
+        cifra={cifra}
         value={valor}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -175,9 +179,11 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
   const validar = (): string | null => {
     if (!f.marca.trim()) return 'La marca es obligatoria.'
     if (!f.linea.trim()) return 'La línea es obligatoria.'
-    const modelo = Number(f.modelo)
-    if (!f.modelo.trim() || !Number.isInteger(modelo) || modelo < 1900 || modelo > new Date().getFullYear() + 1) {
-      return 'El modelo debe ser un año válido.'
+    if (f.modelo.trim()) {
+      const modelo = Number(f.modelo)
+      if (!Number.isInteger(modelo) || modelo < 1900 || modelo > new Date().getFullYear() + 1) {
+        return 'El modelo debe ser un año válido.'
+      }
     }
     const placa = f.placa.trim().toUpperCase()
     if (placa && !/^[A-Z0-9]{5,7}$/.test(placa)) return 'La placa debe tener entre 5 y 7 caracteres alfanuméricos.'
@@ -228,7 +234,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
         placa: txtNulo(placa),
         marca: f.marca.trim(),
         linea: f.linea.trim(),
-        modelo: Number(f.modelo),
+        modelo: f.modelo.trim() ? Number(f.modelo) : null,
         tipo: f.tipo,
         estado: f.estado,
         cilindraje: numero(f.cilindraje) ?? null,
@@ -364,7 +370,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
               <Campo label="Placa" valor={f.placa} onChange={(v) => set('placa', v.toUpperCase())} placeholder="ABC123" />
               <Campo label="Marca" valor={f.marca} onChange={(v) => set('marca', v)} required />
               <Campo label="Línea" valor={f.linea} onChange={(v) => set('linea', v)} required />
-              <Campo label="Modelo (año)" valor={f.modelo} onChange={(v) => set('modelo', v)} tipo="number" required />
+              <Campo label="Modelo (año)" valor={f.modelo} onChange={(v) => set('modelo', v)} tipo="number" placeholder="Ej: 2022 (opcional)" />
               <Seleccion label="Tipo" valor={f.tipo} onChange={(v) => set('tipo', v)}>
                 {TIPOS_VEHICULO.map((t) => (
                   <option key={t} value={t}>
@@ -379,32 +385,49 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
                   </option>
                 ))}
               </Seleccion>
-              <Campo label="Cilindraje" valor={f.cilindraje} onChange={(v) => set('cilindraje', v)} tipo="number" />
+              <Campo label="Cilindraje" valor={f.cilindraje} onChange={(v) => set('cilindraje', v)} cifra placeholder="Ej: 1,600" />
               <Campo label="Clase" valor={f.claseVehiculo} onChange={(v) => set('claseVehiculo', v)} placeholder="Automóvil, camioneta..." />
               <Campo label="Color" valor={f.color} onChange={(v) => set('color', v)} />
-              <Campo label="Valor comercial" valor={f.valorComercial} onChange={(v) => set('valorComercial', v)} tipo="number" />
-              <Campo label="Kilometraje" valor={f.km} onChange={(v) => set('km', v)} tipo="number" />
+              <Campo label="Valor comercial" valor={f.valorComercial} onChange={(v) => set('valorComercial', v)} cifra placeholder="0" />
+              <Campo label="Kilometraje" valor={f.km} onChange={(v) => set('km', v)} cifra placeholder="0" />
               <Campo label="Foto (URL)" valor={f.fotoUrl} onChange={(v) => set('fotoUrl', v)} tipo="url" placeholder="https://..." />
             </div>
           </Seccion>
 
           <Seccion titulo="SOAT" icono={<ShieldCheck className="h-4 w-4 text-sky-300" />}>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <SelectorTarifa
+                  tipoTarifa="soat"
+                  tipoVehiculo={f.tipo}
+                  cilindraje={numero(f.cilindraje)}
+                  modelo={f.modelo.trim() ? Number(f.modelo) : null}
+                  onSeleccionar={(val) => set('soatPrima', String(val))}
+                />
+              </div>
               <Campo label="Aseguradora" valor={f.soatAseguradora} onChange={(v) => set('soatAseguradora', v)} />
               <Campo label="Número de póliza" valor={f.soatPoliza} onChange={(v) => set('soatPoliza', v)} />
               <Campo label="Inicio de vigencia" valor={f.soatInicio} onChange={(v) => set('soatInicio', v)} tipo="date" />
               <Campo label="Vencimiento" valor={f.soatVence} onChange={(v) => set('soatVence', v)} tipo="date" />
-              <Campo label="Prima anual" valor={f.soatPrima} onChange={(v) => set('soatPrima', v)} tipo="number" />
+              <Campo label="Prima anual" valor={f.soatPrima} onChange={(v) => set('soatPrima', v)} cifra placeholder="0" />
             </div>
           </Seccion>
 
           <Seccion titulo="Tecnomecánica" icono={<Wrench className="h-4 w-4 text-amber-300" />}>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <SelectorTarifa
+                  tipoTarifa="tm"
+                  tipoVehiculo={f.tipo}
+                  modelo={f.modelo.trim() ? Number(f.modelo) : null}
+                  onSeleccionar={(val) => set('tmCosto', String(val))}
+                />
+              </div>
               <Campo label="CDA" valor={f.tmCda} onChange={(v) => set('tmCda', v)} />
               <Campo label="Número de certificado" valor={f.tmCertificado} onChange={(v) => set('tmCertificado', v)} />
               <Campo label="Fecha de expedición" valor={f.tmExpedicion} onChange={(v) => set('tmExpedicion', v)} tipo="date" />
               <Campo label="Vencimiento" valor={f.tmVence} onChange={(v) => set('tmVence', v)} tipo="date" />
-              <Campo label="Costo de revisión" valor={f.tmCosto} onChange={(v) => set('tmCosto', v)} tipo="number" />
+              <Campo label="Costo de revisión" valor={f.tmCosto} onChange={(v) => set('tmCosto', v)} cifra placeholder="0" />
             </div>
           </Seccion>
 
@@ -423,7 +446,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
               <Campo label="Aseguradora" valor={f.strAseguradora} onChange={(v) => set('strAseguradora', v)} />
               <Campo label="Número de póliza" valor={f.strPoliza} onChange={(v) => set('strPoliza', v)} />
               <Campo label="Vencimiento" valor={f.strVence} onChange={(v) => set('strVence', v)} tipo="date" />
-              <Campo label="Prima" valor={f.strPrima} onChange={(v) => set('strPrima', v)} tipo="number" />
+              <Campo label="Prima" valor={f.strPrima} onChange={(v) => set('strPrima', v)} cifra placeholder="0" />
             </div>
           </Seccion>
 

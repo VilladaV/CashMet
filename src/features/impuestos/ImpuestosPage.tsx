@@ -51,7 +51,7 @@ export default function ImpuestosPage() {
     { key: 'nombre', label: 'Nombre', required: true, span2: true },
     { key: 'tipo', label: 'Tipo', tipo: 'select', opciones: TIPOS },
     { key: 'entidad', label: 'Entidad / municipio' },
-    { key: 'valor', label: 'Valor (COP)', tipo: 'number', required: true },
+    { key: 'valor', label: 'Valor (COP)', tipo: 'cifra', required: true },
     { key: 'periodicidad', label: 'Periodicidad', tipo: 'select', opciones: PERIODICIDADES },
     { key: 'fechaVencimiento', label: 'Fecha de vencimiento', tipo: 'date' },
     {

@@ -49,7 +49,7 @@ export default function RecurrentesPage() {
     () => [
       { key: 'concepto', label: 'Concepto', required: true, span2: true },
       { key: 'categoria', label: 'Categoría', tipo: 'select', opciones: CATEGORIAS_RECURRENTE.map((t) => ({ value: t, label: t })) },
-      { key: 'valor', label: 'Valor (COP)', tipo: 'number', required: true },
+      { key: 'valor', label: 'Valor (COP)', tipo: 'cifra', required: true },
       { key: 'periodicidad', label: 'Periodicidad', tipo: 'select', opciones: PERIODICIDADES.map((t) => ({ value: t, label: t })) },
       { key: 'diaVencimiento', label: 'Día de vencimiento (1-31)', tipo: 'number' },
       { key: 'fechaInicio', label: 'Fecha de inicio (para periodicidad)', tipo: 'date' },

@@ -33,7 +33,7 @@ export interface Vehiculo {
   placa?: string
   marca: string
   linea: string
-  modelo: number
+  modelo?: number | null
   tipo: TipoVehiculo
   cilindraje?: number
   claseVehiculo?: string

@@ -70,7 +70,7 @@ export default function CuentasPage() {
             </label>
             <label className="flex flex-col gap-1">
               <span className="text-xs text-muted-foreground">Saldo actual (COP)</span>
-              <Input inputMode="numeric" value={saldo} onChange={(e) => setSaldo(e.target.value)} placeholder="0" />
+              <Input cifra value={saldo} onChange={(e) => setSaldo(e.target.value)} placeholder="0" />
             </label>
           </div>
           {error && <div className="text-xs text-red-300">{error}</div>}

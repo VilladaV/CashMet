@@ -89,7 +89,7 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         <label className="flex flex-col gap-1">
           <span className="font-bold text-mist-300">Monto (COP)</span>
           <Input
-            inputMode="numeric"
+            cifra
             value={monto}
             onChange={(e) => setMonto(e.target.value)}
             className="field-dark h-9 text-xs font-bold shadow-none"

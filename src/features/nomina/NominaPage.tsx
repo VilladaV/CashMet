@@ -100,10 +100,10 @@ function SalarioPropioCard({ cuentas }: { cuentas: CuentaBanco[] }) {
           <label className="flex flex-col gap-1.5">
             <span className="font-bold text-mist-300">Monto mensual</span>
             <Input
-              inputMode="numeric"
+              cifra
               value={monto}
               onChange={(e) => setMonto(e.target.value)}
-              placeholder={moneda === 'COP' ? 'Ej: 3500000' : 'Ej: 180000'}
+              placeholder={moneda === 'COP' ? 'Ej: 3,500,000' : 'Ej: 180,000'}
               className="field-dark h-10 text-xs shadow-none"
             />
           </label>
@@ -202,11 +202,11 @@ export default function NominaPage() {
     () => [
       { key: 'nombreCompleto', label: 'Nombre completo', required: true },
       { key: 'cargo', label: 'Cargo', required: true },
-      { key: 'salarioBaseMensual', label: 'Salario base mensual (COP)', tipo: 'number', required: true },
+      { key: 'salarioBaseMensual', label: 'Salario base mensual (COP)', tipo: 'cifra', required: true },
       {
         key: 'adicionalMensual',
         label: 'Adicional ARL, seguridad social y otros (COP)',
-        tipo: 'number',
+        tipo: 'cifra',
       },
       {
         key: 'cuentaBancoId',

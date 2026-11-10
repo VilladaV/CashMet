@@ -129,7 +129,7 @@ function VehiculoCard({
                 {vehiculo.marca} {vehiculo.linea}
               </div>
               <div className="truncate text-[11px] text-mist-500">
-                {vehiculo.modelo} · {vehiculo.tipo}
+                {vehiculo.modelo ? `${vehiculo.modelo} · ` : ''}{vehiculo.tipo}
                 {vehiculo.placa ? ` · ${vehiculo.placa}` : ''}
               </div>
             </div>

@@ -692,7 +692,7 @@ export default function ChatPage() {
         const tmV = vigenciaDe(v.tecnicomecanica?.fechaVencimiento)
         const strV = vigenciaDe(v.seguroTodoRiesgo?.fechaVencimiento)
         const partes = [
-          `🚗 ${v.marca} ${v.linea} ${v.modelo}${v.placa ? ` (${v.placa})` : ''}`,
+          `🚗 ${v.marca} ${v.linea}${v.modelo ? ` ${v.modelo}` : ''}${v.placa ? ` (${v.placa})` : ''}`,
           `Tipo: ${v.tipo}${v.cilindraje ? ` · ${v.cilindraje} cc` : ''}${v.valorComercial ? ` · Valor: ${COD(v.valorComercial)}` : ''}`,
           `Estado: ${v.estado ?? 'Disponible'} · Costo estimado: ${COD(calcularGastosMensuales(v))}/mes`,
         ]
