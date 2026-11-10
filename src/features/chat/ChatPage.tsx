@@ -36,7 +36,7 @@ import {
 import { etiquetaVigencia, formatoFecha, formatoKm, vigenciaDe } from '@/features/vehiculos/vehiculoUtils'
 import { hoyISO } from '@/lib/fechas'
 import { crearRecurrente } from '@/lib/firebase/recurrentesRepo'
-import { listarNomina } from '@/lib/firebase/nominaRepo'
+import { listarNomina, registrarPagoNomina, totalMensualNomina } from '@/lib/firebase/nominaRepo'
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 import { estadoGoogleCalendar, sincronizarPendientes } from '@/lib/google/calendar'
 import { leerResumenPiloto, marcarPilotoAnunciado } from '@/lib/piloto'
@@ -436,8 +436,15 @@ export default function ChatPage() {
           })
           return
         }
-        await registrarPagoDeuda(deuda.id, monto, fecha)
+        const cuentaDeudaId = deuda.cuentaBancoId || cuentas[0]?.id
+        if (!cuentaDeudaId) {
+          push({ rol: 'ia', texto: 'Primero necesitas crear una cuenta bancaria en la pestaña "Cuentas" para poder descontar el pago.' })
+          return
+        }
+        await registrarPagoDeuda(deuda.id, monto, fecha, cuentaDeudaId)
         invalidarSnapshotFinanciero()
+        listarCuentasBanco().then(setCuentas).catch(() => {})
+        void cargarPulso()
         push({
           rol: 'ia',
           texto: `✅ Listo, registré el pago de ${COD(monto)} a "${deuda.nombre}". Te queda un saldo de ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
@@ -637,7 +644,12 @@ export default function ChatPage() {
           km: Number.isFinite(km) ? km : undefined,
           fecha,
         })
+        const cuentaMantId = cuentaId || cuentas[0]?.id
         if (monto > 0) {
+          if (!cuentaMantId) {
+            push({ rol: 'ia', texto: 'Primero registra una cuenta en la pestaña "Cuentas" para descontar el costo del mantenimiento.' })
+            return
+          }
           await crearMovimiento({
             fecha,
             tipo: 'mantenimiento',
@@ -645,16 +657,17 @@ export default function ChatPage() {
             monto,
             categoria: 'Transporte',
             vehiculoId: v.id,
-            cuentaBancoId: cuentaId,
+            cuentaBancoId: cuentaMantId,
             fuente: 'chat_IA',
           })
+          listarCuentasBanco().then(setCuentas).catch(() => {})
+          void cargarPulso()
         }
         invalidarSnapshotFinanciero()
         const detalleKm = Number.isFinite(km) ? ` a los ${formatoKm(km)}` : ''
-        const avisoCuenta = monto > 0 && !cuentaId ? '\n\nNo desconté de ninguna cuenta porque no me dijiste de cuál.' : ''
         push({
           rol: 'ia',
-          texto: `🔧 Listo, registré "${nombre}" del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}${detalleKm}${monto > 0 ? ` por ${COD(monto)}` : ' (sin costo)'} (${formatoFecha(fecha)}). Quedó en su hoja de vida${monto > 0 ? ' y en tus movimientos' : ''}.${avisoCuenta}`,
+          texto: `🔧 Listo, registré "${nombre}" del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}${detalleKm}${monto > 0 ? ` por ${COD(monto)}` : ' (sin costo)'} (${formatoFecha(fecha)}). Quedó en su hoja de vida${monto > 0 ? ' y descontado en tus movimientos' : ''}.`,
         })
       } catch (e: any) {
         console.error('Error al registrar mantenimiento:', e)
@@ -784,19 +797,57 @@ export default function ChatPage() {
           : nominas.length === 1
             ? nominas[0]
             : undefined
+        const cuentaNominaId = match?.cuentaBancoId || cuentas[0]?.id
+        if (!cuentaNominaId) {
+          push({ rol: 'ia', texto: 'Primero debes tener al menos una cuenta en "Cuentas" para descontar el pago de nómina.' })
+          return
+        }
+        if (match) {
+          const r = await registrarPagoNomina(match.id, {
+            cuentaBancoId: cuentaNominaId,
+            fecha,
+            fuente: 'chat_IA',
+            montoOverride: monto > 0 ? monto : undefined,
+          })
+          if (!r.ok) {
+            if (r.saldoInsuficiente) {
+              push({
+                rol: 'ia',
+                texto: `No pude cobrar la nómina de "${match.nombreCompleto}": la cuenta "${r.cuentaNombre ?? ''}" solo tiene ${COD(r.saldoDisponible ?? 0)} y el pago es ${COD(r.monto ?? totalMensualNomina(match))}.`,
+              })
+            } else {
+              push({ rol: 'ia', texto: `No pude registrar el pago de nómina de "${match.nombreCompleto}".` })
+            }
+            return
+          }
+          invalidarSnapshotFinanciero()
+          listarCuentasBanco().then(setCuentas).catch(() => {})
+          void cargarPulso()
+          const extra =
+            (r.adicional ?? 0) > 0 && !monto
+              ? ` (base ${COD(r.base ?? 0)} + ARL/adicional ${COD(r.adicional ?? 0)})`
+              : ''
+          push({
+            rol: 'ia',
+            texto: `✅ Registré el pago de nómina de ${COD(r.monto ?? 0)}${extra} a ${match.nombreCompleto} (${fecha}).`,
+          })
+          return
+        }
         await crearMovimiento({
           fecha,
           tipo: 'pago_nomina',
-          concepto: `Pago de nómina${match ? ' a ' + match.nombreCompleto : nombre ? ' a ' + nombre : ''}`,
+          concepto: `Pago de nómina${nombre ? ' a ' + nombre : ''}`,
           monto,
           categoria: 'Nómina',
-          nominaId: match?.id,
+          cuentaBancoId: cuentaNominaId,
           fuente: 'chat_IA',
         })
         invalidarSnapshotFinanciero()
+        listarCuentasBanco().then(setCuentas).catch(() => {})
+        void cargarPulso()
         push({
           rol: 'ia',
-          texto: `✅ Registré el pago de nómina de ${COD(monto)}${match ? ` a ${match.nombreCompleto}` : ''} (${fecha}).`,
+          texto: `✅ Registré el pago de nómina de ${COD(monto)}${nombre ? ` a ${nombre}` : ''} (${fecha}).`,
         })
       } catch (e: any) {
         console.error('Error al registrar pago de nómina:', e)
@@ -818,6 +869,7 @@ export default function ChatPage() {
           valor: monto,
           periodicidad,
           diaVencimiento: dia && dia >= 1 && dia <= 31 ? dia : undefined,
+          cuentaBancoId: cuentas[0]?.id,
           activo: true,
           autoGenerar: true,
         })

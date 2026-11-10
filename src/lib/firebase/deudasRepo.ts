@@ -17,6 +17,7 @@ export interface Deuda {
   cuotaMensual?: number
   tasaInteres?: number
   fechaVencimientoCuota?: number
+  cuentaBancoId?: string
   autoDescontar?: boolean
   estado: EstadoDeuda
   notas?: string

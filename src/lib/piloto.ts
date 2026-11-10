@@ -1,7 +1,8 @@
-import { crearMovimiento, listarMovimientos } from './firebase/movimientosRepo'
+import { crearMovimiento, listarCuentasBanco, listarTodosLosMovimientos } from './firebase/movimientosRepo'
 import { generarEventosRecurrentes, generarMovimientosRecurrentes } from './firebase/recurrentesRepo'
 import { listarDeudas, registrarPagoDeuda } from './firebase/deudasRepo'
 import { listarImpuestos, registrarPagoImpuesto } from './firebase/impuestosRepo'
+import { listarNomina, registrarPagoNomina, totalMensualNomina } from './firebase/nominaRepo'
 import { leerPiloto, type PilotoConfig } from './firebase/pilotoRepo'
 import { convertirACOP } from './fx'
 
@@ -50,7 +51,11 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
     cambio = true
   }
 
-  const movs = await listarMovimientos(500)
+  const [movs, cuentas] = await Promise.all([
+    listarTodosLosMovimientos(),
+    listarCuentasBanco().catch(() => []),
+  ])
+  const cuentaUnicaId = cuentas.length === 1 ? cuentas[0].id : undefined
 
   const cfg = await leerPiloto().catch((): PilotoConfig => ({}))
   const sal = cfg.salario
@@ -60,39 +65,90 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
       (m) => String(m.fecha).startsWith(mes) && (m as { recurrenteId?: string }).recurrenteId === MARCA_SALARIO
     )
     if (!ya) {
-      try {
-        let montoCOP = Math.round(sal.monto)
-        let descripcion: string | undefined
-        if (monedaSalario !== 'COP') {
-          const conv = await convertirACOP(sal.monto, monedaSalario)
-          if (!conv) throw new Error('sin tasa disponible')
-          montoCOP = conv.montoCOP
-          descripcion =
-            `${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} · ` +
-            `tasa 1 ${monedaSalario} = $${Math.round(conv.tasa).toLocaleString('es-CO')}${conv.fecha ? ` del ${conv.fecha}` : ''}`
+      const cuentaSalarioId = sal.cuentaBancoId || cuentaUnicaId
+      if (!cuentaSalarioId) {
+        avisos.push('Tu salario automático está listo para consignarse, pero debes elegir la cuenta destino en la pestaña Nómina.')
+        cambio = true
+      } else {
+        try {
+          let montoCOP = Math.round(sal.monto)
+          let descripcion: string | undefined
+          if (monedaSalario !== 'COP') {
+            const conv = await convertirACOP(sal.monto, monedaSalario)
+            if (!conv) throw new Error('sin tasa disponible')
+            montoCOP = conv.montoCOP
+            descripcion =
+              `${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} · ` +
+              `tasa 1 ${monedaSalario} = $${Math.round(conv.tasa).toLocaleString('es-CO')}${conv.fecha ? ` del ${conv.fecha}` : ''}`
+          }
+          await crearMovimiento({
+            fecha: fechaEnMes(mes, sal.dia),
+            tipo: 'ingreso',
+            concepto: sal.concepto?.trim() || 'Salario mensual',
+            monto: montoCOP,
+            categoria: 'Salario',
+            cuentaBancoId: cuentaSalarioId,
+            recurrenteId: MARCA_SALARIO,
+            fuente: 'automatico',
+            descripcion,
+          })
+          aplicados.push({
+            texto:
+              monedaSalario === 'COP'
+                ? `Se te consignó tu salario mensual por ${COD(sal.monto)}`
+                : `Se te consignó tu salario mensual: ${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} (≈ ${COD(montoCOP)} COP)`,
+            monto: montoCOP,
+          })
+          cambio = true
+        } catch {
+          /* sin tasa o sin red: se reintenta en la próxima apertura */
         }
-        await crearMovimiento({
-          fecha: fechaEnMes(mes, sal.dia),
-          tipo: 'ingreso',
-          concepto: sal.concepto?.trim() || 'Salario mensual',
-          monto: montoCOP,
-          categoria: 'Salario',
-          cuentaBancoId: sal.cuentaBancoId,
-          recurrenteId: MARCA_SALARIO,
-          fuente: 'automatico',
-          descripcion,
-        })
+      }
+    }
+  }
+
+  // Cobro automático de nóminas de empleados / trabajadores
+  const nominas = await listarNomina().catch(() => [])
+  for (const n of nominas) {
+    if (n.activo === false || n.autoCobrar === false) continue
+    const total = totalMensualNomina(n)
+    if (total <= 0) continue
+    const dia = n.fechaPago?.dia && n.fechaPago.dia >= 1 && n.fechaPago.dia <= 31 ? n.fechaPago.dia : 1
+    if (hoy.getDate() < dia) continue
+    const ya = movs.some(
+      (m) => m.tipo === 'pago_nomina' && (m as { nominaId?: string }).nominaId === n.id && String(m.fecha).startsWith(mes)
+    )
+    if (ya) continue
+    const cuentaNominaId = n.cuentaBancoId || cuentaUnicaId
+    try {
+      const r = await registrarPagoNomina(n.id, {
+        cuentaBancoId: cuentaNominaId,
+        fecha: fechaEnMes(mes, dia),
+        fuente: 'automatico',
+      })
+      if (r.ok) {
+        const extraArl =
+          (r.adicional ?? 0) > 0
+            ? ` (salario ${COD(r.base ?? 0)} + ARL/adicional ${COD(r.adicional ?? 0)})`
+            : ''
         aplicados.push({
-          texto:
-            monedaSalario === 'COP'
-              ? `Se te consignó tu salario mensual por ${COD(sal.monto)}`
-              : `Se te consignó tu salario mensual: ${monedaSalario} ${Number(sal.monto).toLocaleString('es-CO')} (≈ ${COD(montoCOP)} COP)`,
-          monto: montoCOP,
+          texto: `Se cobró la nómina de "${n.nombreCompleto}" por ${COD(r.monto ?? total)}${extraArl}${r.cuentaNombre ? ` desde ${r.cuentaNombre}` : ''}`,
+          monto: r.monto ?? total,
         })
         cambio = true
-      } catch {
-        /* sin tasa o sin red: se reintenta en la próxima apertura */
+      } else if (r.sinCuenta) {
+        avisos.push(
+          `La nómina de "${n.nombreCompleto}" (${COD(total)}, día ${dia}) venció, pero debes elegir la cuenta a descontar en la pestaña Nómina.`
+        )
+        cambio = true
+      } else if (r.saldoInsuficiente) {
+        avisos.push(
+          `No pude cobrar la nómina de "${n.nombreCompleto}" (${COD(total)}): la cuenta "${r.cuentaNombre ?? ''}" solo tiene ${COD(r.saldoDisponible ?? 0)}.`
+        )
+        cambio = true
       }
+    } catch {
+      /* se reintenta en la próxima apertura */
     }
   }
 
@@ -105,8 +161,14 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
       (m) => m.tipo === 'pago_deuda' && (m as { deudaId?: string }).deudaId === d.id && String(m.fecha).startsWith(mes)
     )
     if (ya) continue
+    const cuentaDeudaId = d.cuentaBancoId || cuentaUnicaId
+    if (!cuentaDeudaId) {
+      avisos.push(`La cuota de "${d.nombre}" (${COD(Number(d.cuotaMensual))}) está lista, pero debes asignarle una cuenta en Deudas.`)
+      cambio = true
+      continue
+    }
     try {
-      await registrarPagoDeuda(d.id, Number(d.cuotaMensual), fechaEnMes(mes, dia), undefined, 'automatico')
+      await registrarPagoDeuda(d.id, Number(d.cuotaMensual), fechaEnMes(mes, dia), cuentaDeudaId, 'automatico')
       aplicados.push({ texto: `Se descontó la cuota de "${d.nombre}" por ${COD(Number(d.cuotaMensual))}`, monto: Number(d.cuotaMensual) })
       cambio = true
     } catch {
@@ -124,13 +186,16 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(vence) || vence > hoyStr) continue
     const ya = movs.some((m) => (m as { impuestoId?: string }).impuestoId === imp.id)
     if (ya) continue
+    const cuentaImpId = imp.cuentaBancoId || cuentaUnicaId
+    if (!cuentaImpId) {
+      avisos.push(`El impuesto "${imp.nombre}" (${COD(valor)}) venció, pero debes asignarle una cuenta en Impuestos para descontarlo.`)
+      cambio = true
+      continue
+    }
     try {
-      const r = await registrarPagoImpuesto(imp.id, { fuente: 'automatico' })
+      const r = await registrarPagoImpuesto(imp.id, { cuentaBancoId: cuentaImpId, fuente: 'automatico' })
       if (r.ok) {
         aplicados.push({ texto: `Se registró el pago del impuesto "${imp.nombre}" por ${COD(valor)}`, monto: valor })
-        if (!imp.cuentaBancoId) {
-          avisos.push(`"${imp.nombre}" quedó pagado, pero no desconté saldo porque no tiene una cuenta asignada.`)
-        }
         cambio = true
       } else if (r.saldoInsuficiente) {
         avisos.push(

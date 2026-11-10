@@ -2,7 +2,7 @@ import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
-import { crearMovimiento, listarMovimientos } from './movimientosRepo'
+import { crearMovimiento, listarCuentasBanco, listarTodosLosMovimientos } from './movimientosRepo'
 import { crearEvento, listarEventos } from './calendarioRepo'
 
 export type CategoriaRecurrente = 'hogar' | 'transporte' | 'salud' | 'educacion' | 'servicios' | 'otro'
@@ -99,8 +99,13 @@ function categoriaMovimiento(c: CategoriaRecurrente): string {
 }
 
 export async function generarMovimientosRecurrentes(mes: string): Promise<number> {
-  const recurrentes = (await listarRecurrentes()).filter((r) => r.activo !== false && r.autoGenerar !== false)
-  const existentes = await listarMovimientos(500)
+  const [recurrentesRaw, existentes, cuentas] = await Promise.all([
+    listarRecurrentes(),
+    listarTodosLosMovimientos(),
+    listarCuentasBanco().catch(() => []),
+  ])
+  const recurrentes = recurrentesRaw.filter((r) => r.activo !== false && r.autoGenerar !== false)
+  const cuentaUnicaId = cuentas.length === 1 ? cuentas[0].id : undefined
   const yaGenerados = new Set(
     existentes
       .filter((m) => String(m.fecha).startsWith(mes) && m.recurrenteId)
@@ -109,13 +114,15 @@ export async function generarMovimientosRecurrentes(mes: string): Promise<number
   let creados = 0
   for (const r of recurrentes) {
     if (!tocaMes(r, mes) || yaGenerados.has(r.id)) continue
+    const cuentaId = r.cuentaBancoId || cuentaUnicaId
+    if (!cuentaId) continue
     await crearMovimiento({
       fecha: fechaEnMes(mes, Number(r.diaVencimiento) || 1),
       tipo: 'gasto',
       concepto: r.concepto,
       monto: Number(r.valor) || 0,
       categoria: categoriaMovimiento(r.categoria),
-      cuentaBancoId: r.cuentaBancoId,
+      cuentaBancoId: cuentaId,
       recurrenteId: r.id,
       fuente: 'automatico',
     })

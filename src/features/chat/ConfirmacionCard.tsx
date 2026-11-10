@@ -6,7 +6,7 @@ import type { CuentaBanco } from '@/lib/firebase/movimientosRepo'
 import { CheckCircle2, XCircle, ArrowDownLeft, ArrowUpRight, Wallet, Tag, Calendar as CalendarIcon } from 'lucide-react'
 
 export interface MovimientoConfirmado extends BorradorMovimiento {
-  cuentaBancoId?: string
+  cuentaBancoId: string
 }
 
 interface Props {
@@ -23,7 +23,8 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
   const [concepto, setConcepto] = useState(borrador.concepto)
   const [monto, setMonto] = useState(String(borrador.monto))
   const [categoria, setCategoria] = useState(borrador.categoria)
-  const [cuentaBancoId, setCuentaBancoId] = useState('')
+  const [cuentaIdManual, setCuentaIdManual] = useState('')
+  const cuentaBancoId = cuentaIdManual || cuentas[0]?.id || ''
 
   const montoNum = Number(monto.replace(/[^\d.]/g, '')) || 0
   const esIngreso = tipo === 'ingreso'
@@ -119,14 +120,14 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
 
         <label className="col-span-2 flex flex-col gap-1">
           <span className="flex items-center gap-1 font-bold text-mist-300">
-            <Wallet className="h-3 w-3 text-mist-600" /> Afectar cuenta bancaria
+            <Wallet className="h-3 w-3 text-mist-600" /> Cuenta bancaria <span className="text-red-300">*</span>
           </span>
           <select
             className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
             value={cuentaBancoId}
-            onChange={(e) => setCuentaBancoId(e.target.value)}
+            onChange={(e) => setCuentaIdManual(e.target.value)}
           >
-            <option value="">(Opcional) No descontar de ninguna cuenta</option>
+            {cuentas.length === 0 && <option value="">Crea primero una cuenta en la pestaña Cuentas</option>}
             {cuentas.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.nombre} (Saldo actual: ${(c.saldoActual || 0).toLocaleString('es-CO')} COP)
@@ -140,7 +141,7 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         <Button
           size="sm"
           className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 text-xs font-bold text-[#04241a] hover:brightness-110"
-          disabled={guardando || montoNum <= 0 || !concepto.trim()}
+          disabled={guardando || montoNum <= 0 || !concepto.trim() || !cuentaBancoId}
           onClick={() =>
             onConfirm({
               tipo,
@@ -148,7 +149,7 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
               concepto: concepto.trim(),
               monto: montoNum,
               categoria: categoria.trim() || 'Otros',
-              cuentaBancoId: cuentaBancoId || undefined,
+              cuentaBancoId,
             })
           }
         >

@@ -55,9 +55,13 @@ export default function RecurrentesPage() {
       { key: 'fechaInicio', label: 'Fecha de inicio (para periodicidad)', tipo: 'date' },
       {
         key: 'cuentaBancoId',
-        label: 'Cuenta que afecta (opcional)',
+        label: 'Cuenta para descontar',
         tipo: 'select',
-        opciones: [{ value: '', label: 'Sin cuenta' }, ...cuentas.map((c) => ({ value: c.id, label: c.nombre }))],
+        required: true,
+        opciones: cuentas.map((c) => ({
+          value: c.id,
+          label: `${c.nombre} · $${(Number(c.saldoActual) || 0).toLocaleString('es-CO')}`,
+        })),
       },
       { key: 'autoGenerar', label: 'Generar automáticamente', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
       { key: 'activo', label: 'Activo', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
@@ -130,12 +134,20 @@ export default function RecurrentesPage() {
     </Card>
   )
 
+  const vacio = useMemo<Record<string, string>>(
+    () => ({
+      ...VACIO,
+      cuentaBancoId: cuentas[0]?.id ?? '',
+    }),
+    [cuentas]
+  )
+
   return (
     <CrudPage<GastoRecurrente>
       titulo="Gasto recurrente"
       descripcion="Gastos fijos (internet, luz, agua, arriendo...) para proyecciones, movimientos automáticos y recordatorios."
       campos={campos}
-      vacio={VACIO}
+      vacio={vacio}
       listar={listarRecurrentes}
       crear={(d) => crearRecurrente(d)}
       actualizar={(id, d) => actualizarRecurrente(id, d)}

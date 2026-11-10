@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,8 +7,9 @@ import Contador from '@/components/Contador'
 import {
   actualizarMovimiento,
   eliminarMovimiento,
+  exportarMovimientosCompacto,
   listarCuentasBanco,
-  listarMovimientos,
+  listarTodosLosMovimientos,
   obtenerResumenSaldos,
   type CuentaBanco,
   type MovimientoDoc,
@@ -31,6 +32,9 @@ import {
   CreditCard,
   ShoppingBag,
   Sparkles,
+  Download,
+  Search,
+  ArrowUpDown,
 } from 'lucide-react'
 
 const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
@@ -101,6 +105,10 @@ export default function DashboardPage() {
   const [form, setForm] = useState<EdicionForm | null>(null)
   const [guardando, setGuardando] = useState(false)
   const [cargando, setCargando] = useState(false)
+  const [exportando, setExportando] = useState(false)
+  const [busqueda, setBusqueda] = useState('')
+  const [filtroTipo, setFiltroTipo] = useState<string>('todos')
+  const [ordenAsc, setOrdenAsc] = useState(false)
 
   const cargar = useCallback(async () => {
     setError('')
@@ -108,7 +116,7 @@ export default function DashboardPage() {
     try {
       const [{ cuentas: cuentasRes, total: totalRes }, movimientos, cuentasLista] = await Promise.all([
         obtenerResumenSaldos(),
-        listarMovimientos(100),
+        listarTodosLosMovimientos(),
         listarCuentasBanco(),
       ])
       setTotal(totalRes)
@@ -158,7 +166,7 @@ export default function DashboardPage() {
       concepto: m.concepto || '',
       monto: String(m.monto ?? ''),
       categoria: m.categoria || '',
-      cuentaBancoId: m.cuentaBancoId || '',
+      cuentaBancoId: m.cuentaBancoId || cuentas[0]?.id || '',
     })
   }
 
@@ -174,6 +182,10 @@ export default function DashboardPage() {
       setError('Completa fecha, concepto, categoría y un monto válido mayor a 0.')
       return
     }
+    if (!form.cuentaBancoId) {
+      setError('Debes elegir la cuenta bancaria asociada al movimiento.')
+      return
+    }
     setGuardando(true)
     setError('')
     try {
@@ -183,7 +195,7 @@ export default function DashboardPage() {
         concepto: form.concepto.trim(),
         monto,
         categoria: form.categoria.trim(),
-        cuentaBancoId: form.cuentaBancoId || undefined,
+        cuentaBancoId: form.cuentaBancoId,
       })
       cerrarEdicion()
       cargar()
@@ -193,6 +205,37 @@ export default function DashboardPage() {
       setGuardando(false)
     }
   }
+
+  const exportarMovs = async () => {
+    setExportando(true)
+    setError('')
+    try {
+      const { nombre, contenido } = await exportarMovimientosCompacto()
+      const blob = new Blob([contenido], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = nombre
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('No se pudieron exportar los movimientos.')
+    } finally {
+      setExportando(false)
+    }
+  }
+
+  const movsFiltrados = useMemo(() => {
+    const q = busqueda.trim().toLowerCase()
+    const base = ordenAsc ? [...movs].reverse() : movs
+    return base.filter((m) => {
+      if (filtroTipo !== 'todos' && m.tipo !== filtroTipo) return false
+      if (!q) return true
+      const cuentaNombre = cuentas.find((c) => c.id === m.cuentaBancoId)?.nombre ?? ''
+      const texto = `${m.fecha} ${m.concepto} ${m.categoria} ${m.descripcion ?? ''} ${cuentaNombre} ${m.monto}`.toLowerCase()
+      return texto.includes(q)
+    })
+  }, [movs, busqueda, filtroTipo, ordenAsc, cuentas])
 
   const balanceMes = ingresosMes - gastosMes
 
@@ -379,13 +422,15 @@ export default function DashboardPage() {
                 </label>
 
                 <label className="flex flex-col gap-1 sm:col-span-2">
-                  <span className="font-bold text-mist-300">Cuenta bancaria</span>
+                  <span className="font-bold text-mist-300">
+                    Cuenta bancaria <span className="text-red-300">*</span>
+                  </span>
                   <select
                     className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
                     value={form.cuentaBancoId}
                     onChange={(e) => setForm({ ...form, cuentaBancoId: e.target.value })}
                   >
-                    <option value="">Sin cuenta vinculada (no altera saldos)</option>
+                    {cuentas.length === 0 && <option value="">Crea primero una cuenta en Cuentas</option>}
                     {cuentas.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.nombre} (Saldo: ${c.saldoActual?.toLocaleString('es-CO')})
@@ -420,25 +465,88 @@ export default function DashboardPage() {
         </motion.div>
       )}
 
-      {/* HISTORIAL */}
+      {/* HISTORIAL COMPLETO */}
       <motion.div variants={pieza}>
         <Card className="glass-card overflow-hidden border-0">
-          <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
-            <CardTitle className="text-sm font-extrabold text-white">Movimientos recientes</CardTitle>
-            <span className="text-[11px] font-semibold text-mist-500">{movs.length} registrados</span>
+          <CardHeader className="flex flex-col gap-3 border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-sm font-extrabold text-white">
+                  Historial completo de movimientos
+                </CardTitle>
+                <p className="mt-0.5 text-[11px] text-mist-500">
+                  Todos tus movimientos conservados desde el primero ({movsFiltrados.length} de {movs.length} visibles)
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setOrdenAsc((v) => !v)}
+                  className="h-8 cursor-pointer gap-1.5 border-white/10 bg-white/[0.04] px-2.5 text-xs text-mist-300 hover:bg-white/10 hover:text-white"
+                  title="Cambiar orden cronológico"
+                >
+                  <ArrowUpDown className="h-3.5 w-3.5 text-emerald-300" />
+                  <span>{ordenAsc ? 'Desde el 1.º al último' : 'Más recientes primero'}</span>
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={exportando || movs.length === 0}
+                  onClick={exportarMovs}
+                  className="h-8 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-3 text-xs font-bold text-[#04241a] hover:brightness-110"
+                  title="Exporta todos los movimientos con todos sus datos usando el mínimo de tokens"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>{exportando ? 'Exportando...' : 'Exportar todo (mín. tokens)'}</span>
+                </Button>
+              </div>
+            </div>
+
+            {movs.length > 0 && (
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_180px]">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-mist-500" />
+                  <Input
+                    value={busqueda}
+                    onChange={(e) => setBusqueda(e.target.value)}
+                    placeholder="Buscar por concepto, fecha, cuenta, categoría o monto..."
+                    className="field-dark h-9 pl-8 text-xs shadow-none"
+                  />
+                </div>
+                <select
+                  value={filtroTipo}
+                  onChange={(e) => setFiltroTipo(e.target.value)}
+                  className="field-dark h-9 rounded-xl px-2.5 text-xs font-medium outline-none"
+                >
+                  <option value="todos">Todos los tipos</option>
+                  {TIPOS.map((t) => (
+                    <option key={t} value={t}>
+                      {ETIQUETA_TIPO[t]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </CardHeader>
 
           <CardContent className="p-0 text-xs">
-            {movs.length === 0 ? (
+            {movsFiltrados.length === 0 ? (
               <div className="space-y-1 p-8 text-center">
-                <p className="font-bold text-mist-300">Sin movimientos todavía</p>
-                <p className="text-[11px] text-mist-600">Escribe un gasto o ingreso en el Chat IA para comenzar.</p>
+                <p className="font-bold text-mist-300">
+                  {movs.length === 0 ? 'Sin movimientos todavía' : 'Ningún movimiento coincide con el filtro'}
+                </p>
+                <p className="text-[11px] text-mist-600">
+                  {movs.length === 0
+                    ? 'Escribe un gasto o ingreso en el Chat IA para comenzar.'
+                    : 'Prueba cambiando el texto de búsqueda o el tipo seleccionado.'}
+                </p>
               </div>
             ) : (
               <ul className="divide-y divide-white/[0.05]">
-                {movs.slice(0, 20).map((m) => {
+                {movsFiltrados.map((m) => {
                   const IconCat = getCategoriaIcon(m.categoria, m.tipo)
                   const esIng = m.tipo === 'ingreso'
+                  const esTransf = m.tipo === 'transferencia'
                   return (
                     <li
                       key={m.id}
@@ -447,7 +555,11 @@ export default function DashboardPage() {
                       <div className="flex min-w-0 items-center gap-3">
                         <div
                           className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl ${
-                            esIng ? 'bg-emerald-400/15 text-emerald-300' : 'bg-white/[0.06] text-mist-300'
+                            esIng
+                              ? 'bg-emerald-400/15 text-emerald-300'
+                              : esTransf
+                                ? 'bg-sky-400/15 text-sky-300'
+                                : 'bg-white/[0.06] text-mist-300'
                           }`}
                         >
                           <IconCat className="h-4 w-4" />
@@ -463,13 +575,18 @@ export default function DashboardPage() {
                             {m.cuentaBancoId && (
                               <span>· {cuentas.find((c) => c.id === m.cuentaBancoId)?.nombre || 'Cuenta'}</span>
                             )}
+                            {m.descripcion && <span className="text-mist-600">· {m.descripcion}</span>}
                           </div>
                         </div>
                       </div>
 
                       <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-                        <div className={`text-right text-xs font-black sm:text-sm ${esIng ? 'text-emerald-300' : 'text-white'}`}>
-                          {esIng ? '+' : '-'}{COD(Number(m.monto) || 0)}
+                        <div
+                          className={`text-right text-xs font-black sm:text-sm ${
+                            esIng ? 'text-emerald-300' : esTransf ? 'text-sky-300' : 'text-white'
+                          }`}
+                        >
+                          {esIng ? '+' : esTransf ? '⇄ ' : '-'}{COD(Number(m.monto) || 0)}
                         </div>
 
                         <div className="flex items-center gap-1">

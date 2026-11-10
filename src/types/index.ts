@@ -200,6 +200,9 @@ export interface Nomina {
   activo: boolean;
   tipoContrato: 'indefinido' | 'fijo' | 'obra' | 'aprendiz';
   salarioBaseMensual: number;
+  adicionalMensual?: number;
+  cuentaBancoId?: string;
+  autoCobrar?: boolean;
   moneda: 'COP';
   asignacion: {
     vehiculoId?: string;

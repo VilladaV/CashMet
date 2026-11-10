@@ -7,9 +7,6 @@ import {
   getDoc,
   getDocs,
   increment,
-  limit,
-  orderBy,
-  query,
   setDoc,
   updateDoc,
   writeBatch,
@@ -62,6 +59,7 @@ export interface CuentaBanco {
 export interface MovimientoDoc {
   id: string
   fecha: string
+  hora?: string
   tipo: TipoMovimiento
   concepto: string
   monto: number
@@ -77,7 +75,11 @@ export interface MovimientoDoc {
   impuestoId?: string
   recurrenteId?: string
   etiquetas?: string[]
+  fuente?: 'chat_IA' | 'manual' | 'automatico'
+  estado?: 'confirmado' | 'pendiente' | 'anulado'
+  notasIA?: string
   creado?: number
+  actualizado?: number
 }
 
 export interface MovimientoUpdate {
@@ -283,15 +285,147 @@ export async function obtenerResumenSaldos(): Promise<{ cuentas: CuentaBanco[]; 
   return { cuentas, total }
 }
 
-export async function listarMovimientos(max = 20): Promise<MovimientoDoc[]> {
-  const snap = await getDocs(
-    query(collection(db, COLLECTIONS.MOVIMIENTOS), orderBy('creado', 'desc'), limit(max))
-  )
-  return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as unknown as MovimientoDoc[]
+function ordenarMovimientosDesc(lista: MovimientoDoc[]): MovimientoDoc[] {
+  return [...lista].sort((a, b) => {
+    const cmpFecha = String(b.fecha ?? '').localeCompare(String(a.fecha ?? ''))
+    if (cmpFecha !== 0) return cmpFecha
+    return (Number(b.creado) || 0) - (Number(a.creado) || 0)
+  })
 }
 
-export async function listarTodosLosMovimientos(max = 300): Promise<MovimientoDoc[]> {
-  return listarMovimientos(max)
+export async function listarTodosLosMovimientos(_max?: number): Promise<MovimientoDoc[]> {
+  void _max
+  const snap = await getDocs(collection(db, COLLECTIONS.MOVIMIENTOS))
+  const todos = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as unknown as MovimientoDoc[]
+  return ordenarMovimientosDesc(todos)
+}
+
+export async function listarMovimientos(max?: number): Promise<MovimientoDoc[]> {
+  const todos = await listarTodosLosMovimientos()
+  if (typeof max === 'number' && max > 0) return todos.slice(0, max)
+  return todos
+}
+
+const limpiarCelda = (v: unknown): string =>
+  String(v ?? '')
+    .replace(/[\r\n|]+/g, ' ')
+    .trim()
+
+export async function exportarMovimientosCompacto(): Promise<{
+  nombre: string
+  contenido: string
+  totalMovimientos: number
+}> {
+  const [movs, cuentasSnap, deudasSnap, vehSnap, propSnap, nomSnap, impSnap, recSnap] = await Promise.all([
+    listarTodosLosMovimientos(),
+    getDocs(collection(db, COLLECTIONS.CUENTAS_BANCO)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.DEUDAS)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.VEHICULOS)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.PROPIEDADES)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.NOMINA)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.IMPUESTOS)).catch(() => null),
+    getDocs(collection(db, COLLECTIONS.GASTOS_RECURRENTES)).catch(() => null),
+  ])
+
+  const mapaCuentas = new Map<string, string>()
+  cuentasSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaCuentas.set(d.id, String(data.nombre ?? d.id))
+  })
+
+  const mapaDeudas = new Map<string, string>()
+  deudasSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaDeudas.set(d.id, String(data.nombre ?? d.id))
+  })
+
+  const mapaVehiculos = new Map<string, string>()
+  vehSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    const etiqueta = [data.marca, data.linea, data.placa ? `(${data.placa})` : ''].filter(Boolean).join(' ')
+    mapaVehiculos.set(d.id, etiqueta || d.id)
+  })
+
+  const mapaPropiedades = new Map<string, string>()
+  propSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaPropiedades.set(d.id, String(data.nombre ?? d.id))
+  })
+
+  const mapaNomina = new Map<string, string>()
+  nomSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaNomina.set(d.id, String(data.nombreCompleto ?? d.id))
+  })
+
+  const mapaImpuestos = new Map<string, string>()
+  impSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaImpuestos.set(d.id, String(data.nombre ?? d.id))
+  })
+
+  const mapaRecurrentes = new Map<string, string>()
+  recSnap?.docs.forEach((d) => {
+    const data = d.data() as Record<string, unknown>
+    mapaRecurrentes.set(d.id, String(data.concepto ?? d.id))
+  })
+
+  // Orden cronológico desde el primer movimiento hasta el más reciente
+  const cronologicos = [...movs].reverse()
+
+  let totalIngresos = 0
+  let totalEgresos = 0
+  for (const m of cronologicos) {
+    const v = Number(m.monto) || 0
+    if (m.tipo === 'ingreso') totalIngresos += v
+    else if (m.tipo !== 'transferencia') totalEgresos += v
+  }
+
+  const fechaHoy = new Date().toISOString().slice(0, 10)
+  const lineas: string[] = [
+    `# CASHMET_MOVIMIENTOS_COMPLETO v1 | exportado=${fechaHoy} | moneda=COP | total_movimientos=${cronologicos.length} | ingresos_acum=${Math.round(totalIngresos)} | egresos_acum=${Math.round(totalEgresos)} | balance_neto=${Math.round(totalIngresos - totalEgresos)}`,
+    'fecha|hora|tipo|monto|concepto|categoria|subcategoria|cuenta|cuentaId|cuentaDestino|cuentaDestinoId|vinculo|descripcion|etiquetas|fuente|estado|notasIA|id|creado',
+  ]
+
+  for (const m of cronologicos) {
+    const vinculos: string[] = []
+    if (m.deudaId) vinculos.push(`deuda:${mapaDeudas.get(m.deudaId) ?? m.deudaId}[${m.deudaId}]`)
+    if (m.vehiculoId) vinculos.push(`vehiculo:${mapaVehiculos.get(m.vehiculoId) ?? m.vehiculoId}[${m.vehiculoId}]`)
+    if (m.propiedadId) vinculos.push(`propiedad:${mapaPropiedades.get(m.propiedadId) ?? m.propiedadId}[${m.propiedadId}]`)
+    if (m.nominaId) vinculos.push(`nomina:${mapaNomina.get(m.nominaId) ?? m.nominaId}[${m.nominaId}]`)
+    if (m.impuestoId) vinculos.push(`impuesto:${mapaImpuestos.get(m.impuestoId) ?? m.impuestoId}[${m.impuestoId}]`)
+    if (m.recurrenteId) vinculos.push(`recurrente:${mapaRecurrentes.get(m.recurrenteId) ?? m.recurrenteId}[${m.recurrenteId}]`)
+
+    const fila = [
+      limpiarCelda(m.fecha),
+      limpiarCelda(m.hora),
+      limpiarCelda(m.tipo),
+      String(Math.round(Number(m.monto) || 0)),
+      limpiarCelda(m.concepto),
+      limpiarCelda(m.categoria),
+      limpiarCelda(m.subcategoria),
+      limpiarCelda(m.cuentaBancoId ? mapaCuentas.get(m.cuentaBancoId) ?? m.cuentaBancoId : ''),
+      limpiarCelda(m.cuentaBancoId),
+      limpiarCelda(m.cuentaDestinoId ? mapaCuentas.get(m.cuentaDestinoId) ?? m.cuentaDestinoId : ''),
+      limpiarCelda(m.cuentaDestinoId),
+      limpiarCelda(vinculos.join(';')),
+      limpiarCelda(m.descripcion),
+      limpiarCelda(Array.isArray(m.etiquetas) ? m.etiquetas.join(',') : ''),
+      limpiarCelda(m.fuente),
+      limpiarCelda(m.estado ?? 'confirmado'),
+      limpiarCelda(m.notasIA),
+      limpiarCelda(m.id),
+      m.creado ? String(m.creado) : '',
+    ].join('|')
+
+    lineas.push(fila)
+  }
+
+  return {
+    nombre: `cashmet-movimientos-${fechaHoy}.csv`,
+    contenido: lineas.join('\n'),
+    totalMovimientos: cronologicos.length,
+  }
 }
 
 export async function actualizarCuentaBanco(id: string, data: Partial<CuentaBanco>): Promise<void> {

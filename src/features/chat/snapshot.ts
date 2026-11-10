@@ -4,7 +4,7 @@ import { listarRecurrentes } from '@/lib/firebase/recurrentesRepo'
 import { listarImpuestos } from '@/lib/firebase/impuestosRepo'
 import { calcularGastosMensuales, listarVehiculos } from '@/lib/firebase/vehiculosRepo'
 import { listarPropiedades } from '@/lib/firebase/propiedadesRepo'
-import { listarNomina } from '@/lib/firebase/nominaRepo'
+import { listarNomina, totalMensualNomina } from '@/lib/firebase/nominaRepo'
 import { listarEventos } from '@/lib/firebase/calendarioRepo'
 import { lineaTasasContexto } from '@/lib/fx'
 
@@ -193,8 +193,20 @@ export async function construirSnapshotFinanciero(): Promise<string> {
 
   if (nomina.length) {
     const base = nomina.reduce((s, n) => s + (Number(n.salarioBaseMensual) || 0), 0)
+    const adicionalTotal = nomina.reduce((s, n) => s + (Number(n.adicionalMensual) || 0), 0)
+    const totalNom = nomina.reduce((s, n) => s + totalMensualNomina(n), 0)
     lineas.push('', `NÓMINA (${nomina.length} empleados activos)`)
-    lineas.push(`- Salario base mensual total: ${COD(base)}`)
+    lineas.push(
+      `- Total mensual a cobrar: ${COD(totalNom)} (salario base ${COD(base)}${adicionalTotal > 0 ? ` + ARL/adicional ${COD(adicionalTotal)}` : ''})`
+    )
+    for (const n of nomina) {
+      const ad = Number(n.adicionalMensual) || 0
+      const tot = totalMensualNomina(n)
+      const cta = cuentas.find((c) => c.id === n.cuentaBancoId)?.nombre
+      lineas.push(
+        `  · ${n.nombreCompleto} (${n.cargo}): total ${COD(tot)} [base ${COD(Number(n.salarioBaseMensual) || 0)}${ad > 0 ? ` + ARL/adicional ${COD(ad)}` : ''}]${n.fechaPago?.dia ? ` · día ${n.fechaPago.dia}` : ''}${cta ? ` · cuenta ${cta}` : ''}`
+      )
+    }
   }
 
   if (eventos.length) {

@@ -74,8 +74,9 @@ export default function ImpuestosPage() {
     },
     {
       key: 'cuentaBancoId',
-      label: 'Cuenta para descontar (si activas ⚡ auto)',
+      label: 'Cuenta para descontar',
       tipo: 'select',
+      required: true,
       opciones: cuentas.map((c) => ({
         value: c.id,
         label: `${c.nombre} · $${(Number(c.saldoActual) || 0).toLocaleString('es-CO')}`,
@@ -84,12 +85,17 @@ export default function ImpuestosPage() {
     { key: 'notas', label: 'Notas', span2: true },
   ]
 
+  const vacio: Record<string, string> = {
+    ...VACIO,
+    cuentaBancoId: cuentas[0]?.id ?? '',
+  }
+
   return (
     <CrudPage<Impuesto>
       titulo="Impuesto"
       descripcion="Predial, vehicular, renta, ICA y otros. Con vencimiento se agregan al calendario. Si activas ⚡ auto, el piloto lo paga al vencer y descuenta el saldo de la cuenta que elijas."
       campos={campos}
-      vacio={VACIO}
+      vacio={vacio}
       listar={listarImpuestos}
       crear={(d) => crearImpuesto(d)}
       actualizar={(id, d) => actualizarImpuesto(id, d)}

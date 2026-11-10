@@ -151,6 +151,25 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
   const ahora = new Date()
   for (const n of nominas) {
     if (n.activo === false) continue
+    const diaPago = Number(n.fechaPago?.dia) || 0
+    if (diaPago >= 1 && diaPago <= 31) {
+      const total = Math.round((Number(n.salarioBaseMensual) || 0) + (Number(n.adicionalMensual) || 0))
+      for (let i = 0; i < meses; i++) {
+        const base = new Date(ahora.getFullYear(), ahora.getMonth() + i, diaPago)
+        if (base < new Date(ahora.toDateString())) continue
+        eventos.push({
+          titulo: `Pago nómina - ${n.nombreCompleto ?? 'Empleado'}`,
+          descripcion: total > 0 ? `Total mensual: $${total.toLocaleString('es-CO')} COP` : undefined,
+          tipo: 'nomina_trabajador',
+          fechaInicio: iso(base),
+          allDay: true,
+          recurrente: true,
+          reglaRecurrencia: 'RRULE:FREQ=MONTHLY',
+          recordatorios: recDefault,
+          relacionado: { nominaId: n.id },
+        })
+      }
+    }
     if (n.primaServicios?.aplica) {
       if (n.primaServicios.mitadJulio) {
         for (let i = 0; i <= 1; i++) {

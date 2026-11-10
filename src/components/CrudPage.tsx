@@ -48,17 +48,21 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
     cargar()
   }, [cargar])
 
+  const formEfectivo: Record<string, string> = editId
+    ? form
+    : { ...vacio, ...Object.fromEntries(Object.entries(form).filter(([, v]) => v !== '')) }
+
   const submit = async () => {
     setError('')
     setMsg('')
-    const faltante = campos.find((c) => c.required && !String(form[c.key] ?? '').trim())
+    const faltante = campos.find((c) => c.required && !String(formEfectivo[c.key] ?? '').trim())
     if (faltante) {
       setError(`Falta diligenciar: ${faltante.label}`)
       return
     }
     setBusy(true)
     try {
-      const documento = transformar(form)
+      const documento = transformar(formEfectivo)
       if (editId && actualizar) {
         await actualizar(editId, documento)
         setMsg('Registro actualizado exitosamente.')
@@ -125,8 +129,8 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                 {c.tipo === 'select' ? (
                   <select
                     className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
-                    value={form[c.key] ?? ''}
-                    onChange={(e) => setForm({ ...form, [c.key]: e.target.value })}
+                    value={formEfectivo[c.key] ?? ''}
+                    onChange={(e) => setForm({ ...formEfectivo, [c.key]: e.target.value })}
                   >
                     <option value="">Seleccionar...</option>
                     {c.opciones?.map((o) => (
@@ -138,8 +142,8 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                 ) : (
                   <Input
                     type={c.tipo === 'number' ? 'number' : c.tipo === 'date' ? 'date' : 'text'}
-                    value={form[c.key] ?? ''}
-                    onChange={(e) => setForm({ ...form, [c.key]: e.target.value })}
+                    value={formEfectivo[c.key] ?? ''}
+                    onChange={(e) => setForm({ ...formEfectivo, [c.key]: e.target.value })}
                     className="field-dark h-10 text-xs shadow-none"
                   />
                 )}

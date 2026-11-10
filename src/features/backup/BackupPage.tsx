@@ -3,12 +3,14 @@ import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { exportarBackup, importarBackup } from '@/lib/firebase/backup'
-import { Download, Upload, ShieldCheck, Database, CheckCircle2, AlertCircle } from 'lucide-react'
+import { exportarMovimientosCompacto } from '@/lib/firebase/movimientosRepo'
+import { Download, Upload, ShieldCheck, Database, CheckCircle2, AlertCircle, FileSpreadsheet } from 'lucide-react'
 
 export default function BackupPage() {
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [busyMovs, setBusyMovs] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const descargar = async () => {
@@ -29,6 +31,27 @@ export default function BackupPage() {
       setError(e?.message || 'No se pudo exportar el backup.')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const descargarMovimientosCompacto = async () => {
+    setBusyMovs(true)
+    setMsg('')
+    setError('')
+    try {
+      const { nombre, contenido, totalMovimientos } = await exportarMovimientosCompacto()
+      const blob = new Blob([contenido], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = nombre
+      a.click()
+      URL.revokeObjectURL(url)
+      setMsg(`Se exportaron los ${totalMovimientos} movimientos históricos en formato compacto (mínimo de tokens).`)
+    } catch (e: any) {
+      setError(e?.message || 'No se pudieron exportar los movimientos.')
+    } finally {
+      setBusyMovs(false)
     }
   }
 
@@ -85,8 +108,18 @@ export default function BackupPage() {
 
             <Button
               size="sm"
+              disabled={busy || busyMovs}
+              onClick={descargarMovimientosCompacto}
+              className="h-10 cursor-pointer gap-2 border border-emerald-400/30 bg-emerald-400/15 px-4 text-xs font-bold text-emerald-200 hover:bg-emerald-400/25"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              <span>{busyMovs ? 'Exportando...' : 'Exportar todos los movimientos (mín. tokens)'}</span>
+            </Button>
+
+            <Button
+              size="sm"
               variant="outline"
-              disabled={busy}
+              disabled={busy || busyMovs}
               onClick={() => fileRef.current?.click()}
               className="h-10 cursor-pointer gap-2 border-white/10 bg-transparent px-4 text-xs text-mist-300 hover:bg-white/5 hover:text-white"
             >

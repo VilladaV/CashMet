@@ -957,7 +957,10 @@ function MantenimientoTab({
 
   useEffect(() => {
     listarCuentasBanco()
-      .then((data) => setCuentas(data))
+      .then((data) => {
+        setCuentas(data)
+        if (data.length > 0) setCuentaId((prev) => prev || data[0].id)
+      })
       .catch(() => setCuentas([]))
   }, [])
 
@@ -1053,6 +1056,10 @@ function MantenimientoTab({
       setError('El costo del servicio no es válido.')
       return
     }
+    if (costo && costo > 0 && !cuentaId) {
+      setError('Debes elegir la cuenta bancaria de la cual se descontará el costo del mantenimiento.')
+      return
+    }
     setBusy(true)
     setError('')
     setOk('')
@@ -1066,13 +1073,12 @@ function MantenimientoTab({
           monto: costo,
           categoria: 'Transporte',
           vehiculoId: vehiculo.id,
-          cuentaBancoId: cuentaId || undefined,
+          cuentaBancoId: cuentaId,
           fuente: 'manual',
         })
       }
       setServicio((s) => ({ ...s, [t.id]: { km: '', fecha: '', costo: '' } }))
-      const aviso = costo && costo > 0 && !cuentaId ? ' No desconté saldo porque no elegiste cuenta.' : ''
-      setOk(`Servicio registrado${costo && costo > 0 ? ` y ${COD(costo)} registrados en movimientos` : ''}.${aviso}`)
+      setOk(`Servicio registrado${costo && costo > 0 ? ` y ${COD(costo)} descontados de la cuenta` : ''}.`)
       await recargar()
     } catch (e) {
       setError(mensajeError(e))
@@ -1200,13 +1206,15 @@ function MantenimientoTab({
 
         <div className="flex flex-col gap-1.5 sm:flex-row sm:items-end">
           <label className="flex flex-1 flex-col gap-1.5">
-            <span className="font-bold text-mist-300">Cuenta para costos de mantenimiento</span>
+            <span className="font-bold text-mist-300">
+              Cuenta para costos de mantenimiento <span className="text-red-300">*</span>
+            </span>
             <select
               value={cuentaId}
               onChange={(e) => setCuentaId(e.target.value)}
               className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
             >
-              <option value="">Sin cuenta (solo registro)</option>
+              {cuentas.length === 0 && <option value="">Crea primero una cuenta en Cuentas</option>}
               {cuentas.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.nombre} · {COD(c.saldoActual)}
@@ -1215,7 +1223,7 @@ function MantenimientoTab({
             </select>
           </label>
           <p className="max-w-xs text-[10px] text-mist-500">
-            Si eliges una cuenta, el costo del servicio se descuenta de su saldo.
+            El costo del servicio se descuenta automáticamente de la cuenta seleccionada.
           </p>
         </div>
 

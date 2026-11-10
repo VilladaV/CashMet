@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'motion/react'
 import CrudPage, { type CampoForm } from '@/components/CrudPage'
 import { Button } from '@/components/ui/button'
@@ -11,41 +11,22 @@ import {
   crearNomina,
   eliminarNomina,
   listarNomina,
+  totalMensualNomina,
   type Nomina,
 } from '@/lib/firebase/nominaRepo'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
 import { guardarSalarioPropio, leerPiloto } from '@/lib/firebase/pilotoRepo'
+import { ejecutarPilotoAutomatico } from '@/lib/piloto'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
 
 const num = (s: string) => {
   const n = Number(String(s).replace(/[^\d.-]/g, ''))
   return Number.isFinite(n) ? n : undefined
 }
 
-const CAMPOS: CampoForm[] = [
-  { key: 'nombreCompleto', label: 'Nombre completo', required: true },
-  { key: 'cargo', label: 'Cargo', required: true },
-  { key: 'salarioBaseMensual', label: 'Salario base mensual (COP)', tipo: 'number', required: true },
-  { key: 'tipoContrato', label: 'Tipo de contrato', tipo: 'select', opciones: TIPOS_CONTRATO.map((t) => ({ value: t, label: t })) },
-  { key: 'activo', label: 'Activo', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
-  { key: 'primaAplica', label: 'Prima de servicios', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
-  { key: 'primaJulio', label: 'Mitad julio (30 jun)', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
-  { key: 'primaDiciembre', label: 'Mitad diciembre (20 dic)', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
-  { key: 'diaPago', label: 'Día de pago (1-31)', tipo: 'number' },
-  { key: 'notas', label: 'Notas', span2: true },
-]
-
-const VACIO: Record<string, string> = {
-  tipoContrato: 'indefinido',
-  activo: 'si',
-  primaAplica: 'si',
-  primaJulio: 'si',
-  primaDiciembre: 'si',
-}
-
 const si = (v: string | undefined) => v === 'si'
 
-function SalarioPropioCard() {
-  const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
+function SalarioPropioCard({ cuentas }: { cuentas: CuentaBanco[] }) {
   const [monto, setMonto] = useState('')
   const [moneda, setMoneda] = useState('COP')
   const [dia, setDia] = useState('1')
@@ -57,9 +38,6 @@ function SalarioPropioCard() {
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
-    listarCuentasBanco()
-      .then(setCuentas)
-      .catch(() => {})
     leerPiloto()
       .then((cfg) => {
         const s = cfg.salario
@@ -67,12 +45,14 @@ function SalarioPropioCard() {
         setMonto(s.monto ? String(s.monto) : '')
         setMoneda(String(s.moneda ?? 'COP').toUpperCase() || 'COP')
         setDia(String(s.dia || 1))
-        setCuentaId(s.cuentaBancoId ?? '')
+        if (s.cuentaBancoId) setCuentaId(s.cuentaBancoId)
         setConcepto(s.concepto ?? 'Salario mensual')
         setActivo(s.activo)
       })
       .catch(() => {})
   }, [])
+
+  const cuentaEfectiva = cuentaId || cuentas[0]?.id || ''
 
   const guardar = async () => {
     setError('')
@@ -83,10 +63,16 @@ function SalarioPropioCard() {
       setError('Escribe el monto de tu salario para activarlo.')
       return
     }
+    if (!cuentaEfectiva) {
+      setError('Debes elegir la cuenta bancaria donde se consignará el dinero.')
+      return
+    }
     setBusy(true)
     try {
-      await guardarSalarioPropio({ activo, monto: montoNum, moneda, dia: diaNum, cuentaBancoId: cuentaId || undefined, concepto })
-      setMsg(activo ? 'Listo: tu salario se consignará solo cada mes.' : 'Salario automático desactivado.')
+      await guardarSalarioPropio({ activo, monto: montoNum, moneda, dia: diaNum, cuentaBancoId: cuentaEfectiva, concepto })
+      await ejecutarPilotoAutomatico().catch(() => {})
+      invalidarSnapshotFinanciero()
+      setMsg(activo ? 'Listo: tu salario se consignará automáticamente en la cuenta elegida.' : 'Salario automático desactivado.')
     } catch {
       setError('No se pudo guardar la configuración.')
     } finally {
@@ -105,7 +91,7 @@ function SalarioPropioCard() {
       </CardHeader>
       <CardContent className="space-y-3 p-4 text-xs sm:p-6">
         <p className="leading-relaxed text-mist-500">
-          El piloto automático consigna tu sueldo cada mes sin que hagas nada, y Lucía te avisa al entrar.
+          El piloto automático consigna tu sueldo cada mes en la cuenta que elijas, y Lucía te avisa al entrar.
           {moneda !== 'COP'
             ? ` Se guarda en ${moneda} y se convierte a pesos con la tasa del día de la consignación.`
             : ''}
@@ -145,21 +131,23 @@ function SalarioPropioCard() {
             />
           </label>
           <label className="flex flex-col gap-1.5">
-            <span className="font-bold text-mist-300">Cuenta destino</span>
+            <span className="font-bold text-mist-300">
+              Cuenta destino <span className="text-red-300">*</span>
+            </span>
             <select
-              value={cuentaId}
+              value={cuentaEfectiva}
               onChange={(e) => setCuentaId(e.target.value)}
               className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
             >
-              <option value="">Sin cuenta (solo registra el ingreso)</option>
+              {cuentas.length === 0 && <option value="">Crea primero una cuenta en Cuentas</option>}
               {cuentas.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.nombre}
+                  {c.nombre} (Saldo: ${(Number(c.saldoActual) || 0).toLocaleString('es-CO')})
                 </option>
               ))}
             </select>
           </label>
-          <label className="flex flex-col gap-1.5">
+          <label className="flex flex-col gap-1.5 sm:col-span-2">
             <span className="font-bold text-mist-300">Concepto</span>
             <Input
               value={concepto}
@@ -190,7 +178,7 @@ function SalarioPropioCard() {
         )}
         <Button
           size="sm"
-          disabled={busy}
+          disabled={busy || cuentas.length === 0}
           onClick={guardar}
           className="h-9 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
         >
@@ -202,6 +190,68 @@ function SalarioPropioCard() {
 }
 
 export default function NominaPage() {
+  const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
+
+  useEffect(() => {
+    listarCuentasBanco()
+      .then(setCuentas)
+      .catch(() => {})
+  }, [])
+
+  const campos = useMemo<CampoForm[]>(
+    () => [
+      { key: 'nombreCompleto', label: 'Nombre completo', required: true },
+      { key: 'cargo', label: 'Cargo', required: true },
+      { key: 'salarioBaseMensual', label: 'Salario base mensual (COP)', tipo: 'number', required: true },
+      {
+        key: 'adicionalMensual',
+        label: 'Adicional ARL, seguridad social y otros (COP)',
+        tipo: 'number',
+      },
+      {
+        key: 'cuentaBancoId',
+        label: 'Cuenta para descontar pago',
+        tipo: 'select',
+        required: true,
+        opciones: cuentas.map((c) => ({
+          value: c.id,
+          label: `${c.nombre} · $${(Number(c.saldoActual) || 0).toLocaleString('es-CO')}`,
+        })),
+      },
+      { key: 'diaPago', label: 'Día de cobro mensual (1-31)', tipo: 'number', required: true },
+      {
+        key: 'autoCobrar',
+        label: '⚡ Cobrar automáticamente de la cuenta',
+        tipo: 'select',
+        opciones: [
+          { value: 'si', label: 'Sí' },
+          { value: 'no', label: 'No' },
+        ],
+      },
+      { key: 'tipoContrato', label: 'Tipo de contrato', tipo: 'select', opciones: TIPOS_CONTRATO.map((t) => ({ value: t, label: t })) },
+      { key: 'activo', label: 'Activo', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
+      { key: 'primaAplica', label: 'Prima de servicios', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
+      { key: 'primaJulio', label: 'Mitad julio (30 jun)', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
+      { key: 'primaDiciembre', label: 'Mitad diciembre (20 dic)', tipo: 'select', opciones: [{ value: 'si', label: 'Sí' }, { value: 'no', label: 'No' }] },
+      { key: 'notas', label: 'Notas', span2: true },
+    ],
+    [cuentas]
+  )
+
+  const vacio = useMemo<Record<string, string>>(
+    () => ({
+      tipoContrato: 'indefinido',
+      activo: 'si',
+      autoCobrar: 'si',
+      adicionalMensual: '0',
+      cuentaBancoId: cuentas[0]?.id ?? '',
+      primaAplica: 'si',
+      primaJulio: 'si',
+      primaDiciembre: 'si',
+    }),
+    [cuentas]
+  )
+
   return (
     <motion.div
       className="space-y-4"
@@ -209,22 +259,37 @@ export default function NominaPage() {
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
     >
-      <SalarioPropioCard />
+      <SalarioPropioCard cuentas={cuentas} />
       <CrudPage<Nomina>
         titulo="Nómina"
-        descripcion="Personas (o tú mismo) que reciben sueldo. Con primas de servicios de Colombia (julio/diciembre)."
-        campos={CAMPOS}
-        vacio={VACIO}
+        descripcion="Trabajadores que reciben sueldo. Incluye adicional configurable de ARL/seguridad social y descuento automático desde la cuenta elegida el día de pago."
+        campos={campos}
+        vacio={vacio}
         listar={listarNomina}
-        crear={(d) => crearNomina(d)}
-        actualizar={(id, d) => actualizarNomina(id, d)}
+        crear={async (d) => {
+          const id = await crearNomina(d)
+          await ejecutarPilotoAutomatico().catch(() => {})
+          invalidarSnapshotFinanciero()
+          listarCuentasBanco().then(setCuentas).catch(() => {})
+          return id
+        }}
+        actualizar={async (id, d) => {
+          await actualizarNomina(id, d)
+          await ejecutarPilotoAutomatico().catch(() => {})
+          invalidarSnapshotFinanciero()
+          listarCuentasBanco().then(setCuentas).catch(() => {})
+        }}
         eliminar={(id) => eliminarNomina(id)}
         transformar={(vals) => {
           const primaAplica = si(vals.primaAplica)
+          const dia = Math.min(31, Math.max(1, num(vals.diaPago as string) ?? 1))
           const doc: Record<string, unknown> = {
             nombreCompleto: vals.nombreCompleto.trim(),
             cargo: vals.cargo.trim(),
-            salarioBaseMensual: num(vals.salarioBaseMensual),
+            salarioBaseMensual: num(vals.salarioBaseMensual) ?? 0,
+            adicionalMensual: num(vals.adicionalMensual) ?? 0,
+            cuentaBancoId: vals.cuentaBancoId,
+            autoCobrar: vals.autoCobrar !== 'no',
             tipoContrato: vals.tipoContrato || 'indefinido',
             activo: si(vals.activo),
             primaServicios: {
@@ -232,9 +297,8 @@ export default function NominaPage() {
               mitadJulio: primaAplica && si(vals.primaJulio),
               mitadDiciembre: primaAplica && si(vals.primaDiciembre),
             },
+            fechaPago: { dia, tipo: 'mensual' },
           }
-          const dia = num(vals.diaPago as string)
-          if (dia !== undefined) doc.fechaPago = { dia, tipo: 'mensual' }
           if (vals.notas?.trim()) doc.notas = vals.notas.trim()
           return doc
         }}
@@ -242,27 +306,40 @@ export default function NominaPage() {
           nombreCompleto: n.nombreCompleto,
           cargo: n.cargo,
           salarioBaseMensual: String(n.salarioBaseMensual ?? ''),
+          adicionalMensual: String(n.adicionalMensual ?? 0),
+          cuentaBancoId: n.cuentaBancoId || cuentas[0]?.id || '',
+          diaPago: n.fechaPago?.dia != null ? String(n.fechaPago.dia) : '',
+          autoCobrar: n.autoCobrar === false ? 'no' : 'si',
           tipoContrato: n.tipoContrato,
           activo: n.activo === false ? 'no' : 'si',
           primaAplica: n.primaServicios?.aplica === false ? 'no' : 'si',
           primaJulio: n.primaServicios?.mitadJulio === false ? 'no' : 'si',
           primaDiciembre: n.primaServicios?.mitadDiciembre === false ? 'no' : 'si',
-          diaPago: n.fechaPago?.dia != null ? String(n.fechaPago.dia) : '',
           notas: n.notas ?? '',
         })}
-        renderItem={(n) => (
-          <div>
-            <div className="font-medium">
-              {n.nombreCompleto} <span className="text-muted-foreground">({n.cargo})</span>
-              {n.activo === false ? ' — inactivo' : ''}
+        renderItem={(n) => {
+          const base = Number(n.salarioBaseMensual) || 0
+          const adicional = Number(n.adicionalMensual) || 0
+          const total = totalMensualNomina(n)
+          const cuenta = cuentas.find((c) => c.id === n.cuentaBancoId)
+          return (
+            <div>
+              <div className="font-medium">
+                {n.nombreCompleto} <span className="text-muted-foreground">({n.cargo})</span>
+                {n.autoCobrar !== false ? ' · ⚡ auto' : ''}
+                {n.activo === false ? ' — inactivo' : ''}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Total a cobrar: <b className="text-emerald-300">${total.toLocaleString('es-CO')}</b>
+                {' '}(Base: ${base.toLocaleString('es-CO')}
+                {adicional > 0 ? ` + ARL/Adicional: $${adicional.toLocaleString('es-CO')}` : ''})
+                {n.fechaPago?.dia ? ` · Día ${n.fechaPago.dia}` : ''}
+                {cuenta ? ` · Cuenta: ${cuenta.nombre}` : ' · ⚠️ Elige cuenta al editar'}
+                {n.primaServicios?.mitadJulio || n.primaServicios?.mitadDiciembre ? ' · Prima jul/dic' : ''}
+              </div>
             </div>
-            <div className="text-xs text-muted-foreground">
-              Salario: ${(n.salarioBaseMensual || 0).toLocaleString('es-CO')}
-              {n.fechaPago?.dia ? ` · Pago día ${n.fechaPago.dia}` : ''}
-              {n.primaServicios?.mitadJulio || n.primaServicios?.mitadDiciembre ? ' · Prima julio/dic' : ''}
-            </div>
-          </div>
-        )}
+          )
+        }}
       />
     </motion.div>
   )
