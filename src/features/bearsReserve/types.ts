@@ -105,6 +105,10 @@ export interface MisionComunitaria {
   cronicaHistoria?: string
   impactoSocial: string
   esNoticiaWebReal?: boolean
+  minutosRalentiEstimados?: number
+  minutosRodamientoEstimados?: number
+  latDestino?: number
+  lngDestino?: number
 }
 
 export interface RutaHabitual {
@@ -114,10 +118,17 @@ export interface RutaHabitual {
   origen: string
   destino: string
   distanciaKm: number
+  duracionMinutos?: number
+  minutosRalenti?: number
+  minutosRodamiento?: number
   diasSemana: number[] // 1: Lun, 2: Mar, etc.
+  tipoHorario?: 'manana' | 'tarde' | 'mercado_sabado' | 'general'
+  horaSalida?: string // "06:00", "15:00"
+  esAutomatica?: boolean
   vehiculoIdDefault?: string
   activa: boolean
   ultimoCumplimientoFecha?: string
+  coordenadasParadas?: Array<{ nombre: string; lat: number; lng: number }>
 }
 
 export interface TanqueoRegistro {
@@ -152,6 +163,8 @@ export interface EventoRadarLocal {
   titulo: string
   lugar: string
   departamento: string
+  lat?: number
+  lng?: number
   fuenteNoticia: string
   resumen: string
   fecha: string

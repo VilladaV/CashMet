@@ -17,7 +17,9 @@ import {
   listarVehiculosBears,
   reemplazarLlantasVehiculo,
   tanquearVehiculoCompleto,
+  verificarYCumplirRutasAutomaticas,
 } from './repo'
+import { BASE_BEARS_RESERVE } from './geo'
 import { generarTurnosSemanalesIA } from './gemaEngine'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
 import type {
@@ -85,6 +87,12 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
 
   useEffect(() => {
     void cargarTodo()
+    // Verificación autónoma de rutas escolares programadas
+    void verificarYCumplirRutasAutomaticas().then((res) => {
+      if (res.rutasEjecutadas.length > 0) {
+        void cargarTodo()
+      }
+    })
   }, [cargarTodo])
 
   // Rotar turnos con Gema
@@ -196,7 +204,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                   </span>
                 </div>
                 <p className="text-[11px] text-mist-400">
-                  Flota y Guardia de Auxilio Rural · Manizales, Caldas y Cordillera Central
+                  Base Central: {BASE_BEARS_RESERVE.nombre} · {BASE_BEARS_RESERVE.sector} ({BASE_BEARS_RESERVE.municipio})
                 </p>
               </div>
             </div>

@@ -19,7 +19,10 @@ import {
   Route,
   Clock,
   Navigation,
+  Map as MapIcon,
 } from 'lucide-react'
+import MapaOperaciones from './MapaOperaciones'
+import { calcularDistanciaRealDesdeBase, BASE_BEARS_RESERVE } from './geo'
 
 let counterMision = 1
 function crearMisionId(): string {
@@ -44,7 +47,7 @@ interface Props {
   onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId: string) => void
 }
 
-type SubVistaMisiones = 'radar' | 'cronicas' | 'rutas_habituales'
+type SubVistaMisiones = 'radar' | 'mapa' | 'cronicas' | 'rutas_habituales'
 
 export default function MisionesTab({
   misiones,
@@ -83,6 +86,11 @@ export default function MisionesTab({
     const vehiculoElegido = vehiculosHab[0] || vehiculos[0]
     const activos = empleados.filter((e) => e.activo)
 
+    const geo =
+      ev.lat && ev.lng
+        ? calcularDistanciaRealDesdeBase(ev.lat, ev.lng, true)
+        : { distanciaKmTotalIdaYVuelta: 32, tiempoMinutosRodamientoIdaYVuelta: 60 }
+
     const nueva: MisionComunitaria = {
       id: crearMisionId(),
       titulo: ev.titulo,
@@ -92,19 +100,23 @@ export default function MisionesTab({
           ? 'transporte_humanitario'
           : 'auxilio_comunitario',
       prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
-      origen: 'Base Central Bear\'s Reserve',
+      origen: BASE_BEARS_RESERVE.nombre,
       destino: ev.lugar,
       departamento: (ev.departamento as any) || 'Caldas',
       prioridadGeografica: ev.departamento === 'Caldas' ? 'local_manizales' : 'eje_cercano',
       terreno: 'trocha_moderada',
-      distanciaKmIdaYVuelta: 32,
-      duracionMinutos: 210, // 3.5 horas
+      distanciaKmIdaYVuelta: geo.distanciaKmTotalIdaYVuelta,
+      duracionMinutos: geo.tiempoMinutosRodamientoIdaYVuelta + 90, // Desplazamiento + maniobra
+      minutosRodamientoEstimados: geo.tiempoMinutosRodamientoIdaYVuelta,
+      minutosRalentiEstimados: 35, // Maniobra con motor encendido
+      latDestino: ev.lat,
+      lngDestino: ev.lng,
       vehiculosAsignados: vehiculoElegido
         ? [{ id: vehiculoElegido.id, nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`, placa: vehiculoElegido.placa }]
         : [],
       tripulantesAsignados: activos.slice(0, 2).map((e) => ({ id: e.id, nombre: e.nombreCompleto })),
-      galonesConsumidosEstimados: 3.5,
-      costoCombustibleEstimadoCOP: 54000,
+      galonesConsumidosEstimados: Number((geo.distanciaKmTotalIdaYVuelta / 20).toFixed(1)),
+      costoCombustibleEstimadoCOP: Math.round((geo.distanciaKmTotalIdaYVuelta / 20) * 15850),
       desgasteLlantasIncrementoPorc: 0.6,
       fecha: hoyFechaISO(),
       estado: 'en_curso',
@@ -113,7 +125,7 @@ export default function MisionesTab({
     }
 
     onCrearMision(nueva)
-    setFeedback(`🚨 ¡Misión activada! "${nueva.titulo}" despachada al equipo de guardia.`)
+    setFeedback(`🚨 ¡Misión activada desde Finca El Guadual! "${nueva.titulo}" (${geo.distanciaKmTotalIdaYVuelta} km reales).`)
     window.setTimeout(() => setFeedback(''), 4500)
   }
 
@@ -200,6 +212,19 @@ export default function MisionesTab({
         <div className="flex flex-wrap gap-1.5">
           <button
             type="button"
+            onClick={() => setSubVista('mapa')}
+            className={`flex cursor-pointer items-center gap-1.5 rounded-xl px-3.5 py-1.5 font-extrabold transition ${
+              subVista === 'mapa'
+                ? 'bg-gradient-to-r from-amber-500/30 to-emerald-500/20 text-white border border-amber-400/40 shadow-md'
+                : 'bg-white/[0.04] text-mist-400 hover:text-white'
+            }`}
+          >
+            <MapIcon className="h-4 w-4 text-amber-300" />
+            <span>Mapa Táctico de Rutas</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setSubVista('radar')}
             className={`flex cursor-pointer items-center gap-1.5 rounded-xl px-3.5 py-1.5 font-extrabold transition ${
               subVista === 'radar'
@@ -252,6 +277,16 @@ export default function MisionesTab({
           <span>+ Despachar / Programar Salida</span>
         </button>
       </div>
+
+      {/* ----------------- VISTA 0: MAPA TÁCTICO DE OPERACIONES ----------------- */}
+      {subVista === 'mapa' && (
+        <MapaOperaciones
+          eventosRadar={eventosRadar}
+          misiones={misiones}
+          rutasHabituales={rutasHabituales}
+          misionSeleccionada={misionesActivas[0] || null}
+        />
+      )}
 
       {/* ----------------- VISTA 1: RADAR DE EVENTOS ----------------- */}
       {subVista === 'radar' && (
@@ -583,13 +618,26 @@ export default function MisionesTab({
                     className="space-y-2.5 rounded-2xl border border-white/10 bg-black/30 p-4 text-xs"
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <div className="text-sm font-extrabold text-white">{r.nombre}</div>
+                      <div>
+                        <div className="text-sm font-extrabold text-white">{r.nombre}</div>
+                        {r.esAutomatica && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-300">
+                            ⚡ Autoejecutable a las {r.horaSalida || '06:00'} (Lunes a Viernes)
+                          </span>
+                        )}
+                      </div>
                       <span className="rounded-full bg-emerald-400/15 border border-emerald-400/30 px-2 py-0.5 text-[9px] font-bold text-emerald-300">
                         {r.distanciaKm} km
                       </span>
                     </div>
 
                     <p className="text-mist-300 text-[11px] leading-relaxed">{r.descripcion}</p>
+
+                    <div className="flex flex-wrap gap-2 text-[10px] text-mist-400">
+                      <span>Rodamiento: <b className="text-white">{r.minutosRodamiento || 55} min</b></span>
+                      <span>· Ralentí en paradas: <b className="text-amber-300">{r.minutosRalenti || 35} min</b></span>
+                      <span>· Total tiempo: <b className="text-sky-300">~{r.duracionMinutos || 90} min</b></span>
+                    </div>
 
                     <div className="flex items-center gap-1.5 text-[11px] text-mist-400">
                       <MapPin className="h-3.5 w-3.5 text-amber-400 shrink-0" />
@@ -601,8 +649,8 @@ export default function MisionesTab({
                     <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
                       <span className="text-[10px] text-mist-500">
                         {r.ultimoCumplimientoFecha
-                          ? `Última realización: ${r.ultimoCumplimientoFecha}`
-                          : 'Ruta recurrente activa'}
+                          ? `Último registro: ${r.ultimoCumplimientoFecha}`
+                          : 'Ruta activa diaria'}
                       </span>
 
                       <button
@@ -611,7 +659,7 @@ export default function MisionesTab({
                         className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
                       >
                         <Check className="h-3.5 w-3.5" />
-                        <span>Despachar / Cumplir Ruta</span>
+                        <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
                       </button>
                     </div>
                   </div>

@@ -9,6 +9,11 @@ import { crearMovimiento } from '@/lib/firebase/movimientosRepo'
 import { hoyISO } from '@/lib/fechas'
 import { calcularConsumoMision, obtenerPrecioGalon } from './preciosCombustible'
 import {
+  calcularCombustibleRalenti,
+  PARADAS_RUTA_ESCOLAR_MATUTINA,
+  PARADAS_RUTA_ESCOLAR_VESPERTINA,
+} from './geo'
+import {
   EVENTOS_RADAR_PREDETERMINADOS,
   generarCronicaMisionNarrativa,
   investigarFichaVehiculoIA,
@@ -38,23 +43,53 @@ interface EstadoPersistenteBears {
 
 const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
   {
-    id: 'rut-hab-1',
-    nombre: 'Ruta Escolar Veredal: El Rosario ↔ Escuela La Trinidad',
-    descripcion: 'Transporte matutino y vespertino diario de 14 niños campesinos por trocha destapada.',
-    origen: 'Vereda El Rosario',
-    destino: 'Escuela Rural La Trinidad (Manizales)',
-    distanciaKm: 26,
+    id: 'rut-escolar-manana',
+    nombre: 'Ruta Escolar Rural Matutina (Veredas ➔ Colegios)',
+    descripcion: 'Salida 06:00 AM desde Base Finca El Guadual. Recorrido por veredas San Peregrino, La Linda y La Cabaña recogiendo 14 niños campesinos (con paradas de espera al ralentí) y dejada en Escuela La Trinidad y colegios urbanos de Manizales.',
+    origen: 'Base Finca El Guadual (San Peregrino)',
+    destino: 'Escuela La Trinidad & Colegios Manizales',
+    distanciaKm: 38.4,
+    duracionMinutos: 90,
+    minutosRodamiento: 55,
+    minutosRalenti: 35, // 8 paradas x 3-4 min esperando niños con morrales
     diasSemana: [1, 2, 3, 4, 5],
+    tipoHorario: 'manana',
+    horaSalida: '06:00',
+    esAutomatica: true,
     activa: true,
+    coordenadasParadas: PARADAS_RUTA_ESCOLAR_MATUTINA,
   },
   {
-    id: 'rut-hab-2',
-    nombre: 'Ruta Solidaria de Apoyo a Campesinos (Día de Mercado)',
-    descripcion: 'Auxilio de transporte de productos agrícolas y víveres para pequeños productores de la vereda La Cabaña hacia la plaza.',
-    origen: 'Vereda La Cabaña',
+    id: 'rut-escolar-tarde',
+    nombre: 'Ruta Escolar Rural Vespertina (Colegios ➔ Veredas)',
+    descripcion: 'Salida 15:00 (3:00 PM) desde Base Finca El Guadual. Recogida de niños en colegios de Manizales y Escuela La Trinidad, dejada puerta a puerta en sus casas en veredas La Cabaña, La Linda y San Peregrino, y retorno a Base.',
+    origen: 'Base Finca El Guadual (San Peregrino)',
+    destino: 'Veredas La Cabaña, La Linda & San Peregrino',
+    distanciaKm: 38.4,
+    duracionMinutos: 95,
+    minutosRodamiento: 55,
+    minutosRalenti: 40,
+    diasSemana: [1, 2, 3, 4, 5],
+    tipoHorario: 'tarde',
+    horaSalida: '15:00',
+    esAutomatica: true,
+    activa: true,
+    coordenadasParadas: PARADAS_RUTA_ESCOLAR_VESPERTINA,
+  },
+  {
+    id: 'rut-mercado-campesino',
+    nombre: 'Ruta Solidaria Día de Mercado (Transporte Agrícola)',
+    descripcion: 'Salida sábados 05:30 AM desde Base Finca El Guadual. Auxilio a pequeños productores campesinos de veredas para transportar plátano, café y hortalizas a la Plaza de Mercado de Manizales.',
+    origen: 'Base Finca El Guadual (San Peregrino)',
     destino: 'Plaza de Mercado / Central de Manizales',
-    distanciaKm: 34,
-    diasSemana: [6], // Sábados
+    distanciaKm: 42,
+    duracionMinutos: 140,
+    minutosRodamiento: 70,
+    minutosRalenti: 70,
+    diasSemana: [6],
+    tipoHorario: 'mercado_sabado',
+    horaSalida: '05:30',
+    esAutomatica: false,
     activa: true,
   },
 ]
@@ -481,12 +516,14 @@ export async function completarMisionComunitaria(
   let totalGalonesConsumidosMision = 0
 
   for (const v of vehiculosParticipantes) {
-    const { galones, desgasteLlantasPorc } = calcularConsumoMision(
+    const { galones: galonesRodamiento, desgasteLlantasPorc } = calcularConsumoMision(
       v.tipo,
       mision.distanciaKmIdaYVuelta,
       mision.terreno,
       v.consumoKmPorGalon
     )
+    const galonesRalenti = calcularCombustibleRalenti(v.tipo, mision.minutosRalentiEstimados || 0)
+    const galones = Number((galonesRodamiento + galonesRalenti).toFixed(2))
     totalGalonesConsumidosMision += galones
 
     // Actualizar odómetro en CashMet
@@ -575,4 +612,105 @@ export async function liquidarTarjetaEnCashmet(cuentaBancoId: string): Promise<T
 
   guardarEstadoLocal(estado)
   return tarjeta
+}
+
+/**
+ * Ejecuta una ruta habitual (escolar o comunitaria):
+ * Calcula km reales, rodamiento y ralentí, actualiza odómetros y consume combustible.
+ */
+export async function ejecutarRutaHabitual(
+  ruta: RutaHabitual,
+  idCumplimiento?: string,
+  vehiculoIdElegido?: string
+): Promise<{ mision: MisionComunitaria }> {
+  const vehiculos = await listarVehiculosBears()
+  const empleados = await listarEmpleadosBears()
+
+  const vehiculo =
+    vehiculos.find((v) => v.id === vehiculoIdElegido || v.id === ruta.vehiculoIdDefault) ||
+    vehiculos.find((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 20) ||
+    vehiculos[0]
+
+  const tripulante = empleados.find((e) => e.activo) || empleados[0]
+  const hoyStr = hoyISO()
+
+  const misionRuta: MisionComunitaria = {
+    id: `rut-mis-${Date.now()}`,
+    titulo: ruta.nombre,
+    tipo: 'ruta_habitual',
+    prioridad: 'media',
+    origen: ruta.origen,
+    destino: ruta.destino,
+    departamento: 'Caldas',
+    prioridadGeografica: 'local_manizales',
+    terreno: 'trocha_moderada',
+    distanciaKmIdaYVuelta: ruta.distanciaKm,
+    duracionMinutos: ruta.duracionMinutos || 90,
+    minutosRodamientoEstimados: ruta.minutosRodamiento || 55,
+    minutosRalentiEstimados: ruta.minutosRalenti || 35,
+    vehiculosAsignados: vehiculo
+      ? [{ id: vehiculo.id, nombre: `${vehiculo.marca} ${vehiculo.linea}`, placa: vehiculo.placa }]
+      : [],
+    tripulantesAsignados: tripulante
+      ? [{ id: tripulante.id, nombre: tripulante.nombreCompleto }]
+      : [],
+    galonesConsumidosEstimados: 0,
+    costoCombustibleEstimadoCOP: 0,
+    desgasteLlantasIncrementoPorc: 0.3,
+    fecha: hoyStr,
+    estado: 'en_curso',
+    impactoSocial: ruta.descripcion,
+    esNoticiaWebReal: false,
+  }
+
+  guardarMision(misionRuta)
+  ruta.ultimoCumplimientoFecha = idCumplimiento || hoyStr
+  guardarRutaHabitual(ruta)
+
+  const res = await completarMisionComunitaria(misionRuta.id, 'exito')
+  return { mision: res.mision }
+}
+
+/**
+ * Motor Autónomo de Verificación de Rutas Escolares ⏰:
+ * Si es día de semana (lunes a viernes) y la hora actual sobrepasa el horario programado,
+ * se ejecuta automáticamente la ruta escolar (mañana o tarde) con sus kilómetros y ralentí reales.
+ */
+export async function verificarYCumplirRutasAutomaticas(): Promise<{
+  rutasEjecutadas: string[]
+}> {
+  const hoy = hoyISO()
+  const fechaObj = new Date()
+  const diaSemana = fechaObj.getDay() // 0=Dom, 1=Lun, ..., 5=Vie, 6=Sab
+  const horaActualDecimal = fechaObj.getHours() + fechaObj.getMinutes() / 60
+
+  const estado = leerEstadoLocal()
+  const ejecutadas: string[] = []
+
+  // De lunes a viernes (1 a 5)
+  if (diaSemana >= 1 && diaSemana <= 5) {
+    for (const r of estado.rutasHabituales) {
+      if (!r.activa || !r.esAutomatica) continue
+
+      // Ruta de la mañana: si ya pasaron las 07:15 AM y no se ha ejecutado hoy
+      if (r.tipoHorario === 'manana' && horaActualDecimal >= 7.25) {
+        const idCumplimiento = `${hoy}-manana`
+        if (r.ultimoCumplimientoFecha !== idCumplimiento) {
+          await ejecutarRutaHabitual(r, idCumplimiento)
+          ejecutadas.push(`${r.nombre} (Automática Mañana)`)
+        }
+      }
+
+      // Ruta de la tarde: si ya pasaron las 16:45 (4:45 PM) y no se ha ejecutado hoy
+      if (r.tipoHorario === 'tarde' && horaActualDecimal >= 16.75) {
+        const idCumplimiento = `${hoy}-tarde`
+        if (r.ultimoCumplimientoFecha !== idCumplimiento) {
+          await ejecutarRutaHabitual(r, idCumplimiento)
+          ejecutadas.push(`${r.nombre} (Automática Tarde)`)
+        }
+      }
+    }
+  }
+
+  return { rutasEjecutadas: ejecutadas }
 }
