@@ -174,6 +174,32 @@ function obtenerHabilitadoGuardado(vehiculoId: string): boolean | undefined {
   return undefined
 }
 
+export function obtenerEmpleadoHabilitadoGuardado(empId: string): boolean | undefined {
+  try {
+    const raw = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
+    if (raw) {
+      const map = JSON.parse(raw) as Record<string, boolean>
+      if (typeof map[empId] === 'boolean') {
+        return map[empId]
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined
+}
+
+export function guardarEmpleadoHabilitado(empId: string, habilitado: boolean) {
+  try {
+    const raw = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
+    const map: Record<string, boolean> = raw ? JSON.parse(raw) : {}
+    map[empId] = habilitado
+    localStorage.setItem('bears_reserve_empleados_habilitados_map_v1', JSON.stringify(map))
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Mapea un empleado de la nómina de CashMet a un EmpleadoOperativo de Bear's Reserve.
  */
@@ -191,6 +217,19 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
     habilidadesDefault.push('Logística comunitaria', 'Primeros auxilios básicos')
   }
 
+  const activo = (() => {
+    // Si en CashMet está inactivo, en Bear's Reserve también
+    if (nomina.activo === false) return false
+    // Si se especificó explícitamente en el extra
+    if (typeof extra?.activo === 'boolean') return extra.activo
+    // Si está en el mapa persistente de habilitados de Bear's Reserve
+    const guardado = obtenerEmpleadoHabilitadoGuardado(nomina.id)
+    if (typeof guardado === 'boolean') return guardado
+    // Por defecto: excluir cargos netamente de oficina o que nada tienen que ver (ej: Editor)
+    if (cargoLower.includes('editor') || cargoLower.includes('audiovisual')) return false
+    return true
+  })()
+
   return {
     id: nomina.id,
     nominaId: nomina.id,
@@ -199,7 +238,7 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
     habilidades: extra?.habilidades || habilidadesDefault,
     horasSemanalesAsignadas: extra?.horasSemanalesAsignadas || 0,
     maxHorasSemanales: 42,
-    activo: nomina.activo !== false,
+    activo,
     horariosNoDisponibles: extra?.horariosNoDisponibles || [],
     enTurnoActivo: extra?.enTurnoActivo ?? false,
     turnoActualTexto: extra?.turnoActualTexto,
@@ -381,6 +420,9 @@ export function guardarExtraEmpleado(id: string, extra: Partial<EmpleadoOperativ
   const estado = leerEstadoLocal()
   estado.empleadosExtra[id] = { ...(estado.empleadosExtra[id] || {}), ...extra }
   guardarEstadoLocal(estado)
+  if (typeof extra.activo === 'boolean') {
+    guardarEmpleadoHabilitado(id, extra.activo)
+  }
 }
 
 /**

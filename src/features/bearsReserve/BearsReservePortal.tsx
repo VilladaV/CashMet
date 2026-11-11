@@ -87,14 +87,13 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       setEmpleados(emps)
       setVehiculos(vehs)
       setCuentasCashmet(cuentas)
-      // Cuadrante semanal: si no existe el de esta semana, Gema lo arma (guardias + conductores de rutas)
+      // Cuadrante semanal 24/7: si no existe el de esta semana o es incompleto, Gema lo arma
       const rutas = listarRutasHabituales()
       let turnosExistentes = listarTurnos()
       const lunesActual = lunesDeEstaSemanaISO()
       const semanaActual = turnosExistentes.filter((t) => t.semanaISO === lunesActual)
-      const faltanRutas =
-        rutas.some((r) => r.activa) && !semanaActual.some((t) => t.rutaHabitualId)
-      if (emps.length > 0 && (semanaActual.length === 0 || faltanRutas)) {
+      const faltaNocheOIncompleto = !semanaActual.some((t) => t.franja === 'noche') || semanaActual.length < 21
+      if (emps.length > 0 && (semanaActual.length === 0 || faltaNocheOIncompleto)) {
         turnosExistentes = generarTurnosSemanalesIA(emps, lunesActual, rutas)
         guardarTurnos(turnosExistentes)
       }

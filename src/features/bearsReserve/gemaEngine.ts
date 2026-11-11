@@ -16,12 +16,29 @@ import type {
 type RolMision = 'conductor' | 'conductor_pesado' | 'mecanico' | 'winche' | 'auxilios' | 'logistica'
 
 const PALABRAS_ROL: Record<RolMision, string[]> = {
-  conductor: ['conduc', 'chofer', 'trocha', 'montaña', 'manejo'],
+  conductor: ['conduc', 'chofer', 'trocha', 'montaña', 'manejo', 'polivalente'],
   conductor_pesado: ['c2', 'c3', 'pesado', 'camion', 'camión', 'tractomula', 'quinta rueda', '5ta rueda', 'volqueta'],
-  mecanico: ['mecan', 'mecán', 'tecnic', 'técnic', 'desvar'],
-  winche: ['winche', 'eslinga', 'remolque', 'rescate', 'barrizal', 'grua', 'grúa'],
+  mecanico: ['mecan', 'mecán', 'tecnic', 'técnic', 'desvar', 'polivalente'],
+  winche: ['winche', 'eslinga', 'remolque', 'rescate', 'barrizal', 'grua', 'grúa', 'polivalente'],
   auxilios: ['auxilio', 'primeros', 'paramédic', 'enfermer', 'aph', 'salud'],
-  logistica: ['logíst', 'logist', 'carga', 'bodega', 'comunitar', 'radio'],
+  logistica: ['logíst', 'logist', 'carga', 'bodega', 'comunitar', 'radio', 'polivalente'],
+}
+
+export function afinidadConductor(emp: EmpleadoOperativo): number {
+  const corpus = `${emp.cargo} ${emp.habilidades.join(' ')}`.toLowerCase()
+  let score = 0
+  if (/conduc|chofer|manejo|trocha|ruta/.test(corpus)) score += 10
+  if (/c2|c3|pesado|camion|camión|quinta rueda|5ta rueda/.test(corpus)) score += 5
+  if (/polivalente/.test(corpus)) score += 4
+  return score
+}
+
+export function afinidadMecanico(emp: EmpleadoOperativo): number {
+  const corpus = `${emp.cargo} ${emp.habilidades.join(' ')}`.toLowerCase()
+  let score = 0
+  if (/mecan|mecán|tecnic|técnic|desvar|motor|llantas/.test(corpus)) score += 10
+  if (/polivalente/.test(corpus)) score += 4
+  return score
 }
 
 function afinidadRol(emp: EmpleadoOperativo, rol: RolMision): number {
@@ -44,13 +61,17 @@ export function empleadosEnTurnoAhora(
   const min = horaAMinutos(horaHHMM)
   const ids = new Set(
     turnos
-      .filter(
-        (t) =>
-          t.fecha === fechaISO &&
-          !t.rutaHabitualId &&
-          horaAMinutos(t.horaInicio) <= min &&
-          min < horaAMinutos(t.horaFin)
-      )
+      .filter((t) => {
+        if (t.fecha !== fechaISO) return false
+        const ini = horaAMinutos(t.horaInicio)
+        const fin = horaAMinutos(t.horaFin)
+        if (ini <= fin) {
+          return ini <= min && min < fin
+        } else {
+          // Franja nocturna que cruza la medianoche (ej: 22:00 a 06:00)
+          return min >= ini || min < fin
+        }
+      })
       .map((t) => t.empleadoId)
   )
   return empleados.filter((e) => e.activo && ids.has(e.id))
@@ -158,7 +179,15 @@ export function conductorDeRutaEnCuadrante(
   rutaId: string,
   fechaISO: string
 ): { id: string; nombre: string } | null {
-  const t = turnos.find((x) => x.rutaHabitualId === rutaId && x.fecha === fechaISO)
+  const t = turnos.find(
+    (x) =>
+      x.fecha === fechaISO &&
+      (x.rutaHabitualId === rutaId ||
+        (x.notas && x.notas.includes(rutaId)) ||
+        (rutaId.includes('matutina') && x.franja === 'manana' && x.rolGuardia.toLowerCase().includes('conductor')) ||
+        (rutaId.includes('vespertina') && x.franja === 'tarde' && x.rolGuardia.toLowerCase().includes('conductor')) ||
+        (rutaId.includes('mercado') && x.franja === 'manana' && x.rolGuardia.toLowerCase().includes('conductor')))
+  )
   return t ? { id: t.empleadoId, nombre: t.empleadoNombre } : null
 }
 
@@ -709,141 +738,180 @@ export function generarCronicaMisionNarrativa(
 }
 
 /**
- * Motor de rotación inteligente de turnos (Tope 42 horas, respeto de compromisos personales,
- * respaldo de emergencia del Coordinador general si hay hueco).
+ * Motor de rotación inteligente de turnos 24/7 (Tope 40-42 horas semanales,
+ * 3 turnos continuos de 8 horas sin partir jornada, con conductor + mecánico/polivalente
+ * y respeto estricto de descansos legales y compromisos universitarios).
  */
 export function generarTurnosSemanalesIA(
   empleados: EmpleadoOperativo[],
   fechaLunesISO: string,
-  rutasHabituales: RutaHabitual[] = []
+  _rutasHabituales: RutaHabitual[] = []
 ): TurnoSemanal[] {
   const turnos: TurnoSemanal[] = []
   const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-  const baseFecha = new Date(fechaLunesISO)
+
+  // Descomponer fecha local de forma segura evitando desajustes UTC
+  const partes = fechaLunesISO.split('-').map(Number)
+  const baseFecha = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0)
+
+  // Solo colaboradores operativos activos (excluye cargos administrativos u omitidos como editores)
+  const empleadosActivos = empleados.filter((e) => e.activo !== false)
 
   const horasAsignadas: Record<string, number> = {}
-  empleados.forEach((e) => (horasAsignadas[e.id] = 0))
+  empleadosActivos.forEach((e) => (horasAsignadas[e.id] = 0))
 
-  const sumarMinutos = (hhmm: string, minutos: number) => {
-    const total = horaAMinutos(hhmm) + minutos
-    return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
-  }
+  // Registro de quién trabajó en la noche del día anterior para asegurar descanso
+  let empleadosEnNocheAnterior = new Set<string>()
 
   for (let d = 0; d < 7; d++) {
     const fechaDia = new Date(baseFecha)
     fechaDia.setDate(baseFecha.getDate() + d)
-    const fechaISO = fechaDia.toISOString().slice(0, 10)
-    const diaSemanaNum = (fechaDia.getDay() + 6) % 7
-    const nombreDia = DIAS[diaSemanaNum]
+    const y = fechaDia.getFullYear()
+    const m = String(fechaDia.getMonth() + 1).padStart(2, '0')
+    const diaNum = String(fechaDia.getDate()).padStart(2, '0')
+    const fechaISO = `${y}-${m}-${diaNum}`
+    const nombreDia = DIAS[d]
 
-    // 0. CONDUCTORES DE RUTAS DE RUTINA (se fijan al armar el cuadrante)
-    for (const ruta of rutasHabituales) {
-      if (!ruta.activa || !ruta.diasSemana.includes(diaSemanaNum + 1)) continue
-      const inicio = ruta.horaSalida || '06:00'
-      const duracion = ruta.duracionMinutos || 90
-      const fin = sumarMinutos(inicio, duracion)
-      const horas = Math.round((duracion / 60) * 10) / 10
+    // diaSemana para restricciones: 1=Lun, 2=Mar, 3=Mie, 4=Jue, 5=Vie, 6=Sab, 0=Dom
+    const diaSemanaRestriccion = d === 6 ? 0 : d + 1
+    const diaSemanaSiguiente = (diaSemanaRestriccion + 1) % 7
 
-      const candidatos = empleados
-        .filter((emp) => {
-          if (!emp.activo) return false
-          if ((horasAsignadas[emp.id] || 0) + horas > 42) return false
-          return !emp.horariosNoDisponibles.some(
-            (h) => h.diaSemana === diaSemanaNum + 1 && h.horaInicio < fin && h.horaFin > inicio
-          )
-        })
-        .sort((a, b) => {
-          // Prioriza quien sabe conducir; a igualdad, quien lleva menos horas (rotación justa)
-          const ca = afinidadRol(a, 'conductor') + afinidadRol(a, 'conductor_pesado')
-          const cb = afinidadRol(b, 'conductor') + afinidadRol(b, 'conductor_pesado')
-          if (cb !== ca) return cb - ca
-          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
-        })
+    // Conjunto de empleados asignados a algún turno durante este día calendario (jornada continua: máx 1 turno al día)
+    const empleadosOcupadosHoy = new Set<string>()
+    const empleadosEnNocheHoy = new Set<string>()
 
-      const elegido = candidatos[0]
-      if (elegido) horasAsignadas[elegido.id] = (horasAsignadas[elegido.id] || 0) + horas
-      turnos.push({
-        id: `tur-${fechaISO}-ruta-${ruta.id}`,
-        semanaISO: fechaLunesISO,
-        empleadoId: elegido ? elegido.id : 'coord-user',
-        empleadoNombre: elegido ? elegido.nombreCompleto : 'Tú (Coordinador General)',
-        esRespaldoCoordinador: !elegido,
-        fecha: fechaISO,
-        franja: horaAMinutos(inicio) < 13 * 60 ? 'manana' : 'tarde',
-        horaInicio: inicio,
-        horaFin: fin,
-        horas,
-        rolGuardia: `🚌 Conducción ${ruta.nombre} (${nombreDia})`,
-        cumplido: false,
-        rutaHabitualId: ruta.id,
-        notas: elegido ? undefined : 'Nadie de la nómina libre para esta ruta: la cubres tú.',
-      })
-    }
-
-    const franjas: Array<{
-      franja: TurnoSemanal['franja']
+    // Configuración de los 3 turnos continuos de 8 horas (cobertura total 24/7)
+    const franjasDia: Array<{
+      franja: 'manana' | 'tarde' | 'noche'
       horaInicio: string
       horaFin: string
       horas: number
-      rol: string
+      puestoConductor: {
+        rol: string
+        rutaHabitualId?: string
+      }
+      puestoMecanico: {
+        rol: string
+      }
     }> = [
       {
         franja: 'manana',
-        horaInicio: '06:30',
-        horaFin: '13:30',
-        horas: 7,
-        rol: 'Guardia Matutina y Monitoreo Cordillera',
+        horaInicio: '06:00',
+        horaFin: '14:00',
+        horas: 8,
+        puestoConductor: {
+          rol:
+            d <= 4
+              ? `🚌 Conducción Ruta Escolar Matutina 06:00 + Guardia Base (${nombreDia})`
+              : d === 5
+                ? `🧺 Conducción Ruta Solidaria Mercado Campesino 05:30 + Guardia Base (${nombreDia})`
+                : `🚗 Conductor de Guardia Matutina & Base Central (${nombreDia})`,
+          rutaHabitualId: d <= 4 ? 'rut-escolar-matutina' : d === 5 ? 'rut-mercado-campesino' : undefined,
+        },
+        puestoMecanico: {
+          rol: `🔧 Mecánico de Base / Soporte Técnico & Alistamiento Flota (${nombreDia})`,
+        },
       },
       {
         franja: 'tarde',
-        horaInicio: '13:30',
-        horaFin: '20:30',
-        horas: 7,
-        rol: 'Guardia Vespertina y Asistencia Rural',
+        horaInicio: '14:00',
+        horaFin: '22:00',
+        horas: 8,
+        puestoConductor: {
+          rol:
+            d <= 4
+              ? `🚌 Conducción Ruta Escolar Vespertina 15:00 + Guardia Base (${nombreDia})`
+              : `🚗 Conductor de Guardia Vespertina & Auxilio Veredal (${nombreDia})`,
+          rutaHabitualId: d <= 4 ? 'rut-escolar-vespertina' : undefined,
+        },
+        puestoMecanico: {
+          rol: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
+        },
+      },
+      {
+        franja: 'noche',
+        horaInicio: '22:00',
+        horaFin: '06:00',
+        horas: 8,
+        puestoConductor: {
+          rol: `🚗 Conductor Nocturno & Respuesta Inmediata a Emergencias (${nombreDia})`,
+        },
+        puestoMecanico: {
+          rol: `🔧 Mecánico Nocturno & Rescate Pesado / Alerta Cordillera (${nombreDia})`,
+        },
       },
     ]
 
-    for (const f of franjas) {
-      const candidatos = empleados.filter((emp) => {
-        if (!emp.activo) return false
+    for (const f of franjasDia) {
+      // Función para verificar si un empleado puede asumir esta franja
+      const puedeAsignarse = (emp: EmpleadoOperativo, tipoPuesto: 'conductor' | 'mecanico') => {
+        // No superar el tope legal de 42 horas
         if ((horasAsignadas[emp.id] || 0) + f.horas > 42) return false
-        const choca = emp.horariosNoDisponibles.some((h) => {
-          if (h.diaSemana !== diaSemanaNum + 1) return false
-          return h.horaInicio < f.horaFin && h.horaFin > f.horaInicio
+        // No doblar turno el mismo día (jornada continua de 8h)
+        if (empleadosOcupadosHoy.has(emp.id)) return false
+        // Si viene saliendo de noche (terminó a las 06:00), no puede entrar a la mañana a las 06:00
+        if (f.franja === 'manana' && empleadosEnNocheAnterior.has(emp.id)) return false
+
+        // Respeto de compromisos universitarios / personales
+        const tieneConflicto = emp.horariosNoDisponibles.some((h) => {
+          if (f.franja === 'noche') {
+            const chocaNocheHoy = h.diaSemana === diaSemanaRestriccion && h.horaFin > '22:00'
+            const chocaMadrugadaSig = h.diaSemana === diaSemanaSiguiente && h.horaInicio < '06:00'
+            return chocaNocheHoy || chocaMadrugadaSig
+          } else {
+            return (
+              h.diaSemana === diaSemanaRestriccion &&
+              h.horaInicio < f.horaFin &&
+              h.horaFin > f.horaInicio
+            )
+          }
         })
-        const yaOcupado = turnos.some(
-          (t) =>
-            t.fecha === fechaISO &&
-            t.empleadoId === emp.id &&
-            t.horaInicio < f.horaFin &&
-            t.horaFin > f.horaInicio
-        )
-        return !choca && !yaOcupado
-      })
+        if (tieneConflicto) return false
 
-      candidatos.sort((a, b) => (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0))
+        // Para mecánico: descartar si no tiene afinidad mecánica ni polivalente
+        if (tipoPuesto === 'mecanico' && afinidadMecanico(emp) === 0) return false
 
-      if (candidatos.length > 0) {
-        const elegido = candidatos[0]
-        horasAsignadas[elegido.id] = (horasAsignadas[elegido.id] || 0) + f.horas
+        return true
+      }
+
+      // --- ASIGNAR PUESTO 1: CONDUCTOR ---
+      const candidatosConductor = empleadosActivos
+        .filter((emp) => puedeAsignarse(emp, 'conductor'))
+        .sort((a, b) => {
+          const ca = afinidadConductor(a)
+          const cb = afinidadConductor(b)
+          // Si uno tiene mayor afinidad de conducción
+          if (cb !== ca) return cb - ca
+          // A igual habilidad, quien lleve menos horas asignadas en la semana (rotación equitativa)
+          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
+        })
+
+      const conductorElegido = candidatosConductor[0]
+
+      if (conductorElegido) {
+        horasAsignadas[conductorElegido.id] = (horasAsignadas[conductorElegido.id] || 0) + f.horas
+        empleadosOcupadosHoy.add(conductorElegido.id)
+        if (f.franja === 'noche') empleadosEnNocheHoy.add(conductorElegido.id)
+
         turnos.push({
-          id: `tur-${fechaISO}-${f.franja}`,
+          id: `tur-${fechaISO}-${f.franja}-cond`,
           semanaISO: fechaLunesISO,
-          empleadoId: elegido.id,
-          empleadoNombre: elegido.nombreCompleto,
+          empleadoId: conductorElegido.id,
+          empleadoNombre: conductorElegido.nombreCompleto,
           esRespaldoCoordinador: false,
           fecha: fechaISO,
           franja: f.franja,
           horaInicio: f.horaInicio,
           horaFin: f.horaFin,
           horas: f.horas,
-          rolGuardia: `${f.rol} (${nombreDia})`,
+          rolGuardia: f.puestoConductor.rol,
           cumplido: false,
+          rutaHabitualId: f.puestoConductor.rutaHabitualId,
         })
       } else {
-        // Hueco: el coordinador entra como respaldo
+        // Respaldo de emergencia del Coordinador General
         turnos.push({
-          id: `tur-${fechaISO}-${f.franja}-respaldo`,
+          id: `tur-${fechaISO}-${f.franja}-cond-respaldo`,
           semanaISO: fechaLunesISO,
           empleadoId: 'coord-user',
           empleadoNombre: 'Tú (Coordinador General)',
@@ -853,12 +921,68 @@ export function generarTurnosSemanalesIA(
           horaInicio: f.horaInicio,
           horaFin: f.horaFin,
           horas: f.horas,
-          rolGuardia: `🚨 ${f.rol} · Respaldo de Emergencia (${nombreDia})`,
+          rolGuardia: `🚨 ${f.puestoConductor.rol} · Respaldo de Emergencia`,
           cumplido: false,
-          notas: 'Asignado automáticamente: la nómina estaba en compromisos académicos/familiares o copó sus 42h legales.',
+          rutaHabitualId: f.puestoConductor.rutaHabitualId,
+          notas: 'Asignado a ti: la nómina completó sus 42h semanales o tiene compromisos de estudio en esta franja.',
+        })
+      }
+
+      // --- ASIGNAR PUESTO 2: MECÁNICO / POLIVALENTE ---
+      const candidatosMecanico = empleadosActivos
+        .filter((emp) => puedeAsignarse(emp, 'mecanico'))
+        .sort((a, b) => {
+          const ma = afinidadMecanico(a)
+          const mb = afinidadMecanico(b)
+          // Priorizar mecánico puro sobre polivalente
+          if (mb !== ma) return mb - ma
+          // A igual habilidad, quien lleve menos horas asignadas
+          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
+        })
+
+      const mecanicoElegido = candidatosMecanico[0]
+
+      if (mecanicoElegido) {
+        horasAsignadas[mecanicoElegido.id] = (horasAsignadas[mecanicoElegido.id] || 0) + f.horas
+        empleadosOcupadosHoy.add(mecanicoElegido.id)
+        if (f.franja === 'noche') empleadosEnNocheHoy.add(mecanicoElegido.id)
+
+        turnos.push({
+          id: `tur-${fechaISO}-${f.franja}-mec`,
+          semanaISO: fechaLunesISO,
+          empleadoId: mecanicoElegido.id,
+          empleadoNombre: mecanicoElegido.nombreCompleto,
+          esRespaldoCoordinador: false,
+          fecha: fechaISO,
+          franja: f.franja,
+          horaInicio: f.horaInicio,
+          horaFin: f.horaFin,
+          horas: f.horas,
+          rolGuardia: f.puestoMecanico.rol,
+          cumplido: false,
+        })
+      } else {
+        // Respaldo de emergencia del Coordinador General
+        turnos.push({
+          id: `tur-${fechaISO}-${f.franja}-mec-respaldo`,
+          semanaISO: fechaLunesISO,
+          empleadoId: 'coord-user',
+          empleadoNombre: 'Tú (Coordinador General)',
+          esRespaldoCoordinador: true,
+          fecha: fechaISO,
+          franja: f.franja,
+          horaInicio: f.horaInicio,
+          horaFin: f.horaFin,
+          horas: f.horas,
+          rolGuardia: `🚨 ${f.puestoMecanico.rol} · Respaldo de Emergencia`,
+          cumplido: false,
+          notas: 'Asignado a ti: nómina con 42h copadas o sin mecánico/polivalente libre.',
         })
       }
     }
+
+    // Actualizar quién trabajó de noche para el día siguiente
+    empleadosEnNocheAnterior = empleadosEnNocheHoy
   }
 
   return turnos
