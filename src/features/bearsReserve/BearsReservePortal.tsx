@@ -97,8 +97,12 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       const algunActivoSinHoras = emps
         .filter((e) => e.activo !== false)
         .some((e) => !semanaActual.some((t) => t.empleadoId === e.id))
+      const tieneRespaldoCoordinadorInnecesario = semanaActual.some((t) => t.esRespaldoCoordinador)
       const faltaNocheOIncompleto =
-        !semanaActual.some((t) => t.franja === 'noche') || semanaActual.length < 21 || algunActivoSinHoras
+        !semanaActual.some((t) => t.franja === 'noche') ||
+        semanaActual.length < 21 ||
+        algunActivoSinHoras ||
+        tieneRespaldoCoordinadorInnecesario
       if (emps.length > 0 && (semanaActual.length === 0 || faltaNocheOIncompleto)) {
         const contadorActual = obtenerRotacionContador()
         turnosExistentes = generarTurnosSemanalesIA(emps, lunesActual, rutas, contadorActual)
