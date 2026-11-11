@@ -16,6 +16,7 @@ import {
   listarTurnos,
   listarVehiculosBears,
   reemplazarLlantasVehiculo,
+  resolverConductorDeTurno,
   tanquearVehiculoCompleto,
   verificarYCumplirRutasAutomaticas,
 } from './repo'
@@ -75,7 +76,14 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       setEmpleados(emps)
       setVehiculos(vehs)
       setCuentasCashmet(cuentas)
-      setTurnos(listarTurnos())
+      let turnosExistentes = listarTurnos()
+      if (turnosExistentes.length === 0 && emps.length > 0) {
+        const hoy = new Date()
+        const lunes = new Date(hoy.setDate(hoy.getDate() - hoy.getDay() + 1)).toISOString().slice(0, 10)
+        turnosExistentes = generarTurnosSemanalesIA(emps, lunes)
+        guardarTurnos(turnosExistentes)
+      }
+      setTurnos(turnosExistentes)
       setMisiones(listarMisiones())
       setRutasHabituales(listarRutasHabituales())
       setEventosRadar(leerEventosRadar())
@@ -141,9 +149,20 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
   }
 
   // Cumplir ruta habitual
-  const cumplirRutaHabitual = async (ruta: RutaHabitual, vehiculoId: string) => {
+  const cumplirRutaHabitual = async (
+    ruta: RutaHabitual,
+    vehiculoId: string,
+    conductorId?: string
+  ) => {
     const v = vehiculos.find((x) => x.id === vehiculoId)
     const hoyStr = new Date().toISOString().slice(0, 10)
+
+    const conductor = conductorId
+      ? empleados.find((e) => e.id === conductorId)
+        ? { id: conductorId, nombre: empleados.find((e) => e.id === conductorId)!.nombreCompleto }
+        : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
+      : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
+
     const misionRuta: MisionComunitaria = {
       id: `rut-mis-${Date.now()}`,
       titulo: ruta.nombre,
@@ -155,15 +174,17 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       prioridadGeografica: 'local_manizales',
       terreno: 'trocha_moderada',
       distanciaKmIdaYVuelta: ruta.distanciaKm,
-      duracionMinutos: 90,
+      duracionMinutos: ruta.duracionMinutos || 90,
+      minutosRodamientoEstimados: ruta.minutosRodamiento || 55,
+      minutosRalentiEstimados: ruta.minutosRalenti || 35,
       vehiculosAsignados: v ? [{ id: v.id, nombre: `${v.marca} ${v.linea}`, placa: v.placa }] : [],
-      tripulantesAsignados: empleados.slice(0, 1).map((e) => ({ id: e.id, nombre: e.nombreCompleto })),
+      tripulantesAsignados: [{ id: conductor.id, nombre: conductor.nombre }],
       galonesConsumidosEstimados: Number((ruta.distanciaKm / 22).toFixed(1)),
       costoCombustibleEstimadoCOP: Math.round((ruta.distanciaKm / 22) * 15850),
       desgasteLlantasIncrementoPorc: 0.3,
       fecha: hoyStr,
       estado: 'en_curso',
-      impactoSocial: ruta.descripcion,
+      impactoSocial: `${ruta.descripcion} · Conductor en turno: ${conductor.nombre}`,
       esNoticiaWebReal: false,
     }
     guardarMision(misionRuta)
@@ -304,6 +325,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                 misiones={misiones}
                 vehiculos={vehiculos}
                 empleados={empleados}
+                turnos={turnos}
                 rutasHabituales={rutasHabituales}
                 eventosRadar={eventosRadar}
                 onCrearMision={(m) => {

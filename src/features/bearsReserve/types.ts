@@ -132,6 +132,7 @@ export interface RutaHabitual {
   horaSalida?: string // "06:00", "15:00"
   esAutomatica?: boolean
   vehiculoIdDefault?: string
+  conductorIdDefault?: string
   activa: boolean
   ultimoCumplimientoFecha?: string
   coordenadasParadas?: Array<{ nombre: string; lat: number; lng: number }>

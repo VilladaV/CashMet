@@ -4,6 +4,7 @@ import type {
   EventoRadarLocal,
   MisionComunitaria,
   RutaHabitual,
+  TurnoSemanal,
   VehiculoOperativo,
 } from './types'
 import {
@@ -33,6 +34,7 @@ import {
   PUNTOS_REFERENCIA_CALDAS,
 } from './geo'
 import { seleccionarVehiculosOptimosMision } from './gemaEngine'
+import { resolverConductorDeTurno } from './repo'
 
 let counterMision = 1
 function crearMisionId(): string {
@@ -47,6 +49,7 @@ interface Props {
   misiones: MisionComunitaria[]
   vehiculos: VehiculoOperativo[]
   empleados: EmpleadoOperativo[]
+  turnos?: TurnoSemanal[]
   rutasHabituales: RutaHabitual[]
   eventosRadar: EventoRadarLocal[]
   onCrearMision: (mision: MisionComunitaria) => void
@@ -54,7 +57,7 @@ interface Props {
     misionId: string,
     resultado?: 'exito' | 'parcial' | 'fallida_dificultad'
   ) => Promise<{ cronica: string; tanqueosAutomaticos: any[] }>
-  onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId: string) => void
+  onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId: string, conductorId?: string) => void
   onActualizarRuta?: (ruta: RutaHabitual) => void
 }
 
@@ -64,6 +67,7 @@ export default function MisionesTab({
   misiones,
   vehiculos,
   empleados,
+  turnos: _turnos,
   rutasHabituales,
   eventosRadar,
   onCrearMision,
@@ -75,6 +79,7 @@ export default function MisionesTab({
   const [filtroRadar, setFiltroRadar] = useState<'todos' | 'caldas' | 'otros'>('todos')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string>('')
+  const [conductoresSeleccionados, setConductoresSeleccionados] = useState<Record<string, string>>({})
 
   // Formulario de nueva misión manual o programada
   const [modalAbierto, setModalAbierto] = useState(false)
@@ -203,7 +208,17 @@ export default function MisionesTab({
       vehiculosAsignados: vehiculoElegido
         ? [{ id: vehiculoElegido.id, nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`, placa: vehiculoElegido.placa }]
         : [],
-      tripulantesAsignados: activos.slice(0, 2).map((e) => ({ id: e.id, nombre: e.nombreCompleto })),
+      tripulantesAsignados: (() => {
+        const conductorGuardia = resolverConductorDeTurno(
+          hoyFechaISO(),
+          new Date().getHours() >= 13 ? 'tarde' : 'manana',
+          empleados
+        )
+        const segundo = activos.find((e) => e.id !== conductorGuardia.id)
+        const tripulacion = [{ id: conductorGuardia.id, nombre: conductorGuardia.nombre }]
+        if (segundo) tripulacion.push({ id: segundo.id, nombre: segundo.nombreCompleto })
+        return tripulacion
+      })(),
       galonesConsumidosEstimados: Number((geo.distanciaKmTotalIdaYVuelta / 20).toFixed(1)),
       costoCombustibleEstimadoCOP: Math.round((geo.distanciaKmTotalIdaYVuelta / 20) * 15850),
       desgasteLlantasIncrementoPorc: 0.6,
@@ -374,6 +389,7 @@ export default function MisionesTab({
           misiones={misiones}
           rutasHabituales={rutasHabituales}
           misionSeleccionada={misionesActivas[0] || null}
+          onActualizarRuta={onActualizarRuta}
         />
       )}
 
@@ -761,6 +777,48 @@ export default function MisionesTab({
                       </select>
                     </div>
 
+                    {/* Selector y verificación de Conductor en Guardia de Turno */}
+                    {(() => {
+                      const conductorTurno = resolverConductorDeTurno(
+                        hoyFechaISO(),
+                        r.horaSalida || r.tipoHorario,
+                        empleados
+                      )
+                      const conductorActualId =
+                        conductoresSeleccionados[r.id] || r.conductorIdDefault || conductorTurno.id
+
+                      return (
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                          <span className="text-[10px] font-bold text-mist-400">👤 Conductor de guardia (Turno):</span>
+                          <select
+                            value={conductorActualId}
+                            onChange={(e) => {
+                              const nuevoId = e.target.value
+                              setConductoresSeleccionados((prev) => ({ ...prev, [r.id]: nuevoId }))
+                              if (onActualizarRuta) {
+                                onActualizarRuta({ ...r, conductorIdDefault: nuevoId })
+                              }
+                            }}
+                            className="field-dark h-7 rounded-lg px-2 text-[10px] font-semibold text-sky-200"
+                          >
+                            <option value={conductorTurno.id}>
+                              👤 {conductorTurno.nombre} ({conductorTurno.rol || 'Turno Oficial'})
+                            </option>
+                            {empleados
+                              .filter((e) => e.activo && e.id !== conductorTurno.id)
+                              .map((e) => (
+                                <option key={e.id} value={e.id}>
+                                  {e.nombreCompleto} ({e.cargo || 'Operativo'})
+                                </option>
+                              ))}
+                            {conductorTurno.id !== 'coord-user' && (
+                              <option value="coord-user">Tú (Coordinador General - Respaldo)</option>
+                            )}
+                          </select>
+                        </div>
+                      )
+                    })()}
+
                     <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
                       <span className="text-[10px] text-mist-500">
                         {r.ultimoCumplimientoFecha
@@ -778,14 +836,32 @@ export default function MisionesTab({
                           <span>Definir / Editar Paradas</span>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => vehiculoApto && onCumplirRutaHabitual(r, vehiculoApto.id)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
-                        >
-                          <Check className="h-3.5 w-3.5" />
-                          <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
-                        </button>
+                        {(() => {
+                          const conductorTurno = resolverConductorDeTurno(
+                            hoyFechaISO(),
+                            r.horaSalida || r.tipoHorario,
+                            empleados
+                          )
+                          const conductorActualId =
+                            conductoresSeleccionados[r.id] || r.conductorIdDefault || conductorTurno.id
+                          const vehiculoElegido =
+                            vehiculos.find((v) => v.id === r.vehiculoIdDefault) || vehiculoApto
+
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (vehiculoElegido) {
+                                  onCumplirRutaHabitual(r, vehiculoElegido.id, conductorActualId)
+                                }
+                              }}
+                              className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
+                            </button>
+                          )
+                        })()}
                       </div>
                     </div>
                   </div>

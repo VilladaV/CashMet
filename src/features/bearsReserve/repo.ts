@@ -665,13 +665,78 @@ export async function liquidarTarjetaEnCashmet(cuentaBancoId: string): Promise<T
 }
 
 /**
+ * Determina el tripulante/conductor de guardia para un día y horario específico,
+ * consultando la rotación de turnos activa de la semana. Si no hay guardia asignada
+ * o hay un hueco, asigna al Coordinador General como respaldo (regla comunitaria).
+ */
+export function resolverConductorDeTurno(
+  fechaISO: string,
+  horaOFranja?: string,
+  empleados?: EmpleadoOperativo[]
+): { id: string; nombre: string; rol?: string } {
+  const estado = leerEstadoLocal()
+  const turnos = estado.turnos || []
+
+  // Determinar la franja según la hora (ej: "06:00" -> mañana, "15:00" -> tarde)
+  let franja: 'manana' | 'tarde' | 'noche' | 'jornada_completa' = 'manana'
+  if (horaOFranja === 'tarde' || (horaOFranja && parseInt(horaOFranja, 10) >= 13 && parseInt(horaOFranja, 10) < 20)) {
+    franja = 'tarde'
+  } else if (horaOFranja === 'noche' || (horaOFranja && parseInt(horaOFranja, 10) >= 20)) {
+    franja = 'noche'
+  }
+
+  // 1. Buscar turno exacto para la fecha y franja
+  const turno = turnos.find(
+    (t) => t.fecha === fechaISO && (t.franja === franja || t.franja === 'jornada_completa')
+  )
+
+  if (turno) {
+    return {
+      id: turno.empleadoId,
+      nombre: turno.empleadoNombre,
+      rol: turno.rolGuardia,
+    }
+  }
+
+  // 2. Si no hay turno hoy para esa fecha pero hay turnos de la semana para esa franja
+  const turnoFranja = turnos.find((t) => t.franja === franja && !t.esRespaldoCoordinador)
+  if (turnoFranja) {
+    return {
+      id: turnoFranja.empleadoId,
+      nombre: turnoFranja.empleadoNombre,
+      rol: turnoFranja.rolGuardia,
+    }
+  }
+
+  // 3. Buscar primer empleado activo
+  if (empleados && empleados.length > 0) {
+    const enTurno = empleados.find((e) => e.activo && e.enTurnoActivo) || empleados.find((e) => e.activo)
+    if (enTurno) {
+      return {
+        id: enTurno.id,
+        nombre: enTurno.nombreCompleto,
+        rol: enTurno.cargo || 'Operador de Turno',
+      }
+    }
+  }
+
+  // 4. Respaldo general: Coordinador (el usuario)
+  return {
+    id: 'coord-user',
+    nombre: 'Tú (Coordinador General - Respaldo)',
+    rol: 'Guardia y Respaldo Comunitario',
+  }
+}
+
+/**
  * Ejecuta una ruta habitual (escolar o comunitaria):
- * Calcula km reales, rodamiento y ralentí, actualiza odómetros y consume combustible.
+ * Calcula km reales, rodamiento y ralentí, asignando al conductor en turno de guardia.
  */
 export async function ejecutarRutaHabitual(
   ruta: RutaHabitual,
   idCumplimiento?: string,
-  vehiculoIdElegido?: string
+  vehiculoIdElegido?: string,
+  conductorIdElegido?: string
 ): Promise<{ mision: MisionComunitaria }> {
   const vehiculos = await listarVehiculosBears()
   const empleados = await listarEmpleadosBears()
@@ -681,8 +746,22 @@ export async function ejecutarRutaHabitual(
     vehiculos.find((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 20) ||
     vehiculos[0]
 
-  const tripulante = empleados.find((e) => e.activo) || empleados[0]
   const hoyStr = hoyISO()
+  let conductor: { id: string; nombre: string; rol?: string }
+
+  if (conductorIdElegido) {
+    const emp = empleados.find((e) => e.id === conductorIdElegido)
+    conductor = emp
+      ? { id: emp.id, nombre: emp.nombreCompleto, rol: emp.cargo }
+      : { id: 'coord-user', nombre: 'Tú (Coordinador General - Respaldo)', rol: 'Guardia' }
+  } else if (ruta.conductorIdDefault) {
+    const emp = empleados.find((e) => e.id === ruta.conductorIdDefault)
+    conductor = emp
+      ? { id: emp.id, nombre: emp.nombreCompleto, rol: emp.cargo }
+      : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
+  } else {
+    conductor = resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
+  }
 
   const misionRuta: MisionComunitaria = {
     id: `rut-mis-${Date.now()}`,
@@ -701,15 +780,13 @@ export async function ejecutarRutaHabitual(
     vehiculosAsignados: vehiculo
       ? [{ id: vehiculo.id, nombre: `${vehiculo.marca} ${vehiculo.linea}`, placa: vehiculo.placa }]
       : [],
-    tripulantesAsignados: tripulante
-      ? [{ id: tripulante.id, nombre: tripulante.nombreCompleto }]
-      : [],
+    tripulantesAsignados: [{ id: conductor.id, nombre: conductor.nombre }],
     galonesConsumidosEstimados: 0,
     costoCombustibleEstimadoCOP: 0,
     desgasteLlantasIncrementoPorc: 0.3,
     fecha: hoyStr,
     estado: 'en_curso',
-    impactoSocial: ruta.descripcion,
+    impactoSocial: `${ruta.descripcion} · Conductor en turno: ${conductor.nombre} (${conductor.rol || 'Guardia'})`,
     esNoticiaWebReal: false,
   }
 
