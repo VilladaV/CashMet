@@ -45,6 +45,16 @@ function iso(d: Date): string {
   return `${y}-${m}-${day}`
 }
 
+/**
+ * Construye una fecha en el mes indicado recortando el día al último día real
+ * del mes (por ejemplo, día 31 en febrero → 28/29) en lugar de desbordar al
+ * mes siguiente.
+ */
+function fechaEnMes(anio: number, mes0: number, dia: number): Date {
+  const ultimoDia = new Date(anio, mes0 + 1, 0).getDate()
+  return new Date(anio, mes0, Math.min(Math.max(dia, 1), ultimoDia))
+}
+
 function enProximoAnio(fecha: string, meses = 12): boolean {
   const f = parseFechaLocal(fecha)
   if (!f) return false
@@ -155,7 +165,7 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
     if (diaPago >= 1 && diaPago <= 31) {
       const total = Math.round((Number(n.salarioBaseMensual) || 0) + (Number(n.adicionalMensual) || 0))
       for (let i = 0; i < meses; i++) {
-        const base = new Date(ahora.getFullYear(), ahora.getMonth() + i, diaPago)
+        const base = fechaEnMes(ahora.getFullYear(), ahora.getMonth() + i, diaPago)
         if (base < new Date(ahora.toDateString())) continue
         eventos.push({
           titulo: `Pago nómina - ${n.nombreCompleto ?? 'Empleado'}`,
@@ -210,7 +220,7 @@ export async function construirEventos(meses = 12): Promise<EventoInput[]> {
     if (d.estado && d.estado !== 'activa') continue
     const dia = Number(d.fechaVencimientoCuota) || 1
     for (let i = 0; i < meses; i++) {
-      const base = new Date(ahora.getFullYear(), ahora.getMonth() + i, dia)
+      const base = fechaEnMes(ahora.getFullYear(), ahora.getMonth() + i, dia)
       if (base < new Date(ahora.toDateString())) continue
       eventos.push({
         titulo: `Cuota ${d.nombre ?? 'Deuda'}`,

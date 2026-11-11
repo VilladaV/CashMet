@@ -13,8 +13,22 @@ export function parseFechaLocal(fecha?: string): Date | null {
   if (!fecha) return null
   const limpia = String(fecha).slice(0, 10)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(limpia)) return null
+  const [anio, mes, dia] = limpia.split('-').map(Number)
+  if (!fechaExiste(anio, mes, dia)) return null
   const d = new Date(`${limpia}T00:00:00`)
   return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** Valida que año/mes/día existan realmente (evita que 31/02 se convierta en 03/03). */
+export function fechaExiste(anio: number, mes: number, dia: number): boolean {
+  if (!Number.isInteger(anio) || !Number.isInteger(mes) || !Number.isInteger(dia)) return false
+  if (anio < 1 || mes < 1 || mes > 12 || dia < 1) return false
+  return dia <= diasEnMes(anio, mes)
+}
+
+/** Cantidad de días del mes (mes 1-12). */
+export function diasEnMes(anio: number, mes: number): number {
+  return new Date(anio, mes, 0).getDate()
 }
 
 export function sumarMeses(fecha: string, meses: number): string {

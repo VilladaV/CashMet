@@ -173,8 +173,9 @@ export function calcularCombustibleRalenti(
   tipoVehiculo: 'carro' | 'camion' | 'moto' | 'otro',
   minutosRalenti: number
 ): number {
+  const minutos = Number.isFinite(minutosRalenti) ? Math.max(0, minutosRalenti) : 0
   const galonesHora = CONSUMO_RALENTI_GALONES_POR_HORA[tipoVehiculo] || 0.3
-  return Number(((minutosRalenti / 60) * galonesHora).toFixed(2))
+  return Number(((minutos / 60) * galonesHora).toFixed(2))
 }
 
 /**

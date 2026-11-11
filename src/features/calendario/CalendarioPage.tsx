@@ -22,6 +22,7 @@ import {
   googleCalendarConfigurado,
   sincronizarPendientes,
 } from '@/lib/google/calendar'
+import { hoyISO } from '@/lib/fechas'
 import {
   Calendar as CalendarIcon,
   ChevronLeft,
@@ -64,7 +65,7 @@ const COLOR_TIPO: Record<string, string> = {
   personal: 'border-white/10 bg-white/[0.05] text-mist-300',
 }
 
-const HOY_ISO = new Date().toISOString().slice(0, 10)
+const HOY_ISO = hoyISO()
 
 export default function CalendarioPage() {
   const [generando, setGenerando] = useState(false)

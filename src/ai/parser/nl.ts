@@ -1,3 +1,5 @@
+import { fechaExiste } from '../../lib/fechas'
+
 export interface BorradorMovimiento {
   tipo: 'gasto' | 'ingreso'
   fecha: string
@@ -83,12 +85,22 @@ export function parseFecha(texto: string): string {
   if (/\bayer\b/.test(t)) return isoFecha(sumarDias(hoy, -1))
   if (/\bmanana\b/.test(t)) return isoFecha(sumarDias(hoy, 1))
 
-  const m1 = t.match(/\b(\d{1,2})\s+de\s+([a-z]+)/)
+  // Fecha ISO explícita (YYYY-MM-DD); se valida que el día exista.
+  const iso = t.match(/\b(\d{4})-(\d{2})-(\d{2})\b/)
+  if (iso) {
+    const anio = parseInt(iso[1], 10)
+    const mes = parseInt(iso[2], 10)
+    const dia = parseInt(iso[3], 10)
+    if (fechaExiste(anio, mes, dia)) return `${iso[1]}-${iso[2]}-${iso[3]}`
+  }
+
+  const m1 = t.match(/\b(\d{1,2})\s+de\s+([a-z]+)(?:\s+de(?:l)?\s+(\d{4}))?/)
   if (m1) {
     const dia = parseInt(m1[1], 10)
     const mes = MESES[m1[2]]
-    if (mes && dia >= 1 && dia <= 31) {
-      return isoFecha(new Date(hoy.getFullYear(), mes - 1, dia))
+    const anio = m1[3] ? parseInt(m1[3], 10) : hoy.getFullYear()
+    if (mes && fechaExiste(anio, mes, dia)) {
+      return isoFecha(new Date(anio, mes - 1, dia))
     }
   }
 
@@ -98,7 +110,7 @@ export function parseFecha(texto: string): string {
     const mes = parseInt(m2[2], 10)
     let anio = m2[3] ? parseInt(m2[3], 10) : hoy.getFullYear()
     if (anio < 100) anio += 2000
-    if (mes >= 1 && mes <= 12 && dia >= 1 && dia <= 31) {
+    if (fechaExiste(anio, mes, dia)) {
       return isoFecha(new Date(anio, mes - 1, dia))
     }
   }
@@ -108,7 +120,7 @@ export function parseFecha(texto: string): string {
 export function parseTipo(texto: string): 'gasto' | 'ingreso' {
   const t = normalizarTexto(texto)
   const ingreso =
-    /\b(ingres|recib|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion|me regalaron|me regalo|regalaron|me invitaron|invitaron|gane|premio|bono|loteria|me dieron)\b/
+    /\b(ingres\w*|recib\w*|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion|me regalaron|me regalo|regalaron|me invitaron|invitaron|gane|premio|bono|loteria|me dieron)\b/
   return ingreso.test(t) ? 'ingreso' : 'gasto'
 }
 
@@ -145,7 +157,13 @@ export function limpiarConcepto(texto: string): string {
   s = s.replace(/\b(hoy|ayer|anteayer|manana|mañana)\b/gi, ' ')
   s = s.replace(/\b(por|en|de|con|para)\s*$/i, ' ')
   s = s.replace(/\s+/g, ' ').trim()
-  s = s.replace(/^(un|una|unos|unas|el|la|los|las)\s+/i, '')
+  // Quita preposiciones y artículos iniciales que quedan tras eliminar el
+  // monto o el verbo ("registra $25.000 de almuerzo" → "almuerzo").
+  let anterior = ''
+  while (anterior !== s) {
+    anterior = s
+    s = s.replace(/^(de|del|por|en|con|para|el|la|los|las|un|una|unos|unas)\s+/i, '')
+  }
   s = s.replace(/^[,.:;\-\s]+|[,.:;\-\s]+$/g, '').trim()
   if (!s) return 'Movimiento'
   return s.charAt(0).toUpperCase() + s.slice(1)

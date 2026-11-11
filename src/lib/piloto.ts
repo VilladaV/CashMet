@@ -168,9 +168,24 @@ export async function ejecutarPilotoAutomatico(): Promise<ResumenPiloto> {
       continue
     }
     try {
-      await registrarPagoDeuda(d.id, Number(d.cuotaMensual), fechaEnMes(mes, dia), cuentaDeudaId, 'automatico')
-      aplicados.push({ texto: `Se descontó la cuota de "${d.nombre}" por ${COD(Number(d.cuotaMensual))}`, monto: Number(d.cuotaMensual) })
-      cambio = true
+      const r = await registrarPagoDeuda(d.id, Number(d.cuotaMensual), fechaEnMes(mes, dia), cuentaDeudaId, 'automatico')
+      if (r.ok) {
+        aplicados.push({
+          texto: `Se descontó la cuota de "${d.nombre}" por ${COD(Number(d.cuotaMensual))}${r.cerrada ? ' (deuda pagada)' : ''}`,
+          monto: Number(d.cuotaMensual),
+        })
+        cambio = true
+      } else if (r.error === 'saldo_insuficiente') {
+        avisos.push(
+          `No pude descontar la cuota de "${d.nombre}" (${COD(Number(d.cuotaMensual))}): la cuenta solo tiene ${COD(r.saldoDisponible ?? 0)}.`
+        )
+        cambio = true
+      } else if (r.error === 'monto_excede_saldo') {
+        avisos.push(
+          `La cuota de "${d.nombre}" (${COD(Number(d.cuotaMensual))}) supera el saldo pendiente (${COD(r.saldoPendiente ?? 0)}). Ajusta la cuota o registra el pago final a mano.`
+        )
+        cambio = true
+      }
     } catch {
       /* se reintenta en la próxima apertura */
     }

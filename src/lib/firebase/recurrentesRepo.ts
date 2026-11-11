@@ -59,7 +59,10 @@ function indiceMes(mes: string): number {
 
 function tocaMes(r: GastoRecurrente, mes: string): boolean {
   const idx = indiceMes(mes)
+  if (!Number.isFinite(idx)) return false
   const base = r.fechaInicio && /^\d{4}-\d{2}/.test(r.fechaInicio) ? indiceMes(r.fechaInicio.slice(0, 7)) : null
+  const fin = r.fechaFin && /^\d{4}-\d{2}/.test(r.fechaFin) ? indiceMes(r.fechaFin.slice(0, 7)) : null
+  if (fin != null && idx > fin) return false
   if (base == null) return true
   const dif = idx - base
   if (dif < 0) return false
@@ -114,13 +117,15 @@ export async function generarMovimientosRecurrentes(mes: string): Promise<number
   let creados = 0
   for (const r of recurrentes) {
     if (!tocaMes(r, mes) || yaGenerados.has(r.id)) continue
+    const valor = Math.round(Number(r.valor))
+    if (!Number.isFinite(valor) || valor <= 0) continue
     const cuentaId = r.cuentaBancoId || cuentaUnicaId
     if (!cuentaId) continue
     await crearMovimiento({
       fecha: fechaEnMes(mes, Number(r.diaVencimiento) || 1),
       tipo: 'gasto',
       concepto: r.concepto,
-      monto: Number(r.valor) || 0,
+      monto: valor,
       categoria: categoriaMovimiento(r.categoria),
       cuentaBancoId: cuentaId,
       recurrenteId: r.id,

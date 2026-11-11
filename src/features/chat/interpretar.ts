@@ -1,6 +1,7 @@
 import { interpretarLote, interpretarMensaje, interpretarTransferencia, type Interpretacion } from './engine'
 import { geminiDisponible, interpretarConGemini } from '@/ai/gemini'
 import { convertirACOP } from '@/lib/fx'
+import { hoyISO } from '@/lib/fechas'
 
 export { geminiDisponible }
 
@@ -73,7 +74,7 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
   if (geminiDisponible) {
     try {
       interp = await interpretarConGemini(mensaje, {
-        hoy: new Date().toISOString().slice(0, 10),
+        hoy: hoyISO(),
         cuentas: contexto.cuentas,
         historial: contexto.historial,
         snapshot: contexto.snapshot,
