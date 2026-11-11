@@ -125,6 +125,94 @@ async function llamarGemini(body: unknown): Promise<{ res: Response | null; cuot
   return { res: null, cuotaAgotada }
 }
 
+export interface FichaInvestigadaVehiculo {
+  capacidadTanqueLitros: number
+  capacidadTanqueGalones: number
+  tipoCombustible: 'diesel' | 'corriente' | 'extra'
+  consumoKmPorGalon: number
+  fichaInvestigadaNota: string
+}
+
+export async function investigarVehiculoConGeminiAI(vehiculo: {
+  marca: string
+  linea: string
+  tipo?: string
+  modelo?: number | null
+  notas?: string
+  carroceria?: string
+  cilindraje?: number
+  capacidadTexto?: string
+}): Promise<FichaInvestigadaVehiculo | null> {
+  if (!API_KEY) return null
+
+  const prompt = `Actúa como perito técnico automotriz e ingeniero mecánico experto en transporte de carga, camionetas 4x4, camiones y maquinaria en Colombia.
+Investiga y determina las especificaciones oficiales originales de fábrica para este vehículo:
+- Marca: ${vehiculo.marca}
+- Línea / Referencia: ${vehiculo.linea}
+- Año modelo: ${vehiculo.modelo ?? 'No especificado'}
+- Tipo / Carrocería: ${vehiculo.tipo ?? ''} ${vehiculo.carroceria ?? ''}
+- Cilindraje: ${vehiculo.cilindraje ? `${vehiculo.cilindraje} cc` : 'No especificado'}
+- Capacidad reportada: ${vehiculo.capacidadTexto ?? 'No especificada'}
+- Notas registradas: ${vehiculo.notas ?? 'Ninguna'}
+
+Necesito saber con precisión de fabricante:
+1. Capacidad real del tanque de combustible en litros (capacidadTanqueLitros: number).
+2. Capacidad en galones estadounidenses (capacidadTanqueGalones: number, redondeado a 1 decimal). 
+   REGLA DE PRECISIÓN: Cada fabricante y modelo tiene un tanque diferente (ej: tractomulas tipo Kenworth/International/Freightliner usan tanques dobles de 150-300 galones; camiones pesados 6x4/6x6/volquetas usan 60-100 galones; camiones medianos tipo NPR/Dutro/Kodiak usan 25-50 galones; troperos/overlanders con tanque auxiliar usan 35-50 galones; camionetas 4x4 usan 18-25 galones; camperos livianos usan 10-15 galones; automóviles 10-14 galones). Investiga el modelo exacto.
+3. Tipo de combustible (tipoCombustible: "diesel" | "corriente" | "extra").
+4. Rendimiento promedio real estimado en kilómetros por galón en geografía colombiana / montaña / trocha (consumoKmPorGalon: number, redondeado a 1 decimal).
+5. Explicación técnica concisa de fábrica de 1 o 2 frases sobre el tanque original, motor y autonomía para operaciones de rescate/trabajo (fichaInvestigadaNota: string).
+
+Responde ÚNICAMENTE un JSON válido con esta estructura:
+{
+  "capacidadTanqueLitros": 100,
+  "capacidadTanqueGalones": 26.4,
+  "tipoCombustible": "diesel",
+  "consumoKmPorGalon": 24,
+  "fichaInvestigadaNota": "Ficha oficial de fábrica: Tanque de 100 L (26.4 gal). Motor turbodiésel con rendimiento de ~24 km/gal en cordillera."
+}`
+
+  const body = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+  }
+
+  try {
+    const { res } = await llamarGemini(body)
+    if (!res) return null
+
+    const data = (await res.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    }
+    const texto = (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+    if (!texto) return null
+
+    const parsed = JSON.parse(limpiarJson(texto)) as Partial<FichaInvestigadaVehiculo>
+    const gal = Number(parsed.capacidadTanqueGalones)
+    const lit = Number(parsed.capacidadTanqueLitros)
+    const kmGal = Number(parsed.consumoKmPorGalon)
+
+    if (!Number.isFinite(gal) || gal <= 0) return null
+
+    const litrosValidos = Number.isFinite(lit) && lit > 0 ? Number(lit.toFixed(1)) : Number((gal * 3.78541).toFixed(1))
+    const galonesValidos = Number(gal.toFixed(1))
+    const kmValido = Number.isFinite(kmGal) && kmGal > 0 ? Number(kmGal.toFixed(1)) : 20
+    const comb = parsed.tipoCombustible === 'corriente' || parsed.tipoCombustible === 'extra' ? parsed.tipoCombustible : 'diesel'
+    const nota = String(parsed.fichaInvestigadaNota || '').trim() || `Ficha investigada por IA: Tanque oficial de ${galonesValidos} gal (${litrosValidos} L).`
+
+    return {
+      capacidadTanqueGalones: galonesValidos,
+      capacidadTanqueLitros: litrosValidos,
+      consumoKmPorGalon: kmValido,
+      tipoCombustible: comb,
+      fichaInvestigadaNota: nota.startsWith('✨') ? nota : `✨ Gemini IA: ${nota}`,
+    }
+  } catch (err) {
+    console.warn('Error investigando vehículo con Gemini AI:', err)
+    return null
+  }
+}
+
 export async function interpretarConGemini(mensaje: string, contexto: Contexto): Promise<Interpretacion> {
   if (!API_KEY) throw new Error('gemini_sin_clave')
 

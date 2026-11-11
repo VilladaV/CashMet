@@ -7,7 +7,8 @@ interface Props {
   vehiculos: VehiculoOperativo[]
   onActualizarVehiculo: (id: string, parcial: Partial<VehiculoOperativo>) => void
   onTanquearVehiculo: (id: string) => Promise<void>
-  onInvestigarFichasPendientesIA: () => Promise<{ procesados: number; nombres: string[] }>
+  onInvestigarFichasPendientesIA: (forzarTodos?: boolean) => Promise<{ procesados: number; nombres: string[] }>
+  onInvestigarVehiculoIndividualIA?: (id: string) => Promise<void>
   onReemplazarLlantas: (id: string) => void
 }
 
@@ -16,9 +17,11 @@ export default function FlotaTab({
   onActualizarVehiculo,
   onTanquearVehiculo,
   onInvestigarFichasPendientesIA,
+  onInvestigarVehiculoIndividualIA,
   onReemplazarLlantas,
 }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [investigandoIndividualId, setInvestigandoIndividualId] = useState<string | null>(null)
   const [investigando, setInvestigando] = useState(false)
   const [feedback, setFeedback] = useState<string>('')
   const [filtro, setFiltro] = useState<'todos' | 'habilitados' | 'reserva'>('todos')
@@ -44,16 +47,28 @@ export default function FlotaTab({
     }
   }
 
-  const ejecutarInvestigacionMasiva = async () => {
+  const ejecutarInvestigacionIndividual = async (id: string, marca: string, linea: string) => {
+    if (!onInvestigarVehiculoIndividualIA) return
+    setInvestigandoIndividualId(id)
+    try {
+      await onInvestigarVehiculoIndividualIA(id)
+      setFeedback(`✨ Gemini IA investigó y actualizó la ficha técnica de ${marca} ${linea}.`)
+      window.setTimeout(() => setFeedback(''), 4500)
+    } finally {
+      setInvestigandoIndividualId(null)
+    }
+  }
+
+  const ejecutarInvestigacionMasiva = async (forzarTodos = false) => {
     setInvestigando(true)
     try {
-      const res = await onInvestigarFichasPendientesIA()
+      const res = await onInvestigarFichasPendientesIA(forzarTodos)
       if (res.procesados > 0) {
         setFeedback(
-          `🔍 Se investigaron y configuraron con IA ${res.procesados} vehículos de trabajo: ${res.nombres.join(', ')}.`
+          `🔍 Gemini IA investigó y configuró ${res.procesados} vehículos: ${res.nombres.join(', ')}.`
         )
       } else {
-        setFeedback('✅ Todos los vehículos habilitados para Bear\'s Reserve ya tienen su ficha técnica validada.')
+        setFeedback('✅ Todos los vehículos habilitados ya tienen su ficha técnica oficial validada por IA.')
       }
       window.setTimeout(() => setFeedback(''), 4500)
     } finally {
@@ -65,6 +80,13 @@ export default function FlotaTab({
     onReemplazarLlantas(v.id)
     setFeedback(`🛞 Se instaló juego nuevo de llantas en ${v.marca} ${v.linea} (desgaste restablecido a 0%).`)
     window.setTimeout(() => setFeedback(''), 3500)
+  }
+
+  const handleToggleHabilitado = (v: VehiculoOperativo, habilitado: boolean) => {
+    onActualizarVehiculo(v.id, { disponibleParaTrabajo: habilitado })
+    if (habilitado && !v.investigadoIA && onInvestigarVehiculoIndividualIA) {
+      void ejecutarInvestigacionIndividual(v.id, v.marca, v.linea)
+    }
   }
 
   return (
@@ -86,18 +108,33 @@ export default function FlotaTab({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {pendientesInvestigacion > 0 && (
+          {pendientesInvestigacion > 0 ? (
             <button
               type="button"
               disabled={investigando}
-              onClick={ejecutarInvestigacionMasiva}
+              onClick={() => ejecutarInvestigacionMasiva(false)}
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-sky-400/40 bg-sky-400/10 px-3 py-1.5 text-xs font-bold text-sky-200 transition hover:bg-sky-400/20 disabled:opacity-40"
             >
               <Sparkles className={`h-3.5 w-3.5 ${investigando ? 'animate-spin' : ''}`} />
               <span>
                 {investigando
-                  ? 'Investigando especificaciones...'
-                  : `🔍 Investigar Fichas con IA (${pendientesInvestigacion})`}
+                  ? 'Investigando especificaciones con Gemini...'
+                  : `🔍 Investigar Fichas con IA (${pendientesInvestigacion} pendientes)`}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={investigando}
+              onClick={() => ejecutarInvestigacionMasiva(true)}
+              title="Volver a consultar a Gemini IA para verificar o afinar especificaciones oficiales de toda la flota"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/[0.06] px-3 py-1.5 text-xs font-bold text-sky-300 transition hover:bg-sky-500/15 disabled:opacity-40"
+            >
+              <Sparkles className={`h-3.5 w-3.5 ${investigando ? 'animate-spin' : ''}`} />
+              <span>
+                {investigando
+                  ? 'Actualizando flota con Gemini...'
+                  : '✨ Reinvestigar Flota con IA'}
               </span>
             </button>
           )}
@@ -156,9 +193,13 @@ export default function FlotaTab({
                       <span className="text-sm font-black text-white">
                         {v.marca} {v.linea} {v.modelo ? `(${v.modelo})` : ''}
                       </span>
-                      {v.investigadoIA && (
+                      {v.investigadoIA ? (
                         <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.2 text-[9px] font-bold text-sky-300">
-                          ✓ Ficha IA
+                          {v.fichaInvestigadaNota?.includes('Gemini') ? '✨ Gemini IA' : '✓ Ficha IA'}
+                        </span>
+                      ) : (
+                        <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.2 text-[9px] font-bold text-amber-300">
+                          ⚠️ Ficha preliminar
                         </span>
                       )}
                     </div>
@@ -174,21 +215,47 @@ export default function FlotaTab({
                   <input
                     type="checkbox"
                     checked={v.disponibleParaTrabajo}
-                    onChange={(e) =>
-                      onActualizarVehiculo(v.id, { disponibleParaTrabajo: e.target.checked })
-                    }
+                    onChange={(e) => handleToggleHabilitado(v, e.target.checked)}
                     className="h-3.5 w-3.5 accent-amber-400"
                   />
                   <span>{v.disponibleParaTrabajo ? 'Habilitado Reserva' : 'Solo CashMet'}</span>
                 </label>
               </div>
 
-              {/* Ficha técnica investigada */}
-              {v.fichaInvestigadaNota && (
-                <div className="rounded-xl border border-sky-400/15 bg-sky-500/[0.04] p-2 text-[10px] text-sky-200/90 leading-relaxed">
-                  {v.fichaInvestigadaNota}
+              {/* Ficha técnica investigada + Botón de investigación individual con Gemini */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    {v.fichaInvestigadaNota ? (
+                      <div className="rounded-xl border border-sky-400/15 bg-sky-500/[0.04] p-2 text-[10px] text-sky-200/90 leading-relaxed">
+                        {v.fichaInvestigadaNota}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-amber-400/15 bg-amber-500/[0.04] p-2 text-[10px] text-amber-200/90 leading-relaxed">
+                        Pendiente de investigación de especificaciones oficiales de fábrica con IA.
+                      </div>
+                    )}
+                  </div>
+                  {onInvestigarVehiculoIndividualIA && (
+                    <button
+                      type="button"
+                      disabled={investigandoIndividualId === v.id || investigando}
+                      onClick={() => ejecutarInvestigacionIndividual(v.id, v.marca, v.linea)}
+                      title="Investigar o verificar especificaciones oficiales de fábrica con la IA de Gemini"
+                      className="shrink-0 inline-flex items-center gap-1 rounded-xl border border-sky-400/30 bg-sky-400/10 px-2 py-1.5 text-[10px] font-bold text-sky-200 transition hover:bg-sky-400/20 disabled:opacity-40 cursor-pointer"
+                    >
+                      <Sparkles className={`h-3 w-3 ${investigandoIndividualId === v.id ? 'animate-spin' : ''}`} />
+                      <span>
+                        {investigandoIndividualId === v.id
+                          ? 'Consultando IA...'
+                          : v.investigadoIA
+                          ? 'Reinvestigar IA'
+                          : 'Investigar con IA'}
+                      </span>
+                    </button>
+                  )}
                 </div>
-              )}
+              </div>
 
               {/* Notas y configuración heredadas de CashMet */}
               {v.notasCashmet && (

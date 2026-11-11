@@ -20,6 +20,7 @@ import {
   investigarFichaVehiculoIA,
   seleccionarVehiculosOptimosMision,
 } from './gemaEngine'
+import { investigarVehiculoConGeminiAI } from '@/ai/gemini'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
@@ -251,8 +252,8 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
 function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): VehiculoOperativo {
   const tipo = v.tipo || 'carro'
 
-  // Deducción técnica con IA de las especificaciones de fábrica reales
-  const ficha = investigarFichaVehiculoIA(
+  // Deducción técnica offline de respaldo
+  const fichaFallback = investigarFichaVehiculoIA(
     v.marca,
     v.linea,
     v.tipo,
@@ -262,11 +263,12 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     v.capacidad
   )
 
-  const capacidadGalones = ficha.capacidadTanqueGalones
-  const capacidadLitros = ficha.capacidadTanqueLitros
-  const tipoCombustible = ficha.tipoCombustible
-  const consumoBase = ficha.consumoKmPorGalon
-  const notaFicha = ficha.fichaInvestigadaNota
+  const capacidadGalones = extra?.capacidadTanqueGalones ?? fichaFallback.capacidadTanqueGalones
+  const capacidadLitros = extra?.capacidadTanqueLitros ?? fichaFallback.capacidadTanqueLitros
+  const tipoCombustible = extra?.tipoCombustible ?? fichaFallback.tipoCombustible
+  const consumoBase = extra?.consumoKmPorGalon ?? fichaFallback.consumoKmPorGalon
+  const notaFicha = extra?.fichaInvestigadaNota ?? fichaFallback.fichaInvestigadaNota
+  const investigadoIA = extra?.investigadoIA ?? false
 
   return {
     id: v.id,
@@ -294,14 +296,14 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
       }
       return false
     })(),
-    investigadoIA: true,
+    investigadoIA,
     fichaInvestigadaNota: notaFicha,
     estado: extra?.estado || (v.estado === 'En reparación' ? 'mantenimiento' : 'disponible'),
-    tipoCombustible: extra?.tipoCombustible || tipoCombustible,
+    tipoCombustible,
     capacidadTanqueGalones: capacidadGalones,
     capacidadTanqueLitros: capacidadLitros,
     nivelCombustiblePorc: extra?.nivelCombustiblePorc ?? 85,
-    consumoKmPorGalon: extra?.consumoKmPorGalon || consumoBase,
+    consumoKmPorGalon: consumoBase,
     kilometrajeActual: v.mantenimiento?.kilometrajeActual ?? 0,
     desgasteLlantasPorc: extra?.desgasteLlantasPorc ?? 18,
     estadoBateriaPorc: extra?.estadoBateriaPorc ?? 95,
@@ -436,21 +438,31 @@ export function guardarExtraEmpleado(id: string, extra: Partial<EmpleadoOperativ
 }
 
 /**
- * Investigar con IA las fichas técnicas solo de los vehículos que:
- * 1. Están habilitados para Bear's Reserve (`disponibleParaTrabajo === true`)
- * 2. Aún NO han sido investigados (`!investigadoIA`).
+ * Investiga la ficha técnica oficial de un vehículo en particular usando la IA de Gemini.
+ * Si Gemini no está disponible o falla, utiliza el catálogo técnico de respaldo.
  */
-export async function investigarVehiculosPendientesIA(): Promise<{
-  procesados: number
-  nombres: string[]
-}> {
+export async function investigarVehiculoIndividualIA(
+  vehiculoId: string
+): Promise<VehiculoOperativo | null> {
   const vehiculos = await listarVehiculosBears()
-  const pendientes = vehiculos.filter((v) => v.disponibleParaTrabajo && !v.investigadoIA)
+  const v = vehiculos.find((x) => x.id === vehiculoId || x.vehiculoId === vehiculoId)
+  if (!v) return null
 
-  const procesadosNombres: string[] = []
+  // 1. Investigar con Gemini en vivo
+  let ficha = await investigarVehiculoConGeminiAI({
+    marca: v.marca,
+    linea: v.linea,
+    tipo: v.tipo,
+    modelo: v.modelo,
+    notas: v.notasCashmet,
+    carroceria: v.carroceria,
+    cilindraje: v.cilindraje,
+    capacidadTexto: v.capacidadTexto,
+  })
 
-  for (const v of pendientes) {
-    const ficha = investigarFichaVehiculoIA(
+  // 2. Si no hubo respuesta de Gemini, usar catálogo técnico de respaldo
+  if (!ficha) {
+    ficha = investigarFichaVehiculoIA(
       v.marca,
       v.linea,
       v.tipo,
@@ -459,6 +471,64 @@ export async function investigarVehiculosPendientesIA(): Promise<{
       v.carroceria,
       v.capacidadTexto
     )
+  }
+
+  guardarExtraVehiculo(v.id, {
+    investigadoIA: true,
+    fichaInvestigadaNota: ficha.fichaInvestigadaNota,
+    capacidadTanqueGalones: ficha.capacidadTanqueGalones,
+    capacidadTanqueLitros: ficha.capacidadTanqueLitros,
+    consumoKmPorGalon: ficha.consumoKmPorGalon,
+    tipoCombustible: ficha.tipoCombustible,
+  })
+
+  const actualizados = await listarVehiculosBears()
+  return actualizados.find((x) => x.id === vehiculoId) || null
+}
+
+/**
+ * Investigar con IA (Gemini) las fichas técnicas oficiales.
+ * Por defecto procesa los pendientes, o todos si se fuerza la actualización.
+ */
+export async function investigarVehiculosPendientesIA(
+  forzarTodos = false
+): Promise<{
+  procesados: number
+  nombres: string[]
+}> {
+  const vehiculos = await listarVehiculosBears()
+  const pendientes = forzarTodos
+    ? vehiculos.filter((v) => v.disponibleParaTrabajo)
+    : vehiculos.filter((v) => v.disponibleParaTrabajo && !v.investigadoIA)
+
+  const procesadosNombres: string[] = []
+
+  for (const v of pendientes) {
+    // 1. Intentar investigar con Gemini en vivo
+    let ficha = await investigarVehiculoConGeminiAI({
+      marca: v.marca,
+      linea: v.linea,
+      tipo: v.tipo,
+      modelo: v.modelo,
+      notas: v.notasCashmet,
+      carroceria: v.carroceria,
+      cilindraje: v.cilindraje,
+      capacidadTexto: v.capacidadTexto,
+    })
+
+    // 2. Respaldo offline
+    if (!ficha) {
+      ficha = investigarFichaVehiculoIA(
+        v.marca,
+        v.linea,
+        v.tipo,
+        v.modelo,
+        v.notasCashmet,
+        v.carroceria,
+        v.capacidadTexto
+      )
+    }
+
     guardarExtraVehiculo(v.id, {
       investigadoIA: true,
       fichaInvestigadaNota: ficha.fichaInvestigadaNota,

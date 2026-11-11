@@ -11,6 +11,7 @@ import {
   descartarEventoRadar,
   agregarEventoRadarManual,
   investigarVehiculosPendientesIA,
+  investigarVehiculoIndividualIA,
   leerEventosRadar,
   leerTarjetaCombustible,
   liquidarTarjetaEnCashmet,
@@ -150,11 +151,17 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     setTarjetaCombustible({ ...res })
   }
 
-  // Investigar con IA fichas pendientes
-  const ejecutarInvestigacionFichasIA = async () => {
-    const res = await investigarVehiculosPendientesIA()
+  // Investigar con IA fichas de flota (Gemini en vivo)
+  const ejecutarInvestigacionFichasIA = async (forzarTodos = false) => {
+    const res = await investigarVehiculosPendientesIA(forzarTodos)
     await cargarTodo()
     return res
+  }
+
+  // Investigar un vehículo individual con IA
+  const ejecutarInvestigacionVehiculoIndividual = async (id: string) => {
+    await investigarVehiculoIndividualIA(id)
+    await cargarTodo()
   }
 
   // Reemplazar llantas (discreto)
@@ -349,6 +356,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                 }}
                 onTanquearVehiculo={tanquear}
                 onInvestigarFichasPendientesIA={ejecutarInvestigacionFichasIA}
+                onInvestigarVehiculoIndividualIA={ejecutarInvestigacionVehiculoIndividual}
                 onReemplazarLlantas={ejecutarReemplazoLlantas}
               />
             )}
