@@ -32,6 +32,12 @@ export interface VehiculoOperativo {
   capacidadTanqueLitros?: number
   nivelCombustiblePorc: number // 0 a 100
   consumoKmPorGalon: number // En montaña/trocha
+  // Datos técnicos y notas heredadas de CashMet
+  notasCashmet?: string
+  carroceria?: string
+  claseVehiculo?: string
+  capacidadTexto?: string
+  cilindraje?: number
   // Odómetro y telemetría de desgaste
   kilometrajeActual: number
   kilometrajeInicialMision?: number

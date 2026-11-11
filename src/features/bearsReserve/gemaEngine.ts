@@ -18,7 +18,10 @@ export function investigarFichaVehiculoIA(
   marca: string,
   linea: string,
   tipo: string,
-  modelo?: number | null
+  modelo?: number | null,
+  notas?: string,
+  carroceria?: string,
+  capacidadTexto?: string
 ): {
   capacidadTanqueGalones: number
   capacidadTanqueLitros: number
@@ -29,22 +32,29 @@ export function investigarFichaVehiculoIA(
   const m = (marca || '').toLowerCase().trim()
   const l = (linea || '').toLowerCase().trim()
   const t = (tipo || '').toLowerCase().trim()
+  const n = (notas || '').toLowerCase().trim()
+  const c = (carroceria || '').toLowerCase().trim()
+  const cap = (capacidadTexto || '').toLowerCase().trim()
+
+  const corpus = `${m} ${l} ${t} ${n} ${c} ${cap}`
 
   // 1. Motocicletas
-  if (t === 'moto' || l.includes('xtz') || l.includes('dr ') || l.includes('pulsar') || l.includes('boxer') || l.includes('xr ')) {
+  if (t === 'moto' || corpus.includes('moto') || l.includes('xtz') || l.includes('dr ') || l.includes('pulsar') || l.includes('boxer') || l.includes('xr ')) {
     return {
       capacidadTanqueGalones: 3.2,
       capacidadTanqueLitros: 12.1,
       consumoKmPorGalon: 110,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica oficial verificada: Tanque 3.2 gal (12.1 L). Rendimiento cordillera: 110 km/gal. Combustible: Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica oficial verificada: Tanque 3.2 gal (12.1 L). Rendimiento cordillera: 110 km/gal. Gasolina Corriente.`,
     }
   }
 
-  // 2. Tractomulas y Camiones de Quinta Rueda / Pesados (Kenworth, Freightliner, International, Mack)
+  // 2. Tractomulas y Camiones de Quinta Rueda / Pesados (Notas o Línea)
   if (
-    l.includes('quinta rueda') ||
-    l.includes('tractomula') ||
+    corpus.includes('quinta rueda') ||
+    corpus.includes('5ta rueda') ||
+    corpus.includes('tractomula') ||
+    corpus.includes('cabezote') ||
     l.includes('kenworth') ||
     l.includes('t800') ||
     l.includes('freightliner') ||
@@ -53,41 +63,72 @@ export function investigarFichaVehiculoIA(
     l.includes('workstar') ||
     l.includes('mack')
   ) {
+    const notasInfo = n ? ` Configuración en notas: "${notas}".` : ''
     return {
       capacidadTanqueGalones: 160,
       capacidadTanqueLitros: 605,
       consumoKmPorGalon: 6.2,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha pesada de carga verificada: Tanques duales de aluminio 160 gal (605 L). Rendimiento en ascensos de alta cordillera (La Línea/Letras): ~6.2 km/gal. Diésel/ACPM.`,
+      fichaInvestigadaNota: `Ficha pesada de carga/5ta rueda verificada: Tanques duales de aluminio 160 gal (605 L). Rendimiento en ascensos de alta cordillera (La Línea/Letras): ~6.2 km/gal. Diésel/ACPM.${notasInfo}`,
     }
   }
 
-  // 3. Camiones medianos y rígidos (Chevrolet Kodiak, NPR, NHR, FTR, Hino Dutro)
+  // 3. Transporte de Pasajeros / Buses / Busetas escolares / Vans
   if (
-    l.includes('kodiak') ||
-    l.includes('brigadier') ||
-    l.includes('ftr') ||
-    l.includes('npr') ||
-    l.includes('nhr') ||
-    l.includes('nkr') ||
-    l.includes('hino') ||
-    t === 'camion'
+    corpus.includes('bus') ||
+    corpus.includes('buseta') ||
+    corpus.includes('van') ||
+    corpus.includes('pasajero') ||
+    corpus.includes('escolar') ||
+    corpus.includes('sprinter') ||
+    corpus.includes('master') ||
+    corpus.includes('crafter') ||
+    l.includes('troop carrier')
   ) {
-    const esPesado = l.includes('kodiak') || l.includes('brigadier') || l.includes('ftr')
-    const galones = esPesado ? 55 : 36
+    const esTroop = l.includes('troop')
+    const galones = esTroop ? 23.8 : 22.5
     const litros = Number((galones * 3.78541).toFixed(1))
-    const kmGalon = esPesado ? 8.5 : 14.5
+    const kmGalon = esTroop ? 24 : 25
+    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
     return {
       capacidadTanqueGalones: galones,
       capacidadTanqueLitros: litros,
       consumoKmPorGalon: kmGalon,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica de camión chasis diésel: Tanque ${galones} gal (${litros} L). Rendimiento en carretera de montaña: ~${kmGalon} km/gal. Diésel/ACPM.`,
+      fichaInvestigadaNota: `Ficha transporte colectivo/escolar: Tanque ${galones} gal (${litros} L). Rendimiento: ~${kmGalon} km/gal. Diésel.${notasInfo}`,
     }
   }
 
-  // 4. Camperos 4x4 y Camionetas Pickup (Toyota Hilux, Land Cruiser, Prado, Nissan Frontier, D-Max, Ranger)
+  // 4. Camiones medianos y rígidos (Chevrolet Kodiak, NPR, NHR, FTR, Hino Dutro)
   if (
+    corpus.includes('kodiak') ||
+    corpus.includes('brigadier') ||
+    corpus.includes('ftr') ||
+    corpus.includes('npr') ||
+    corpus.includes('nhr') ||
+    corpus.includes('nkr') ||
+    corpus.includes('hino') ||
+    t === 'camion'
+  ) {
+    const esPesado = corpus.includes('kodiak') || corpus.includes('brigadier') || corpus.includes('ftr')
+    const galones = esPesado ? 55 : 36
+    const litros = Number((galones * 3.78541).toFixed(1))
+    const kmGalon = esPesado ? 8.5 : 14.5
+    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
+    return {
+      capacidadTanqueGalones: galones,
+      capacidadTanqueLitros: litros,
+      consumoKmPorGalon: kmGalon,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica camión diésel: Tanque ${galones} gal (${litros} L). Rendimiento cordillera: ~${kmGalon} km/gal. Diésel/ACPM.${notasInfo}`,
+    }
+  }
+
+  // 5. Camperos 4x4 y Camionetas Pickup (Toyota Hilux, Land Cruiser, Prado, Nissan Frontier, D-Max, Ranger)
+  if (
+    corpus.includes('4x4') ||
+    corpus.includes('winche') ||
+    corpus.includes('trocha') ||
     l.includes('hilux') ||
     l.includes('prado') ||
     l.includes('land cruiser') ||
@@ -95,23 +136,23 @@ export function investigarFichaVehiculoIA(
     l.includes('d-max') ||
     l.includes('dmax') ||
     l.includes('ranger') ||
-    l.includes('bt-50') ||
     l.includes('patrol')
   ) {
     const esTroopOPrado = l.includes('troop') || l.includes('land cruiser') || l.includes('patrol')
-    const galones = esTroopOPrado ? 23.8 : 21.1 // 90L vs 80L
+    const galones = esTroopOPrado ? 23.8 : 21.1
     const litros = Number((galones * 3.78541).toFixed(1))
     const kmGalon = esTroopOPrado ? 24 : 29
+    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
     return {
       capacidadTanqueGalones: galones,
       capacidadTanqueLitros: litros,
       consumoKmPorGalon: kmGalon,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica pickup/campero 4x4 todo terreno: Tanque ${galones} gal (${litros} L). Rendimiento trocha/montaña: ~${kmGalon} km/gal. Diésel/ACPM de alto torque.`,
+      fichaInvestigadaNota: `Ficha técnica pickup/campero 4x4 de alta tracción: Tanque ${galones} gal (${litros} L). Rendimiento trocha: ~${kmGalon} km/gal. Diésel.${notasInfo}`,
     }
   }
 
-  // 5. Camperos livianos (Suzuki Jimny, Samurai, Vitara)
+  // 6. Camperos livianos (Suzuki Jimny, Samurai, Vitara)
   if (l.includes('jimny') || l.includes('samurai') || l.includes('vitara')) {
     return {
       capacidadTanqueGalones: 10.5,
@@ -122,14 +163,14 @@ export function investigarFichaVehiculoIA(
     }
   }
 
-  // 6. Automóviles compactos específicos (Chevrolet Corsa, Aveo, Sail, Spark, Renault Clio, Sandero, Logan, Duster)
+  // 7. Automóviles compactos específicos (Chevrolet Corsa, Aveo, Sail, Spark, Renault Clio, Sandero, Logan, Duster)
   if (l.includes('corsa')) {
     return {
       capacidadTanqueGalones: 11.9,
       capacidadTanqueLitros: 45,
       consumoKmPorGalon: 39,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet Corsa ${modelo || ''}: Capacidad oficial de 45 litros (11.9 galones). Consumo promedio en relieve andino mixto: ~39 km/galón. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica Chevrolet Corsa ${modelo || ''}: Capacidad oficial 45 litros (11.9 galones). Consumo promedio montaña: ~39 km/galón. Gasolina Corriente.`,
     }
   }
 
@@ -139,7 +180,7 @@ export function investigarFichaVehiculoIA(
       capacidadTanqueLitros: 35,
       consumoKmPorGalon: 46,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica vehículo urbano liviano: Tanque oficial 35 litros (9.2 galones). Consumo: ~46 km/galón. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica vehículo liviano: Tanque 35 L (9.2 gal). Consumo: ~46 km/galón. Gasolina Corriente.`,
     }
   }
 
@@ -150,18 +191,7 @@ export function investigarFichaVehiculoIA(
       capacidadTanqueLitros: 50,
       consumoKmPorGalon: esDuster ? 32 : 36,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Renault: Tanque 50 litros (13.2 galones). Rendimiento en pendientes de Manizales: ~${esDuster ? 32 : 36} km/galón. Gasolina Corriente.`,
-    }
-  }
-
-  // 7. Microbús, Van o Buseta (Sprinter, Master, NKR Buseta, Crafter)
-  if (l.includes('sprinter') || l.includes('bus') || l.includes('van') || l.includes('master') || l.includes('crafter')) {
-    return {
-      capacidadTanqueGalones: 22.5,
-      capacidadTanqueLitros: 85,
-      consumoKmPorGalon: 24,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica vehículo de pasajeros/transporte colectivo: Tanque 85 litros (22.5 galones). Rendimiento mixto: ~24 km/galón. Diésel/ACPM.`,
+      fichaInvestigadaNota: `Ficha técnica Renault: Tanque 50 L (13.2 galones). Rendimiento: ~${esDuster ? 32 : 36} km/galón. Gasolina Corriente.`,
     }
   }
 
@@ -171,13 +201,98 @@ export function investigarFichaVehiculoIA(
   const litros = Number((galones * 3.78541).toFixed(1))
   const tipoComb = esCamionGral ? 'diesel' : 'corriente'
   const kmGalon = esCamionGral ? 10 : 33
+  const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
 
   return {
     capacidadTanqueGalones: galones,
     capacidadTanqueLitros: litros,
     consumoKmPorGalon: kmGalon,
     tipoCombustible: tipoComb,
-    fichaInvestigadaNota: `Ficha técnica general validada: Capacidad estimada ${galones} gal (${litros} L). Rendimiento en curvas y montaña: ~${kmGalon} km/gal. ${tipoComb.toUpperCase()}.`,
+    fichaInvestigadaNota: `Ficha técnica general validada: Capacidad ${galones} gal (${litros} L). Rendimiento montaña: ~${kmGalon} km/gal. ${tipoComb.toUpperCase()}.${notasInfo}`,
+  }
+}
+
+/**
+ * Inteligencia de Selección y Asignación de Vehículos para Misiones 🧠🚚:
+ * Analiza el tipo de contingencia (lodo, niños, mudanza, apoyo) y cruza con
+ * las notas de CashMet (4x4, winche, 5ta rueda, capacidad de pasajeros)
+ * y el nombre del modelo para despachar la unidad perfecta.
+ */
+export function seleccionarVehiculosOptimosMision(
+  mision: { titulo: string; tipo: string; impactoSocial?: string; terreno?: string },
+  vehiculosDisponibles: VehiculoOperativo[]
+): {
+  vehiculoElegido: VehiculoOperativo
+  motivoGema: string
+  candidatosSecundarios: VehiculoOperativo[]
+} {
+  const aptos = vehiculosDisponibles.filter((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 15)
+  const pool = aptos.length > 0 ? aptos : vehiculosDisponibles
+
+  const textoMision = `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''} ${mision.terreno || ''}`.toLowerCase()
+
+  const requierePasajeros =
+    textoMision.includes('escolar') ||
+    textoMision.includes('niños') ||
+    textoMision.includes('colegio') ||
+    textoMision.includes('estudiantes') ||
+    textoMision.includes('familia')
+
+  const requiere4x4ORescate =
+    textoMision.includes('barrizal') ||
+    textoMision.includes('lodo') ||
+    textoMision.includes('atasco') ||
+    textoMision.includes('camión') ||
+    textoMision.includes('winche') ||
+    textoMision.includes('remolque') ||
+    textoMision.includes('derrumbe') ||
+    textoMision.includes('extrema')
+
+  const requiereCargaPesada =
+    textoMision.includes('trasteo') ||
+    textoMision.includes('mudanza') ||
+    textoMision.includes('leche') ||
+    textoMision.includes('ganado') ||
+    textoMision.includes('mercado') ||
+    textoMision.includes('tejas')
+
+  // Evaluar cada vehículo
+  const puntuados = pool.map((v) => {
+    let score = 0
+    const corpusV = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.capacidadTexto || ''}`.toLowerCase()
+
+    const tiene4x4 = corpusV.includes('4x4') || corpusV.includes('winche') || corpusV.includes('trocha') || corpusV.includes('land cruiser') || corpusV.includes('hilux')
+    const tienePasajeros = corpusV.includes('bus') || corpusV.includes('buseta') || corpusV.includes('van') || corpusV.includes('pasajero') || corpusV.includes('escolar') || corpusV.includes('troop carrier')
+    const tienePesado = corpusV.includes('quinta rueda') || corpusV.includes('5ta rueda') || corpusV.includes('tractomula') || corpusV.includes('kodiak') || corpusV.includes('camion')
+
+    if (requierePasajeros && tienePasajeros) score += 50
+    if (requiere4x4ORescate && tiene4x4) score += 60
+    if (requiereCargaPesada && tienePesado) score += 40
+
+    // Si tiene buen nivel de combustible
+    score += (v.nivelCombustiblePorc || 50) * 0.1
+
+    return { vehiculo: v, score, tiene4x4, tienePasajeros, tienePesado }
+  })
+
+  puntuados.sort((a, b) => b.score - a.score)
+  const mejor = puntuados[0]?.vehiculo || pool[0]
+
+  let motivo = `Gema seleccionó ${mejor.marca} ${mejor.linea}`
+  if (requierePasajeros && (mejor.notasCashmet || '').includes('pasajeros')) {
+    motivo += ` porque tus notas en CashMet indican capacidad de pasajeros, ideal para la ruta escolar.`
+  } else if (requiere4x4ORescate && (mejor.notasCashmet || '').includes('winche')) {
+    motivo += ` porque tus notas en CashMet confirman winche y tracción para terrenos de alto barro.`
+  } else if (requiereCargaPesada) {
+    motivo += ` por su volumen de carga y torque para transporte pesado campesino.`
+  } else {
+    motivo += ` por estar listo en base con tanque al ${mejor.nivelCombustiblePorc}%.`
+  }
+
+  return {
+    vehiculoElegido: mejor,
+    motivoGema: motivo,
+    candidatosSecundarios: puntuados.slice(1, 4).map((p) => p.vehiculo),
   }
 }
 

@@ -204,6 +204,11 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     linea: v.linea,
     modelo: v.modelo,
     tipo,
+    notasCashmet: v.notas,
+    carroceria: v.carroceria,
+    claseVehiculo: v.claseVehiculo,
+    capacidadTexto: v.capacidad,
+    cilindraje: v.cilindraje,
     disponibleParaTrabajo:
       extra?.disponibleParaTrabajo ?? (v.activo !== false && v.estado !== 'Vendido' && v.estado !== 'Dañado'),
     investigadoIA: extra?.investigadoIA ?? false,
@@ -349,7 +354,15 @@ export async function investigarVehiculosPendientesIA(): Promise<{
   const procesadosNombres: string[] = []
 
   for (const v of pendientes) {
-    const ficha = investigarFichaVehiculoIA(v.marca, v.linea, v.tipo, v.modelo)
+    const ficha = investigarFichaVehiculoIA(
+      v.marca,
+      v.linea,
+      v.tipo,
+      v.modelo,
+      v.notasCashmet,
+      v.carroceria,
+      v.capacidadTexto
+    )
     guardarExtraVehiculo(v.id, {
       investigadoIA: true,
       fichaInvestigadaNota: ficha.fichaInvestigadaNota,

@@ -190,6 +190,14 @@ export default function FlotaTab({
                 </div>
               )}
 
+              {/* Notas y configuración heredadas de CashMet (4x4, 5ta rueda, winche, etc.) */}
+              {v.notasCashmet && (
+                <div className="rounded-xl border border-amber-400/20 bg-amber-500/[0.05] p-2 text-[10px] text-amber-200/90 leading-relaxed">
+                  <span className="font-bold text-amber-300">📝 Configuración y Notas CashMet: </span>
+                  {v.notasCashmet}
+                </div>
+              )}
+
               {/* Indicador gráfico de tanque de combustible */}
               <TanqueCombustible
                 vehiculo={v}

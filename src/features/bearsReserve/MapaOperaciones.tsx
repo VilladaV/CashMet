@@ -51,10 +51,9 @@ export default function MapaOperaciones({
       zoomControl: true,
     })
 
-    // Capa de mosaicos oscuros tácticos (CartoDB Dark Matter)
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-      subdomains: 'abcd',
+    // Capa de mosaicos oficial OpenStreetMap (100% libre, sin requerimiento de API key)
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19,
     }).addTo(map)
 
@@ -302,7 +301,10 @@ export default function MapaOperaciones({
 
       {/* Contenedor del mapa Leaflet */}
       <div className="relative overflow-hidden rounded-3xl border border-white/10 shadow-2xl">
-        <div ref={mapContainerRef} className="h-[440px] w-full bg-[#0b1320]" />
+        <div
+          ref={mapContainerRef}
+          className="h-[440px] w-full bg-[#0b1320] [&_.leaflet-tile]:brightness-[0.68] [&_.leaflet-tile]:invert [&_.leaflet-tile]:contrast-[2.2] [&_.leaflet-tile]:hue-rotate-[195deg] [&_.leaflet-tile]:saturate-[0.35]"
+        />
 
         {/* Leyenda flotante en esquina */}
         <div className="pointer-events-none absolute bottom-3 left-3 z-[400] flex flex-col gap-1 rounded-2xl border border-white/10 bg-black/75 p-2.5 text-[10px] text-mist-300 backdrop-blur-md">

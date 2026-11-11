@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
 import { calcularDistanciaRealDesdeBase, BASE_BEARS_RESERVE } from './geo'
+import { seleccionarVehiculosOptimosMision } from './gemaEngine'
 
 let counterMision = 1
 function crearMisionId(): string {
@@ -45,6 +46,7 @@ interface Props {
     resultado?: 'exito' | 'parcial' | 'fallida_dificultad'
   ) => Promise<{ cronica: string; tanqueosAutomaticos: any[] }>
   onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId: string) => void
+  onActualizarRuta?: (ruta: RutaHabitual) => void
 }
 
 type SubVistaMisiones = 'radar' | 'mapa' | 'cronicas' | 'rutas_habituales'
@@ -58,6 +60,7 @@ export default function MisionesTab({
   onCrearMision,
   onCompletarMision,
   onCumplirRutaHabitual,
+  onActualizarRuta,
 }: Props) {
   const [subVista, setSubVista] = useState<SubVistaMisiones>('radar')
   const [filtroRadar, setFiltroRadar] = useState<'todos' | 'caldas' | 'otros'>('todos')
@@ -80,10 +83,26 @@ export default function MisionesTab({
   const [esProgramada, setEsProgramada] = useState(false)
   const [fechaMision, setFechaMision] = useState(hoyFechaISO)
 
-  // Despacho desde evento del Radar
+  // Despacho desde evento del Radar con Selección Inteligente de Gema
   const despacharDesdeEvento = (ev: EventoRadarLocal) => {
-    const vehiculosHab = vehiculos.filter((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 15)
-    const vehiculoElegido = vehiculosHab[0] || vehiculos[0]
+    const tipoDeducido =
+      ev.titulo.toLowerCase().includes('camión') || ev.titulo.toLowerCase().includes('barrizal')
+        ? 'rescate_barrizal'
+        : ev.titulo.toLowerCase().includes('trasteo')
+          ? 'transporte_humanitario'
+          : 'auxilio_comunitario'
+
+    // Gema analiza el evento cruzándolo con las notas de CashMet (4x4, winche, 5ta rueda, pasajeros)
+    const seleccionGema = seleccionarVehiculosOptimosMision(
+      {
+        titulo: ev.titulo,
+        tipo: tipoDeducido,
+        impactoSocial: ev.resumen,
+        terreno: 'trocha_moderada',
+      },
+      vehiculos
+    )
+    const vehiculoElegido = seleccionGema.vehiculoElegido
     const activos = empleados.filter((e) => e.activo)
 
     const geo =
@@ -94,11 +113,7 @@ export default function MisionesTab({
     const nueva: MisionComunitaria = {
       id: crearMisionId(),
       titulo: ev.titulo,
-      tipo: ev.titulo.toLowerCase().includes('camión') || ev.titulo.toLowerCase().includes('barrizal')
-        ? 'rescate_barrizal'
-        : ev.titulo.toLowerCase().includes('trasteo')
-          ? 'transporte_humanitario'
-          : 'auxilio_comunitario',
+      tipo: tipoDeducido,
       prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
       origen: BASE_BEARS_RESERVE.nombre,
       destino: ev.lugar,
@@ -125,8 +140,8 @@ export default function MisionesTab({
     }
 
     onCrearMision(nueva)
-    setFeedback(`🚨 ¡Misión activada desde Finca El Guadual! "${nueva.titulo}" (${geo.distanciaKmTotalIdaYVuelta} km reales).`)
-    window.setTimeout(() => setFeedback(''), 4500)
+    setFeedback(`🚨 ¡Misión activada! ${seleccionGema.motivoGema} (${geo.distanciaKmTotalIdaYVuelta} km reales desde Finca El Guadual).`)
+    window.setTimeout(() => setFeedback(''), 5500)
   }
 
   // Despachar misión manual
@@ -644,6 +659,32 @@ export default function MisionesTab({
                       <span>
                         {r.origen} ↔ {r.destino}
                       </span>
+                    </div>
+
+                    {/* Selector y cambio de vehículo asignado para la ruta habitual */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                      <span className="text-[10px] font-bold text-mist-400">Vehículo asignado a esta ruta:</span>
+                      <select
+                        value={r.vehiculoIdDefault || ''}
+                        onChange={(e) => {
+                          const nuevoId = e.target.value
+                          const rutaActualizada: RutaHabitual = {
+                            ...r,
+                            vehiculoIdDefault: nuevoId || undefined,
+                          }
+                          if (onActualizarRuta) onActualizarRuta(rutaActualizada)
+                        }}
+                        className="field-dark h-7 rounded-lg px-2 text-[10px] font-semibold text-amber-200"
+                      >
+                        <option value="">Auto-asignar por IA (Gema según capacidad)</option>
+                        {vehiculos
+                          .filter((v) => v.disponibleParaTrabajo)
+                          .map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.marca} {v.linea} {v.placa ? `(${v.placa})` : ''}
+                            </option>
+                          ))}
+                      </select>
                     </div>
 
                     <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
