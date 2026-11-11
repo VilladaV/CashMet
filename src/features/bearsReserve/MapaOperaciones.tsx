@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import {
@@ -8,7 +8,7 @@ import {
   PARADAS_RUTA_ESCOLAR_VESPERTINA,
 } from './geo'
 import { trazarRutaCarreteraGps } from './ruteoGps'
-import { guardarRutaHabitual } from './repo'
+import { guardarRutaHabitual, listarRutasHabituales } from './repo'
 import type { EventoRadarLocal, MisionComunitaria, RutaHabitual } from './types'
 import {
   Navigation,
@@ -31,7 +31,7 @@ interface Props {
   onActualizarRuta?: (ruta: RutaHabitual) => void
 }
 
-type FiltroCapa = 'todos' | 'manana' | 'tarde' | 'radar'
+type FiltroCapa = 'ruta' | 'todos' | 'radar'
 
 export default function MapaOperaciones({
   eventosRadar,
@@ -48,10 +48,22 @@ export default function MapaOperaciones({
   // Rutas editadas localmente en memoria para renderizado instantáneo
   const [rutasEditadasLocales, setRutasEditadasLocales] = useState<Record<string, RutaHabitual>>({})
 
-  // Fusión reactiva de rutas del padre con las ediciones inmediatas
-  const rutasLocales = rutasHabituales.map((r) => rutasEditadasLocales[r.id] || r)
+  // Fusión reactiva y resiliente de rutas del padre con las ediciones inmediatas y almacenamiento local
+  const rutasLocales = useMemo(() => {
+    const base = rutasHabituales.length > 0 ? rutasHabituales : listarRutasHabituales()
+    const fusion = base.map((r) => rutasEditadasLocales[r.id] || r)
+    for (const key of Object.keys(rutasEditadasLocales)) {
+      if (!fusion.some((r) => r.id === key)) {
+        fusion.push(rutasEditadasLocales[key])
+      }
+    }
+    return fusion
+  }, [rutasHabituales, rutasEditadasLocales])
 
-  const [capaActiva, setCapaActiva] = useState<FiltroCapa>('manana')
+  const [rutaSeleccionadaId, setRutaSeleccionadaId] = useState<string>(
+    () => rutasHabituales[0]?.id || 'rut-escolar-manana'
+  )
+  const [capaActiva, setCapaActiva] = useState<FiltroCapa>('ruta')
   const [puntoInspeccionado, setPuntoInspeccionado] = useState<{
     titulo: string
     lugar: string
@@ -110,22 +122,24 @@ export default function MapaOperaciones({
 
   // Iniciar modo edición para una ruta específica
   const iniciarEdicionRuta = useCallback(
-    (rutaId: string) => {
+    (rutaId?: string) => {
+      const targetId = rutaId || rutaSeleccionadaId
       const ruta =
-        rutasLocales.find((r) => r.id === rutaId) ||
-        rutasHabituales.find((r) => r.id === rutaId) ||
+        rutasLocales.find((r) => r.id === targetId) ||
+        rutasHabituales.find((r) => r.id === targetId) ||
         rutasLocales[0] ||
         rutasHabituales[0]
       if (!ruta) return
 
       const paradasIniciales =
-        ruta.coordenadasParadas && ruta.coordenadasParadas.length > 0
+        ruta.coordenadasParadas && ruta.coordenadasParadas.length >= 2
           ? [...ruta.coordenadasParadas]
           : ruta.tipoHorario === 'tarde'
             ? [...PARADAS_RUTA_ESCOLAR_VESPERTINA]
             : [...PARADAS_RUTA_ESCOLAR_MATUTINA]
 
       setRutaIdEditando(ruta.id)
+      setRutaSeleccionadaId(ruta.id)
       setParadasEditando(paradasIniciales)
       setDistanciaGpsLive(ruta.distanciaKm || 38.4)
       setTiempoGpsLive(ruta.minutosRodamiento || 55)
@@ -138,7 +152,7 @@ export default function MapaOperaciones({
         }
       })
     },
-    [rutasLocales, rutasHabituales]
+    [rutasLocales, rutasHabituales, rutaSeleccionadaId]
   )
 
   // Guardar trazado editado con persistencia sincrónica directa
@@ -165,17 +179,12 @@ export default function MapaOperaciones({
 
     // 2. Actualizar estado local de inmediato en este componente
     setRutasEditadasLocales((prev) => ({ ...prev, [rutaGuardada.id]: rutaGuardada }))
+    setRutaSeleccionadaId(rutaGuardada.id)
+    setCapaActiva('ruta')
 
     // 3. Notificar al padre (BearsReservePortal)
     if (onActualizarRuta) {
       onActualizarRuta(rutaGuardada)
-    }
-
-    // 4. Enfocar la vista normal en la ruta que acabamos de guardar
-    if (rutaGuardada.tipoHorario === 'tarde') {
-      setCapaActiva('tarde')
-    } else {
-      setCapaActiva('manana')
     }
 
     setFeedbackMensaje(
@@ -405,132 +414,93 @@ export default function MapaOperaciones({
 
     // ------------------- MODO VISTA NORMAL -------------------
     // 2. RUTAS HABITUALES / ESCOLARES (Usa siempre rutasLocales con los cambios del usuario)
-    if (capaActiva === 'todos' || capaActiva === 'manana') {
-      const rutaManana =
-        rutasLocales.find((r) => r.id === 'rut-escolar-manana') ||
-        rutasLocales.find((r) => r.tipoHorario === 'manana')
-      const paradasManana =
-        rutaManana?.coordenadasParadas && rutaManana.coordenadasParadas.length > 0
-          ? rutaManana.coordenadasParadas
-          : PARADAS_RUTA_ESCOLAR_MATUTINA
+    if (capaActiva === 'todos' || capaActiva === 'ruta') {
+      const rutasParaDibujar =
+        capaActiva === 'todos'
+          ? rutasLocales
+          : [rutasLocales.find((r) => r.id === rutaSeleccionadaId) || rutasLocales[0]].filter(
+              (r): r is RutaHabitual => Boolean(r)
+            )
 
-      const lineaManana = L.polyline(
-        paradasManana.map((p) => [p.lat, p.lng]),
-        {
-          color: '#38bdf8',
-          weight: 4.5,
-          opacity: 0.95,
-        }
-      ).bindTooltip(`Ruta Escolar Matutina 06:00 (${rutaManana?.distanciaKm || 38.4} km)`, { sticky: true })
-      layerGroup.addLayer(lineaManana)
+      rutasParaDibujar.forEach((ruta, rIdx) => {
+        if (!ruta) return
+        const paradasRuta =
+          ruta.coordenadasParadas && ruta.coordenadasParadas.length >= 2
+            ? ruta.coordenadasParadas
+            : ruta.tipoHorario === 'tarde'
+              ? PARADAS_RUTA_ESCOLAR_VESPERTINA
+              : PARADAS_RUTA_ESCOLAR_MATUTINA
 
-      // Cargar trazado exacto por carreteras reales
-      void trazarRutaCarreteraGps(paradasManana).then((resGps) => {
-        if (resGps && resGps.coordenadas.length > 0) {
-          lineaManana.setLatLngs(resGps.coordenadas)
-        }
-      })
+        const paleta = ['#38bdf8', '#c084fc', '#10b981', '#f59e0b', '#ec4899', '#06b6d4']
+        const color =
+          ruta.tipoHorario === 'tarde'
+            ? '#c084fc'
+            : ruta.tipoHorario === 'manana'
+              ? '#38bdf8'
+              : paleta[rIdx % paleta.length]
 
-      // Marcadores visibles para cada parada guardada de la ruta matutina
-      paradasManana.forEach((p, idx) => {
-        if (idx === 0 || idx === paradasManana.length - 1) return
-        const stopIcon = L.divIcon({
-          className: 'custom-stop-icon',
-          html: `
-            <div style="
-              background: #38bdf8;
-              color: #04241a;
-              font-weight: 900;
-              font-size: 10px;
-              width: 22px;
-              height: 22px;
-              border-radius: 50%;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              border: 2px solid white;
-              box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
-            ">
-              #${idx}
-            </div>
-          `,
-          iconSize: [22, 22],
-          iconAnchor: [11, 11],
+        const linea = L.polyline(
+          paradasRuta.map((p) => [p.lat, p.lng]),
+          {
+            color,
+            weight: 4.5,
+            opacity: 0.95,
+            dashArray: ruta.tipoHorario === 'tarde' ? '6, 6' : undefined,
+          }
+        ).bindTooltip(`${ruta.nombre} (${ruta.distanciaKm || 0} km)`, { sticky: true })
+        layerGroup.addLayer(linea)
+
+        // Cargar trazado exacto por carreteras reales
+        void trazarRutaCarreteraGps(paradasRuta).then((resGps) => {
+          if (resGps && resGps.coordenadas.length > 0) {
+            linea.setLatLngs(resGps.coordenadas)
+          }
         })
-        const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
-          <div style="color: #0f172a; font-size: 11px; font-family: sans-serif;">
-            <b>🚌 Parada #${idx} (${rutaManana?.nombre || 'Ruta Matutina'}):</b><br/>
-            <span style="font-weight: bold; color: #0284c7;">${p.nombre}</span><br/>
-            <span style="font-size: 10px; color: #64748b;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
-          </div>
-        `)
-        layerGroup.addLayer(m)
-      })
-    }
 
-    // Ruta Vespertina (Tarde)
-    if (capaActiva === 'todos' || capaActiva === 'tarde') {
-      const rutaTarde =
-        rutasLocales.find((r) => r.id === 'rut-escolar-tarde') ||
-        rutasLocales.find((r) => r.tipoHorario === 'tarde')
-      const paradasTarde =
-        rutaTarde?.coordenadasParadas && rutaTarde.coordenadasParadas.length > 0
-          ? rutaTarde.coordenadasParadas
-          : PARADAS_RUTA_ESCOLAR_VESPERTINA
+        // Marcadores visibles para cada parada guardada de la ruta
+        if (capaActiva === 'ruta' || ruta.id === rutaSeleccionadaId) {
+          paradasRuta.forEach((p, idx) => {
+            const esSalida = idx === 0
+            const esRetorno = idx === paradasRuta.length - 1
+            const badgeBg = esSalida ? '#f59e0b' : esRetorno ? '#10b981' : color
+            const label = esSalida ? 'Salida' : esRetorno ? 'Retorno' : `#${idx}`
 
-      const lineaTarde = L.polyline(
-        paradasTarde.map((p) => [p.lat, p.lng]),
-        {
-          color: '#c084fc',
-          weight: 3.5,
-          opacity: 0.9,
-          dashArray: '6, 6',
-        }
-      ).bindTooltip(`Ruta Escolar Vespertina 15:00 (${rutaTarde?.distanciaKm || 38.4} km)`, { sticky: true })
-      layerGroup.addLayer(lineaTarde)
-
-      void trazarRutaCarreteraGps(paradasTarde).then((resGps) => {
-        if (resGps && resGps.coordenadas.length > 0) {
-          lineaTarde.setLatLngs(resGps.coordenadas)
-        }
-      })
-
-      if (capaActiva === 'tarde') {
-        paradasTarde.forEach((p, idx) => {
-          if (idx === 0 || idx === paradasTarde.length - 1) return
-          const stopIcon = L.divIcon({
-            className: 'custom-stop-icon',
-            html: `
-              <div style="
-                background: #c084fc;
-                color: #1e0a3c;
-                font-weight: 900;
-                font-size: 10px;
-                width: 22px;
-                height: 22px;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                border: 2px solid white;
-                box-shadow: 0 0 10px rgba(192, 132, 252, 0.7);
-              ">
-                #${idx}
+            const stopIcon = L.divIcon({
+              className: 'custom-stop-icon',
+              html: `
+                <div style="
+                  background: ${badgeBg};
+                  color: #04241a;
+                  font-weight: 900;
+                  font-size: ${esSalida || esRetorno ? '10px' : '11px'};
+                  padding: ${esSalida || esRetorno ? '2px 7px' : '0'};
+                  min-width: ${esSalida || esRetorno ? 'auto' : '24px'};
+                  height: 24px;
+                  border-radius: ${esSalida || esRetorno ? '12px' : '50%'};
+                  display: flex;
+                  align-items: center;
+                  justify-content: center;
+                  border: 2px solid white;
+                  box-shadow: 0 0 10px ${badgeBg};
+                  white-space: nowrap;
+                ">
+                  ${label}
+                </div>
+              `,
+              iconSize: [24, 24],
+              iconAnchor: [12, 12],
+            })
+            const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
+              <div style="color: #0f172a; font-size: 11px; font-family: sans-serif;">
+                <b>🚌 Parada ${label} (${ruta.nombre}):</b><br/>
+                <span style="font-weight: bold; color: #0284c7;">${p.nombre}</span><br/>
+                <span style="font-size: 10px; color: #64748b;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
               </div>
-            `,
-            iconSize: [22, 22],
-            iconAnchor: [11, 11],
+            `)
+            layerGroup.addLayer(m)
           })
-          const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
-            <div style="color: #0f172a; font-size: 11px; font-family: sans-serif;">
-              <b>🎒 Parada #${idx} (${rutaTarde?.nombre || 'Ruta Vespertina'}):</b><br/>
-              <span style="font-weight: bold; color: #7c3aed;">${p.nombre}</span><br/>
-              <span style="font-size: 10px; color: #64748b;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
-            </div>
-          `)
-          layerGroup.addLayer(m)
-        })
-      }
+        }
+      })
     }
 
     // 3. EVENTOS DEL RADAR
@@ -644,6 +614,7 @@ export default function MapaOperaciones({
     misiones,
     rutasLocales,
     capaActiva,
+    rutaSeleccionadaId,
     misionSeleccionada,
     onSeleccionarEvento,
     modoEdicionRuta,
@@ -652,7 +623,7 @@ export default function MapaOperaciones({
 
   // Obtener datos de la ruta activa para el banner informativo
   const rutaActivaActual =
-    rutasLocales.find((r) => (capaActiva === 'tarde' ? r.id === 'rut-escolar-tarde' : r.id === 'rut-escolar-manana')) ||
+    rutasLocales.find((r) => r.id === rutaSeleccionadaId) ||
     rutasLocales[0]
 
   return (
@@ -685,6 +656,37 @@ export default function MapaOperaciones({
         <div className="flex flex-wrap items-center gap-1.5">
           {!modoEdicionRuta ? (
             <>
+              {/* Selector de Ruta para visualizar en el mapa */}
+              <div className="flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-500/10 px-2 py-1">
+                <span className="text-[10px] font-bold text-sky-300">Ruta:</span>
+                <select
+                  value={rutaSeleccionadaId}
+                  onChange={(e) => {
+                    setRutaSeleccionadaId(e.target.value)
+                    setCapaActiva('ruta')
+                  }}
+                  className="bg-transparent text-[11px] font-bold text-white outline-none cursor-pointer max-w-[210px] truncate"
+                >
+                  {rutasLocales.map((r) => (
+                    <option key={r.id} value={r.id} className="bg-night-900 text-white">
+                      {r.nombre} ({r.distanciaKm || 0} km)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setCapaActiva('ruta')}
+                className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
+                  capaActiva === 'ruta'
+                    ? 'bg-sky-400/25 text-sky-200 border border-sky-400/40 shadow-sm'
+                    : 'bg-white/[0.04] text-mist-400 hover:text-white'
+                }`}
+              >
+                📍 Ver Ruta
+              </button>
+
               <button
                 type="button"
                 onClick={() => setCapaActiva('todos')}
@@ -697,28 +699,7 @@ export default function MapaOperaciones({
                 <Layers className="h-3 w-3 inline mr-1" />
                 Ver Todo
               </button>
-              <button
-                type="button"
-                onClick={() => setCapaActiva('manana')}
-                className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
-                  capaActiva === 'manana'
-                    ? 'bg-sky-400/25 text-sky-200 border border-sky-400/40 shadow-sm'
-                    : 'bg-white/[0.04] text-mist-400 hover:text-white'
-                }`}
-              >
-                🚌 Ruta Mañana 06:00
-              </button>
-              <button
-                type="button"
-                onClick={() => setCapaActiva('tarde')}
-                className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
-                  capaActiva === 'tarde'
-                    ? 'bg-purple-400/25 text-purple-200 border border-purple-400/40 shadow-sm'
-                    : 'bg-white/[0.04] text-mist-400 hover:text-white'
-                }`}
-              >
-                🎒 Ruta Tarde 15:00
-              </button>
+
               <button
                 type="button"
                 onClick={() => setCapaActiva('radar')}
@@ -735,9 +716,7 @@ export default function MapaOperaciones({
               {/* BOTÓN DESTACADO PARA EDITAR ARRASTRANDO EN EL MAPA */}
               <button
                 type="button"
-                onClick={() =>
-                  iniciarEdicionRuta(capaActiva === 'tarde' ? 'rut-escolar-tarde' : 'rut-escolar-manana')
-                }
+                onClick={() => iniciarEdicionRuta(rutaSeleccionadaId)}
                 className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-sky-400/40 bg-gradient-to-r from-sky-500/20 to-teal-500/20 px-3 py-1 text-[11px] font-black text-sky-200 hover:brightness-125 transition"
               >
                 <Move className="h-3.5 w-3.5 text-sky-400" />
