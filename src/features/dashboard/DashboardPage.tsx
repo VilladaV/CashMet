@@ -93,7 +93,7 @@ const pieza = {
   visible: { opacity: 1, y: 0, transition: { type: 'spring' as const, stiffness: 260, damping: 26 } },
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => void }) {
   const [total, setTotal] = useState<number | null>(null)
   const [numCuentas, setNumCuentas] = useState(0)
   const [movs, setMovs] = useState<MovimientoDoc[]>([])
@@ -253,16 +253,30 @@ export default function DashboardPage() {
               <Sparkles className="h-3.5 w-3.5" />
               Patrimonio total
             </span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={cargar}
-              disabled={cargando}
-              className="h-8 cursor-pointer gap-1.5 border-white/10 bg-white/[0.05] px-3 text-xs text-mist-300 hover:bg-white/10 hover:text-white"
-            >
-              <RefreshCw className={`h-3 w-3 ${cargando ? 'animate-spin' : ''}`} />
-              <span>{cargando ? 'Actualizando' : 'Actualizar'}</span>
-            </Button>
+            <div className="flex items-center gap-2">
+              {onAbrirBears && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={onAbrirBears}
+                  className="h-8 cursor-pointer gap-1.5 border-amber-400/25 bg-amber-400/[0.08] px-2.5 text-xs font-bold text-amber-300 hover:bg-amber-400/20 hover:text-white"
+                  title="Abrir Bear's Reserve"
+                >
+                  <span>🐻</span>
+                  <span className="hidden sm:inline">Bear&apos;s Reserve</span>
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={cargar}
+                disabled={cargando}
+                className="h-8 cursor-pointer gap-1.5 border-white/10 bg-white/[0.05] px-3 text-xs text-mist-300 hover:bg-white/10 hover:text-white"
+              >
+                <RefreshCw className={`h-3 w-3 ${cargando ? 'animate-spin' : ''}`} />
+                <span>{cargando ? 'Actualizando' : 'Actualizar'}</span>
+              </Button>
+            </div>
           </div>
 
           <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-end">

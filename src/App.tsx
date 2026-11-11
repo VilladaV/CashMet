@@ -14,6 +14,7 @@ import NominaPage from './features/nomina/NominaPage'
 import RecurrentesPage from './features/recurrentes/RecurrentesPage'
 import BackupPage from './features/backup/BackupPage'
 import ImpuestosPage from './features/impuestos/ImpuestosPage'
+import BearsReservePortal from './features/bearsReserve/BearsReservePortal'
 import {
   MessageSquare,
   LayoutDashboard,
@@ -91,6 +92,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('chat')
   const [menuGestionAbierto, setMenuGestionAbierto] = useState(false)
   const [burbujas, setBurbujas] = useState(false)
+  const [modoBears, setModoBears] = useState(false)
 
   const cambiar = (t: Tab) => {
     setBurbujas(false)
@@ -103,6 +105,10 @@ export default function App() {
       setTab(t)
       window.scrollTo({ top: 0 })
     })
+  }
+
+  if (modoBears) {
+    return <BearsReservePortal onVolverACashmet={() => setModoBears(false)} />
   }
 
   const primaryTabs = TABS.filter((t) => t.category === 'primary')
@@ -133,6 +139,14 @@ export default function App() {
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            <button
+              onClick={() => setModoBears(true)}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 px-2.5 py-1 text-[11px] font-bold text-amber-300 transition hover:bg-amber-400/20 hover:border-amber-400/40"
+              title="Entrar a Bear's Reserve · Flota y Guardia Comunitaria"
+            >
+              <span>🐻</span>
+              <span className="hidden sm:inline">Bear&apos;s Reserve</span>
+            </button>
             <div className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-bold text-emerald-300">
               <span className="animate-pulse-live h-1.5 w-1.5 rounded-full bg-emerald-400" />
               <span>COP · En vivo</span>
@@ -238,7 +252,7 @@ export default function App() {
         {/* CONTENIDO */}
         <main className={`min-w-0 flex-1 ${tab === 'chat' ? 'py-0 sm:py-5' : 'py-4 sm:py-5'}`}>
           {tab === 'chat' && <ChatPage />}
-          {tab === 'dashboard' && <DashboardPage />}
+          {tab === 'dashboard' && <DashboardPage onAbrirBears={() => setModoBears(true)} />}
           {tab === 'calendario' && <CalendarioPage />}
           {tab === 'cuentas' && <CuentasPage />}
           {tab === 'deudas' && <DeudasPage />}
