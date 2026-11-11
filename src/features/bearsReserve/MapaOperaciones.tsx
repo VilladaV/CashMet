@@ -7,6 +7,7 @@ import {
   PARADAS_RUTA_ESCOLAR_MATUTINA,
   PARADAS_RUTA_ESCOLAR_VESPERTINA,
 } from './geo'
+import { trazarRutaCarreteraGps } from './ruteoGps'
 import type { EventoRadarLocal, MisionComunitaria, RutaHabitual } from './types'
 import { Navigation, Clock, Radio, Layers } from 'lucide-react'
 
@@ -51,7 +52,7 @@ export default function MapaOperaciones({
       zoomControl: true,
     })
 
-    // Capa de mosaicos oficial OpenStreetMap (100% libre, sin requerimiento de API key)
+    // Capa de mosaicos oficial OpenStreetMap (100% libre, sin API key)
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
       maxZoom: 19,
@@ -67,7 +68,7 @@ export default function MapaOperaciones({
     }
   }, [])
 
-  // Renderizar capas y marcadores cuando cambian los datos o el filtro
+  // Renderizar capas y trazado GPS por carreteras
   useEffect(() => {
     const map = mapInstanceRef.current
     const layerGroup = routeLayerGroupRef.current
@@ -111,45 +112,70 @@ export default function MapaOperaciones({
       `)
     layerGroup.addLayer(baseMarker)
 
-    // 2. CAPAS DE RUTAS ESCOLARES (Puntos y polilíneas)
+    // 2. CAPAS DE RUTAS HABITUALES / ESCOLARES (Delineadas por carreteras reales con GPS OSRM)
     if (capaActiva === 'todos' || capaActiva === 'escolares') {
-      const coordsMatutina: [number, number][] = PARADAS_RUTA_ESCOLAR_MATUTINA.map((p) => [p.lat, p.lng])
-      const lineaEscolarManana = L.polyline(coordsMatutina, {
-        color: '#38bdf8',
-        weight: 3.5,
-        opacity: 0.85,
-        dashArray: '6, 6',
-      }).bindTooltip('Ruta Escolar Matutina 06:00 AM (38.4 km)', { sticky: true })
-      layerGroup.addLayer(lineaEscolarManana)
+      const rutaManana = rutasHabituales.find((r) => r.tipoHorario === 'manana')
+      const paradasManana =
+        rutaManana?.coordenadasParadas && rutaManana.coordenadasParadas.length > 0
+          ? rutaManana.coordenadasParadas
+          : PARADAS_RUTA_ESCOLAR_MATUTINA
 
-      PARADAS_RUTA_ESCOLAR_MATUTINA.forEach((p, idx) => {
-        if (idx === 0 || idx === PARADAS_RUTA_ESCOLAR_MATUTINA.length - 1) return
+      const fallbackCoordsManana: [number, number][] = paradasManana.map((p) => [p.lat, p.lng])
+      const lineaManana = L.polyline(fallbackCoordsManana, {
+        color: '#38bdf8',
+        weight: 4,
+        opacity: 0.9,
+      }).bindTooltip(`Ruta Escolar Matutina 06:00 (${rutaManana?.distanciaKm || 38.4} km)`, { sticky: true })
+      layerGroup.addLayer(lineaManana)
+
+      // Cargar trazado exacto por carreteras reales
+      void trazarRutaCarreteraGps(paradasManana).then((resGps) => {
+        if (resGps && resGps.coordenadas.length > 0) {
+          lineaManana.setLatLngs(resGps.coordenadas)
+        }
+      })
+
+      // Marcadores de paradas intermedias
+      paradasManana.forEach((p, idx) => {
+        if (idx === 0 || idx === paradasManana.length - 1) return
         const stopIcon = L.divIcon({
           className: 'custom-stop-icon',
-          html: `<div style="background: #38bdf8; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>`,
-          iconSize: [10, 10],
-          iconAnchor: [5, 5],
+          html: `<div style="background: #38bdf8; width: 11px; height: 11px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 8px #38bdf8;"></div>`,
+          iconSize: [11, 11],
+          iconAnchor: [5.5, 5.5],
         })
         const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
           <div style="color: #0f172a; font-size: 11px;">
-            <b>🚌 Parada Escolar Matutina:</b><br/>${p.nombre}
+            <b>🚌 Parada Ruta Matutina:</b><br/>${p.nombre}
           </div>
         `)
         layerGroup.addLayer(m)
       })
 
-      // Vespertina
-      const coordsVespertina: [number, number][] = PARADAS_RUTA_ESCOLAR_VESPERTINA.map((p) => [p.lat, p.lng])
-      const lineaEscolarTarde = L.polyline(coordsVespertina, {
-        color: '#a855f7',
-        weight: 3,
-        opacity: 0.75,
-        dashArray: '4, 8',
-      }).bindTooltip('Ruta Escolar Vespertina 15:00 (38.4 km)', { sticky: true })
-      layerGroup.addLayer(lineaEscolarTarde)
+      // Ruta de la Tarde
+      const rutaTarde = rutasHabituales.find((r) => r.tipoHorario === 'tarde')
+      const paradasTarde =
+        rutaTarde?.coordenadasParadas && rutaTarde.coordenadasParadas.length > 0
+          ? rutaTarde.coordenadasParadas
+          : PARADAS_RUTA_ESCOLAR_VESPERTINA
+
+      const fallbackCoordsTarde: [number, number][] = paradasTarde.map((p) => [p.lat, p.lng])
+      const lineaTarde = L.polyline(fallbackCoordsTarde, {
+        color: '#c084fc',
+        weight: 3.5,
+        opacity: 0.85,
+        dashArray: '5, 5',
+      }).bindTooltip(`Ruta Escolar Vespertina 15:00 (${rutaTarde?.distanciaKm || 38.4} km)`, { sticky: true })
+      layerGroup.addLayer(lineaTarde)
+
+      void trazarRutaCarreteraGps(paradasTarde).then((resGps) => {
+        if (resGps && resGps.coordenadas.length > 0) {
+          lineaTarde.setLatLngs(resGps.coordenadas)
+        }
+      })
     }
 
-    // 3. EVENTOS DEL RADAR
+    // 3. EVENTOS DEL RADAR (Trazado por carretera hacia la emergencia)
     if (capaActiva === 'todos' || capaActiva === 'radar') {
       eventosRadar.forEach((ev) => {
         if (!ev.lat || !ev.lng) return
@@ -208,7 +234,8 @@ export default function MapaOperaciones({
 
         layerGroup.addLayer(marker)
 
-        // Trazado de ruta desde Base hasta la contingencia
+        // Línea inicial de ruta
+        const puntosMision = [BASE_BEARS_RESERVE, { lat: ev.lat, lng: ev.lng }]
         const rutaContingencia = L.polyline(
           [
             [BASE_BEARS_RESERVE.lat, BASE_BEARS_RESERVE.lng],
@@ -216,12 +243,19 @@ export default function MapaOperaciones({
           ],
           {
             color,
-            weight: 2,
-            opacity: 0.6,
-            dashArray: '3, 6',
+            weight: 2.5,
+            opacity: 0.75,
+            dashArray: '4, 4',
           }
         )
         layerGroup.addLayer(rutaContingencia)
+
+        // Trazo GPS por carreteras reales hacia la emergencia
+        void trazarRutaCarreteraGps(puntosMision).then((resGps) => {
+          if (resGps && resGps.coordenadas.length > 0) {
+            rutaContingencia.setLatLngs(resGps.coordenadas)
+          }
+        })
       })
     }
 
@@ -234,11 +268,20 @@ export default function MapaOperaciones({
         ],
         {
           color: '#10b981',
-          weight: 4,
+          weight: 4.5,
           opacity: 0.95,
         }
       ).bindTooltip(`Misión Activa: ${misionSeleccionada.titulo}`, { permanent: true })
       layerGroup.addLayer(rutaMision)
+
+      void trazarRutaCarreteraGps([
+        BASE_BEARS_RESERVE,
+        { lat: misionSeleccionada.latDestino, lng: misionSeleccionada.lngDestino },
+      ]).then((resGps) => {
+        if (resGps && resGps.coordenadas.length > 0) {
+          rutaMision.setLatLngs(resGps.coordenadas)
+        }
+      })
     }
   }, [eventosRadar, misiones, rutasHabituales, capaActiva, misionSeleccionada, onSeleccionarEvento])
 
@@ -255,7 +298,7 @@ export default function MapaOperaciones({
               Centro Táctico de Rutas · Base Finca El Guadual
             </div>
             <div className="text-[10px] text-mist-400">
-              San Peregrino, Manizales · Coordenadas 5.069750, -75.590521
+              San Peregrino, Manizales · Coordenadas 5.069750, -75.590521 · Delineado GPS por Carreteras
             </div>
           </div>
         </div>
@@ -314,11 +357,11 @@ export default function MapaOperaciones({
           </div>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-sky-400" />
-            <span>Ruta Escolar Matutina 06:00 (38.4 km)</span>
+            <span>Ruta Escolar Matutina 06:00 (Trazo GPS Carretera)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-purple-400" />
-            <span>Ruta Escolar Vespertina 15:00 (38.4 km)</span>
+            <span>Ruta Escolar Vespertina 15:00 (Trazo GPS Carretera)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="h-2 w-2 rounded-full bg-red-400" />

@@ -152,6 +152,21 @@ function guardarEstadoLocal(estado: EstadoPersistenteBears) {
   }
 }
 
+function obtenerHabilitadoGuardado(vehiculoId: string): boolean | undefined {
+  try {
+    const raw = localStorage.getItem('bears_reserve_habilitados_map_v1')
+    if (raw) {
+      const map = JSON.parse(raw) as Record<string, boolean>
+      if (typeof map[vehiculoId] === 'boolean') {
+        return map[vehiculoId]
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined
+}
+
 /**
  * Mapea un empleado de la nómina de CashMet a un EmpleadoOperativo de Bear's Reserve.
  */
@@ -209,8 +224,19 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     claseVehiculo: v.claseVehiculo,
     capacidadTexto: v.capacidad,
     cilindraje: v.cilindraje,
-    disponibleParaTrabajo:
-      extra?.disponibleParaTrabajo ?? (v.activo !== false && v.estado !== 'Vendido' && v.estado !== 'Dañado'),
+    disponibleParaTrabajo: (() => {
+      const disponibleEnCashmet = v.activo !== false && (v.estado === 'Disponible' || !v.estado)
+      if (!disponibleEnCashmet) return false
+
+      if (typeof extra?.disponibleParaTrabajo === 'boolean') {
+        return extra.disponibleParaTrabajo
+      }
+      const persistente = obtenerHabilitadoGuardado(v.id)
+      if (typeof persistente === 'boolean') {
+        return persistente
+      }
+      return false
+    })(),
     investigadoIA: extra?.investigadoIA ?? false,
     fichaInvestigadaNota: extra?.fichaInvestigadaNota,
     estado: extra?.estado || (v.estado === 'En reparación' ? 'mantenimiento' : 'disponible'),
@@ -331,6 +357,17 @@ export function guardarExtraVehiculo(id: string, extra: Partial<VehiculoOperativ
   const estado = leerEstadoLocal()
   estado.vehiculosExtra[id] = { ...(estado.vehiculosExtra[id] || {}), ...extra }
   guardarEstadoLocal(estado)
+
+  if (typeof extra.disponibleParaTrabajo === 'boolean') {
+    try {
+      const raw = localStorage.getItem('bears_reserve_habilitados_map_v1')
+      const map = raw ? JSON.parse(raw) : {}
+      map[id] = extra.disponibleParaTrabajo
+      localStorage.setItem('bears_reserve_habilitados_map_v1', JSON.stringify(map))
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function guardarExtraEmpleado(id: string, extra: Partial<EmpleadoOperativo>) {

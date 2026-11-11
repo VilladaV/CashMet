@@ -20,9 +20,18 @@ import {
   Clock,
   Navigation,
   Map as MapIcon,
+  Pencil,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  Plus,
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
-import { calcularDistanciaRealDesdeBase, BASE_BEARS_RESERVE } from './geo'
+import {
+  calcularDistanciaRealDesdeBase,
+  BASE_BEARS_RESERVE,
+  PUNTOS_REFERENCIA_CALDAS,
+} from './geo'
 import { seleccionarVehiculosOptimosMision } from './gemaEngine'
 
 let counterMision = 1
@@ -82,6 +91,71 @@ export default function MisionesTab({
   ])
   const [esProgramada, setEsProgramada] = useState(false)
   const [fechaMision, setFechaMision] = useState(hoyFechaISO)
+
+  // Estado para el editor de trazado de rutas habituales
+  const [modalEditarRutaAbierto, setModalEditarRutaAbierto] = useState(false)
+  const [rutaEditando, setRutaEditando] = useState<RutaHabitual | null>(null)
+  const [paradasEditando, setParadasEditando] = useState<
+    Array<{ nombre: string; lat: number; lng: number }>
+  >([])
+  const [nuevoPuntoRefKey, setNuevoPuntoRefKey] = useState('la_cabana')
+  const [nuevoPuntoNombreManual, setNuevoPuntoNombreManual] = useState('')
+  const [minutosRalentiEditando, setMinutosRalentiEditando] = useState('35')
+
+  const abrirEditorRuta = (r: RutaHabitual) => {
+    setRutaEditando(r)
+    setParadasEditando(
+      r.coordenadasParadas && r.coordenadasParadas.length > 0
+        ? [...r.coordenadasParadas]
+        : [{ ...BASE_BEARS_RESERVE, nombre: 'Base Finca El Guadual' }]
+    )
+    setMinutosRalentiEditando(String(r.minutosRalenti || 35))
+    setModalEditarRutaAbierto(true)
+  }
+
+  const moverParada = (index: number, direccion: -1 | 1) => {
+    const nuevoIndex = index + direccion
+    if (nuevoIndex < 0 || nuevoIndex >= paradasEditando.length) return
+    const copia = [...paradasEditando]
+    const temp = copia[index]
+    copia[index] = copia[nuevoIndex]
+    copia[nuevoIndex] = temp
+    setParadasEditando(copia)
+  }
+
+  const eliminarParada = (index: number) => {
+    if (paradasEditando.length <= 2) {
+      alert('Una ruta debe tener al menos 2 puntos (origen y destino).')
+      return
+    }
+    setParadasEditando(paradasEditando.filter((_, i) => i !== index))
+  }
+
+  const agregarParada = () => {
+    const ref = PUNTOS_REFERENCIA_CALDAS[nuevoPuntoRefKey]
+    if (!ref) return
+    const nombre = nuevoPuntoNombreManual.trim() || ref.nombre
+    setParadasEditando([...paradasEditando, { nombre, lat: ref.lat, lng: ref.lng }])
+    setNuevoPuntoNombreManual('')
+  }
+
+  const guardarCambiosRuta = () => {
+    if (!rutaEditando) return
+    const minutosRalentiNum = Number(minutosRalentiEditando) || 30
+    const rutaActualizada: RutaHabitual = {
+      ...rutaEditando,
+      coordenadasParadas: paradasEditando,
+      minutosRalenti: minutosRalentiNum,
+    }
+    if (onActualizarRuta) {
+      onActualizarRuta(rutaActualizada)
+    }
+    setModalEditarRutaAbierto(false)
+    setFeedback(
+      `✅ Trazado y paradas de "${rutaActualizada.nombre}" guardados. La ruta GPS en el mapa se actualizó.`
+    )
+    window.setTimeout(() => setFeedback(''), 4500)
+  }
 
   // Despacho desde evento del Radar con Selección Inteligente de Gema
   const despacharDesdeEvento = (ev: EventoRadarLocal) => {
@@ -694,14 +768,25 @@ export default function MisionesTab({
                           : 'Ruta activa diaria'}
                       </span>
 
-                      <button
-                        type="button"
-                        onClick={() => vehiculoApto && onCumplirRutaHabitual(r, vehiculoApto.id)}
-                        className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
-                      >
-                        <Check className="h-3.5 w-3.5" />
-                        <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => abrirEditorRuta(r)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-bold text-mist-300 hover:bg-white/10 hover:text-white transition"
+                        >
+                          <Pencil className="h-3 w-3 text-amber-300" />
+                          <span>Definir / Editar Paradas</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => vehiculoApto && onCumplirRutaHabitual(r, vehiculoApto.id)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                          <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )
@@ -876,6 +961,152 @@ export default function MisionesTab({
               <button
                 type="button"
                 onClick={() => setModalAbierto(false)}
+                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Editor de Trazado de Rutas Habituales */}
+      {modalEditarRutaAbierto && rutaEditando && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
+          <div className="surface-glow w-full max-w-lg rounded-3xl border border-sky-400/25 bg-night-900 p-5 text-xs shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-white">
+                  Definir Trazado y Paradas: {rutaEditando.nombre}
+                </h3>
+                <p className="text-[11px] text-mist-400">
+                  Organiza el orden de paradas por donde debe pasar el vehículo. El mapa calculará el recorrido exacto por carretera.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModalEditarRutaAbierto(false)}
+                className="cursor-pointer text-mist-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="my-3 space-y-3">
+              {/* Lista de paradas actuales */}
+              <div>
+                <div className="text-[11px] font-bold text-mist-300 mb-1.5 flex items-center justify-between">
+                  <span>Secuencia de Paradas ({paradasEditando.length} puntos)</span>
+                  <span className="text-[10px] text-mist-500">Usa ▲ y ▼ para cambiar el orden</span>
+                </div>
+
+                <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
+                  {paradasEditando.map((p, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-black/40 p-2 text-[11px]"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-sky-400/20 text-[10px] font-black text-sky-300">
+                          {idx + 1}
+                        </span>
+                        <span className="font-bold text-white truncate">{p.nombre}</span>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          onClick={() => moverParada(idx, -1)}
+                          className="cursor-pointer rounded-lg bg-white/[0.06] p-1 text-mist-300 hover:text-white disabled:opacity-20"
+                          title="Subir parada"
+                        >
+                          <ArrowUp className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === paradasEditando.length - 1}
+                          onClick={() => moverParada(idx, 1)}
+                          className="cursor-pointer rounded-lg bg-white/[0.06] p-1 text-mist-300 hover:text-white disabled:opacity-20"
+                          title="Bajar parada"
+                        >
+                          <ArrowDown className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => eliminarParada(idx)}
+                          className="cursor-pointer rounded-lg bg-red-400/10 p-1 text-red-300 hover:bg-red-400/20"
+                          title="Eliminar parada"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Agregar nueva parada a la secuencia */}
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-3 space-y-2">
+                <span className="text-[10px] font-bold text-amber-300 uppercase">
+                  + Agregar Parada o Vereda a la Ruta:
+                </span>
+
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <select
+                    value={nuevoPuntoRefKey}
+                    onChange={(e) => setNuevoPuntoRefKey(e.target.value)}
+                    className="field-dark h-8 rounded-xl px-2 text-[11px]"
+                  >
+                    {Object.entries(PUNTOS_REFERENCIA_CALDAS).map(([key, ref]) => (
+                      <option key={key} value={key}>
+                        {ref.nombre}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    type="text"
+                    placeholder="Nombre o indicación personalizada..."
+                    value={nuevoPuntoNombreManual}
+                    onChange={(e) => setNuevoPuntoNombreManual(e.target.value)}
+                    className="field-dark h-8 rounded-xl px-2.5 text-[11px]"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={agregarParada}
+                  className="w-full cursor-pointer rounded-xl border border-sky-400/40 bg-sky-400/10 py-1.5 font-bold text-sky-200 hover:bg-sky-400/20 transition flex items-center justify-center gap-1"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>Insertar Parada al Final de la Secuencia</span>
+                </button>
+              </div>
+
+              {/* Ajuste de tiempo al ralentí */}
+              <div className="flex items-center justify-between gap-3 border-t border-white/[0.08] pt-2">
+                <span className="text-mist-400 font-bold">Minutos de espera / ralentí en paradas:</span>
+                <input
+                  type="number"
+                  value={minutosRalentiEditando}
+                  onChange={(e) => setMinutosRalentiEditando(e.target.value)}
+                  className="field-dark h-8 w-20 rounded-lg px-2 text-center text-xs font-mono font-bold"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 border-t border-white/10 pt-3">
+              <button
+                type="button"
+                onClick={guardarCambiosRuta}
+                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-sky-400 to-teal-400 py-2 font-black text-[#04241a] hover:brightness-110"
+              >
+                Guardar Trazado de Ruta
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalEditarRutaAbierto(false)}
                 className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
               >
                 Cancelar
