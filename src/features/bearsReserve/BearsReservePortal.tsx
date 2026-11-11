@@ -7,6 +7,9 @@ import {
   guardarMision,
   guardarRutaHabitual,
   guardarTurnos,
+  guardarEventosRadar,
+  descartarEventoRadar,
+  agregarEventoRadarManual,
   investigarVehiculosPendientesIA,
   leerEventosRadar,
   leerTarjetaCombustible,
@@ -309,6 +312,18 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                   guardarRutaHabitual(r)
                   setRutasHabituales((prev) => prev.map((x) => (x.id === r.id ? r : x)))
                   void cargarTodo()
+                }}
+                onDescartarEventoRadar={(id) => {
+                  descartarEventoRadar(id)
+                  setEventosRadar((prev) => prev.filter((e) => e.id !== id))
+                }}
+                onActualizarEventosRadar={(nuevos) => {
+                  guardarEventosRadar(nuevos)
+                  setEventosRadar(nuevos)
+                }}
+                onAgregarEventoRadar={(ev) => {
+                  agregarEventoRadarManual(ev)
+                  setEventosRadar((prev) => [ev, ...prev.filter((e) => e.id !== ev.id)])
                 }}
               />
             )}

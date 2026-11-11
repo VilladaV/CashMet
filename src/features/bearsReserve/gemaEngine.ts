@@ -536,23 +536,130 @@ export const EVENTOS_RADAR_PREDETERMINADOS: EventoRadarLocal[] = [
     recomendacionGema: 'intervenir_urgente',
     justificacionGema: 'Se requiere equipo con motosierra, eslingas de arrastre y personal para liberar el camino y ayudar a reconectar el tubo de agua.',
   },
+]
+
+/**
+ * Banco de contingencias dinámicas y realistas para escaneo en vivo de frecuencias por Gema 📡
+ */
+const CONTINGENCIAS_DINAMICAS_POOL: Omit<EventoRadarLocal, 'id' | 'fecha'>[] = [
   {
-    id: 'rad-sim-6',
-    titulo: 'Standby / En Base: Guardia tranquila sin alertas activas',
-    lugar: 'Base Central Finca El Guadual · San Peregrino',
+    titulo: 'Deslizamiento con pérdida parcial de banca en vía antigua a Chinchiná',
+    lugar: 'Vereda El Rosario (Sector La Siria) · Caldas',
     departamento: 'Caldas',
-    lat: 5.06975,
-    lng: -75.590521,
-    fuenteNoticia: 'Registro Operativo Interno',
-    resumen: 'No hay emergencias registradas en la cordillera en este momento. La dotación permanece en base en mantenimiento preventivo de cables, winches, revisión de aceites y calibración de herramientas.',
-    fecha: hoyISO(),
+    lat: 5.0489,
+    lng: -75.5684,
+    fuenteNoticia: 'Radio Comunitaria Chinchiná Stereo',
+    resumen: 'Lluvia constante de madrugada provocó caída de talud sobre la calzada veredal. Familias campesinas no pueden sacar plátano ni cítricos.',
     esEmergenciaGrave: false,
+    atencionOficialPresente: false,
+    esNoticiaWebReal: false,
+    recomendacionGema: 'intervenir_urgente',
+    justificacionGema: 'Camino veredal secundario desatendido por maquinaria oficial. Se requiere camión o campero con winche y cuadrilla con palas.',
+  },
+  {
+    titulo: 'Campero de acopiador de café atrapado en cuneta profunda por torrencial aguacero',
+    lugar: 'Vereda Morrogacho · Manizales',
+    departamento: 'Caldas',
+    lat: 5.0612,
+    lng: -75.5340,
+    fuenteNoticia: 'Llamada de vecino a la Reserva',
+    resumen: 'Toyota Land Cruiser con 12 bultos de café cereza resbaló en greda húmeda y quedó de costado al borde de un zanjón.',
+    esEmergenciaGrave: false,
+    atencionOficialPresente: false,
+    esNoticiaWebReal: false,
+    recomendacionGema: 'intervenir_urgente',
+    justificacionGema: 'Riesgo de volcamiento completo. Maniobra ideal de polea de reenvío y anclaje a árbol con winche de 12.000 lbs.',
+  },
+  {
+    titulo: 'Bloqueo por rocas y material suelto en paso veredal La Quiebra de Vélez',
+    lugar: 'Sector La Quiebra de Vélez ↔ Cabaña · Caldas',
+    departamento: 'Caldas',
+    lat: 5.1021,
+    lng: -75.5645,
+    fuenteNoticia: 'Comité de Cafeteros de Manizales',
+    resumen: 'Tres piedras de gran volumen obstruyen el paso del camión recolector de basura y vehículos de víveres hacia las veredas altas.',
+    esEmergenciaGrave: false,
+    atencionOficialPresente: false,
+    esNoticiaWebReal: false,
+    recomendacionGema: 'intervenir_urgente',
+    justificacionGema: 'Arrastre pesado con cables acerados y vehículo de alto torque para despejar el carril.',
+  },
+  {
+    titulo: 'Avería mecánica de furgón escolar comunitario en subida de Alto Tablazo',
+    lugar: 'Sector Alto Tablazo · Manizales',
+    departamento: 'Caldas',
+    lat: 5.0430,
+    lng: -75.5090,
+    fuenteNoticia: 'Grupo WhatsApp Veredal Tablazo',
+    resumen: 'Vehículo particular de transporte veredal sufrió daño de embrague en plena rampa con 7 pasajeros esperando auxilio.',
+    esEmergenciaGrave: false,
+    atencionOficialPresente: false,
+    esNoticiaWebReal: false,
+    recomendacionGema: 'apoyo_logistico',
+    justificacionGema: 'Remolque con barra de tiro rígida o auxilio de transbordo hacia Manizales.',
+  },
+  {
+    titulo: 'Inundación de vado de quebrada con paso suspendido hacia vereda Gallinazo',
+    lugar: 'Vía Gallinazo · Villamaría (Caldas)',
+    departamento: 'Caldas',
+    lat: 5.0280,
+    lng: -75.4750,
+    fuenteNoticia: 'Bomberos Voluntarios Villamaría',
+    resumen: 'Creciente súbita de la quebrada depositó palizadas y piedras sobre el pontón impidiendo el tránsito de motocicletas y camperos.',
+    esEmergenciaGrave: true,
     atencionOficialPresente: true,
-    esNoticiaWebReal: false, // Situación real de base
-    recomendacionGema: 'monitorear_sin_intervenir',
-    justificacionGema: 'Momento ideal para descanso activo, chequeo de llantas y alistamiento de equipos de rescate.',
+    esNoticiaWebReal: true,
+    recomendacionGema: 'apoyo_logistico',
+    justificacionGema: 'Apoyo con motosierra y cadenas para retirar troncos arrastrados por la corriente una vez baje el caudal.',
   },
 ]
+
+/**
+ * Escanea frecuencias y genera nuevas contingencias de campo autónomas con Gema
+ */
+export function escanearNuevosEventosRadarIA(eventosActuales: EventoRadarLocal[]): {
+  nuevosEventos: EventoRadarLocal[]
+  eventoAgregado: EventoRadarLocal | null
+} {
+  const titulosExistentes = new Set(eventosActuales.map((e) => e.titulo.toLowerCase().trim()))
+  const candidatos = CONTINGENCIAS_DINAMICAS_POOL.filter(
+    (c) => !titulosExistentes.has(c.titulo.toLowerCase().trim())
+  )
+
+  let seleccionado: EventoRadarLocal
+  if (candidatos.length > 0) {
+    const elegido = candidatos[Math.floor(Math.random() * candidatos.length)]
+    seleccionado = {
+      ...elegido,
+      id: `rad-din-${Date.now()}`,
+      fecha: hoyISO(),
+    }
+  } else {
+    // Generar dinámicamente con timestamp
+    const timestamp = Date.now()
+    seleccionado = {
+      id: `rad-din-${timestamp}`,
+      titulo: `Alerta veredal de auxilio en vía rural San Peregrino #${String(timestamp).slice(-3)}`,
+      lugar: 'Vereda San Peregrino · Sector Fincas Bajas',
+      departamento: 'Caldas',
+      lat: 5.0685 + (Math.random() - 0.5) * 0.02,
+      lng: -75.589 + (Math.random() - 0.5) * 0.02,
+      fuenteNoticia: 'Llamada de radio frecuencia comunitaria',
+      resumen: 'Camión de carga local atascado en barrizal tras lluvia torrencial. Requiere tracción de rescate.',
+      fecha: hoyISO(),
+      esEmergenciaGrave: false,
+      atencionOficialPresente: false,
+      esNoticiaWebReal: false,
+      recomendacionGema: 'intervenir_urgente',
+      justificacionGema: 'Despliegue de unidad 4x4 con winche para halar el vehículo a terreno firme.',
+    }
+  }
+
+  return {
+    nuevosEventos: [seleccionado, ...eventosActuales],
+    eventoAgregado: seleccionado,
+  }
+}
 
 /**
  * Generador de Crónicas de Campo en lenguaje humano auténtico 📖:

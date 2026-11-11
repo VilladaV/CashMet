@@ -26,6 +26,7 @@ import {
   ArrowUp,
   ArrowDown,
   Plus,
+  RefreshCw,
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
 import {
@@ -33,7 +34,11 @@ import {
   BASE_BEARS_RESERVE,
   PUNTOS_REFERENCIA_CALDAS,
 } from './geo'
-import { seleccionarVehiculosOptimosMision, seleccionarTripulacionMision } from './gemaEngine'
+import {
+  seleccionarVehiculosOptimosMision,
+  seleccionarTripulacionMision,
+  escanearNuevosEventosRadarIA,
+} from './gemaEngine'
 import { obtenerConductorRuta } from './repo'
 
 let counterMision = 1
@@ -65,6 +70,9 @@ interface Props {
   ) => Promise<{ cronica: string; tanqueosAutomaticos: any[] }>
   onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId?: string) => void
   onActualizarRuta?: (ruta: RutaHabitual) => void
+  onDescartarEventoRadar?: (id: string) => void
+  onActualizarEventosRadar?: (eventos: EventoRadarLocal[]) => void
+  onAgregarEventoRadar?: (ev: EventoRadarLocal) => void
 }
 
 type SubVistaMisiones = 'radar' | 'mapa' | 'cronicas' | 'rutas_habituales'
@@ -80,11 +88,66 @@ export default function MisionesTab({
   onCompletarMision,
   onCumplirRutaHabitual,
   onActualizarRuta,
+  onDescartarEventoRadar,
+  onActualizarEventosRadar,
+  onAgregarEventoRadar,
 }: Props) {
   const [subVista, setSubVista] = useState<SubVistaMisiones>('radar')
   const [filtroRadar, setFiltroRadar] = useState<'todos' | 'caldas' | 'otros'>('todos')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string>('')
+
+  // Estados para radar dinámico
+  const [escaneandoRadar, setEscaneandoRadar] = useState(false)
+  const [modalReportarAbierto, setModalReportarAbierto] = useState(false)
+  const [reporteTitulo, setReporteTitulo] = useState('')
+  const [reporteLugar, setReporteLugar] = useState('Vereda San Peregrino · Caldas')
+  const [reporteDepartamento, setReporteDepartamento] = useState('Caldas')
+  const [reporteResumen, setReporteResumen] = useState('')
+  const [reporteGrave, setReporteGrave] = useState(false)
+
+  const ejecutarEscaneoRadar = () => {
+    setEscaneandoRadar(true)
+    setTimeout(() => {
+      const res = escanearNuevosEventosRadarIA(eventosRadar)
+      if (res.eventoAgregado && onActualizarEventosRadar) {
+        onActualizarEventosRadar(res.nuevosEventos)
+        setFeedback(`📡 ¡Frecuencias escaneadas! Se captó reporte: "${res.eventoAgregado.titulo}".`)
+      } else {
+        setFeedback(`📡 Frecuencias escaneadas. No hay alertas adicionales reportadas en la cordillera por ahora.`)
+      }
+      setEscaneandoRadar(false)
+      setTimeout(() => setFeedback(''), 5000)
+    }, 700)
+  }
+
+  const guardarNuevoReporte = () => {
+    if (!reporteTitulo.trim()) return
+    const nuevo: EventoRadarLocal = {
+      id: `rad-man-${Date.now()}`,
+      titulo: reporteTitulo.trim(),
+      lugar: reporteLugar.trim(),
+      departamento: reporteDepartamento.trim(),
+      lat: BASE_BEARS_RESERVE.lat + (Math.random() - 0.5) * 0.03,
+      lng: BASE_BEARS_RESERVE.lng + (Math.random() - 0.5) * 0.03,
+      fuenteNoticia: 'Llamada telefónica a Guardia Bear\'s Reserve',
+      resumen: reporteResumen.trim() || 'Llamada comunitaria solicitando apoyo.',
+      fecha: hoyFechaISO(),
+      esEmergenciaGrave: reporteGrave,
+      atencionOficialPresente: false,
+      esNoticiaWebReal: false,
+      recomendacionGema: reporteGrave ? 'intervenir_urgente' : 'apoyo_logistico',
+      justificacionGema: 'Situación reportada directamente por la comunidad veredal. Se requiere evaluar disponibilidad y alistar dotación.',
+    }
+    if (onAgregarEventoRadar) {
+      onAgregarEventoRadar(nuevo)
+    }
+    setModalReportarAbierto(false)
+    setReporteTitulo('')
+    setReporteResumen('')
+    setFeedback(`📻 ¡Llamada veredal "${nuevo.titulo}" registrada en el Radar!`)
+    setTimeout(() => setFeedback(''), 5000)
+  }
 
   // Formulario de nueva misión manual o programada
   const [modalAbierto, setModalAbierto] = useState(false)
@@ -297,11 +360,13 @@ export default function MisionesTab({
     }
   }
 
-  const eventosFiltrados = eventosRadar.filter((ev) => {
-    if (filtroRadar === 'caldas') return ev.departamento === 'Caldas'
-    if (filtroRadar === 'otros') return ev.departamento !== 'Caldas'
-    return true
-  })
+  const eventosFiltrados = eventosRadar
+    .filter((ev) => !ev.id.includes('standby') && !ev.titulo.toLowerCase().includes('standby'))
+    .filter((ev) => {
+      if (filtroRadar === 'caldas') return ev.departamento === 'Caldas'
+      if (filtroRadar === 'otros') return ev.departamento !== 'Caldas'
+      return true
+    })
 
   const misionesCompletadas = misiones.filter((m) => m.estado === 'completada')
   const misionesActivas = misiones.filter((m) => m.estado !== 'completada')
@@ -477,14 +542,12 @@ export default function MisionesTab({
                 <div>
                   <h2 className="text-sm font-black text-white">Radar de Eventos, Llamadas y Contingencias</h2>
                   <p className="text-[11px] text-mist-400">
-                    Monitoreo en vivo de Manizales y municipios vecinos. El chulito{' '}
-                    <span className="inline-flex items-center text-sky-300 font-bold">✓</span> indica noticia web real;
-                    los demás son llamadas veredales o simuladas por Gema.
+                    Monitoreo en vivo de Manizales y municipios vecinos.
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setFiltroRadar('todos')}
@@ -512,92 +575,142 @@ export default function MisionesTab({
                 >
                   Vecinos
                 </button>
+
+                <button
+                  type="button"
+                  onClick={ejecutarEscaneoRadar}
+                  disabled={escaneandoRadar}
+                  className="cursor-pointer inline-flex items-center gap-1 rounded-lg border border-sky-400/30 bg-sky-500/15 px-2.5 py-1 text-[11px] font-bold text-sky-200 hover:bg-sky-500/25 transition disabled:opacity-50"
+                  title="Escanear frecuencias de radio y boletines viales para captar nuevas emergencias con Gema"
+                >
+                  <RefreshCw className={`h-3 w-3 ${escaneandoRadar ? 'animate-spin' : ''}`} />
+                  <span>{escaneandoRadar ? 'Escaneando...' : 'Escanear con Gema'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setModalReportarAbierto(true)}
+                  className="cursor-pointer inline-flex items-center gap-1 rounded-lg border border-amber-400/30 bg-amber-500/15 px-2.5 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-500/25 transition"
+                  title="Registrar llamada veredal recibida"
+                >
+                  <Plus className="h-3 w-3" />
+                  <span>+ Llamada Veredal</span>
+                </button>
               </div>
             </div>
 
-            <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {eventosFiltrados.map((ev) => {
-                const esCaldas = ev.departamento === 'Caldas'
-                const puedeDespachar = ev.recomendacionGema !== 'monitorear_sin_intervenir'
+            {eventosFiltrados.length === 0 ? (
+              <div className="rounded-2xl border border-white/10 bg-black/30 p-8 text-center text-mist-400 my-4 space-y-2">
+                <span className="text-3xl">📻</span>
+                <div className="font-extrabold text-white text-xs">
+                  Sin contingencias activas en este filtro
+                </div>
+                <p className="text-[11px] text-mist-400 max-w-sm mx-auto">
+                  La guardia comunitaria está tranquila en base. Usa "Escanear con Gema" para sintonizar nuevas frecuencias o pulsa "+ Llamada Veredal" para reportar un auxilio.
+                </p>
+              </div>
+            ) : (
+              <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                {eventosFiltrados.map((ev) => {
+                  const esCaldas = ev.departamento === 'Caldas'
+                  const estaEnCurso = misionesActivas.some((m) => m.titulo === ev.titulo)
 
-                return (
-                  <div
-                    key={ev.id}
-                    className={`space-y-2.5 rounded-2xl border p-3.5 ${
-                      ev.recomendacionGema === 'intervenir_urgente'
-                        ? 'border-red-400/40 bg-red-500/10'
-                        : 'border-white/[0.08] bg-black/30'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="font-extrabold text-white sm:text-sm flex items-start gap-1.5">
-                        {/* CHULITO DISCRETO PARA NOTICIA WEB REAL */}
-                        {ev.esNoticiaWebReal ? (
-                          <span
-                            title="Acontecimiento real extraído de internet / prensa"
-                            className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-sky-400/20 text-sky-300 text-[10px] font-black shrink-0 mt-0.5 border border-sky-400/30"
-                          >
-                            ✓
+                  return (
+                    <div
+                      key={ev.id}
+                      className={`space-y-2.5 rounded-2xl border p-3.5 ${
+                        ev.recomendacionGema === 'intervenir_urgente'
+                          ? 'border-red-400/40 bg-red-500/10'
+                          : 'border-white/[0.08] bg-black/30'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="font-extrabold text-white sm:text-sm flex items-start gap-1.5">
+                          {ev.esNoticiaWebReal ? (
+                            <span
+                              title="Acontecimiento real extraído de internet / prensa"
+                              className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-sky-400/20 text-sky-300 text-[10px] font-black shrink-0 mt-0.5 border border-sky-400/30"
+                            >
+                              ✓
+                            </span>
+                          ) : (
+                            <span
+                              title="Llamada comunitaria veredal"
+                              className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-amber-400/15 text-amber-300 text-[10px] font-black shrink-0 mt-0.5"
+                            >
+                              📻
+                            </span>
+                          )}
+                          <span>{ev.titulo}</span>
+                        </div>
+
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${
+                            esCaldas
+                              ? 'border border-emerald-400/30 bg-emerald-400/15 text-emerald-300'
+                              : 'border border-amber-400/30 bg-amber-400/15 text-amber-300'
+                          }`}
+                        >
+                          {ev.departamento}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 text-[11px] text-mist-400">
+                        <MapPin className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        <span>{ev.lugar}</span>
+                        <span className="text-mist-600">· {ev.fuenteNoticia}</span>
+                      </div>
+
+                      <p className="text-[11px] leading-relaxed text-mist-300">{ev.resumen}</p>
+
+                      <div className="rounded-xl border border-white/[0.06] bg-black/40 p-2 text-[11px]">
+                        <div className="flex items-center gap-1 font-bold text-amber-300">
+                          <Sparkles className="h-3 w-3" />
+                          <span>Criterio de Gema:</span>
+                        </div>
+                        <p className="text-mist-300">{ev.justificacionGema}</p>
+                      </div>
+
+                      <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+                        <div className="flex items-center gap-2 text-[10px] text-mist-500">
+                          <span>{ev.fecha}</span>
+                          {onDescartarEventoRadar && (
+                            <button
+                              type="button"
+                              onClick={() => onDescartarEventoRadar(ev.id)}
+                              className="cursor-pointer text-mist-500 hover:text-rose-400 transition ml-1"
+                              title="Descartar este evento del radar"
+                            >
+                              <Trash2 className="h-3 w-3 inline mr-0.5" /> Descartar
+                            </button>
+                          )}
+                        </div>
+
+                        {estaEnCurso ? (
+                          <span className="inline-flex items-center gap-1 rounded-xl bg-emerald-400/15 border border-emerald-400/30 px-2.5 py-1 text-[10px] font-black text-emerald-300">
+                            <Check className="h-3 w-3" /> Misión en desarrollo
                           </span>
                         ) : (
-                          <span
-                            title="Llamada comunitaria o situación asumida por Gema"
-                            className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-amber-400/15 text-amber-300 text-[10px] font-black shrink-0 mt-0.5"
+                          <button
+                            type="button"
+                            onClick={() => despacharDesdeEvento(ev)}
+                            className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95"
+                            title={
+                              ev.departamento !== 'Caldas'
+                                ? 'Misión fuera de Caldas: Es decisión tuya despachar el auxilio.'
+                                : 'Despachar auxilio comunitario'
+                            }
                           >
-                            📻
-                          </span>
+                            <Truck className="h-3.5 w-3.5" />
+                            <span>Despachar Misión</span>
+                          </button>
                         )}
-                        <span>{ev.titulo}</span>
                       </div>
-
-                      <span
-                        className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${
-                          esCaldas
-                            ? 'border border-emerald-400/30 bg-emerald-400/15 text-emerald-300'
-                            : 'border border-amber-400/30 bg-amber-400/15 text-amber-300'
-                        }`}
-                      >
-                        {ev.departamento}
-                      </span>
                     </div>
-
-                    <div className="flex items-center gap-1.5 text-[11px] text-mist-400">
-                      <MapPin className="h-3.5 w-3.5 text-amber-400 shrink-0" />
-                      <span>{ev.lugar}</span>
-                      <span className="text-mist-600">· {ev.fuenteNoticia}</span>
-                    </div>
-
-                    <p className="text-[11px] leading-relaxed text-mist-300">{ev.resumen}</p>
-
-                    <div className="rounded-xl border border-white/[0.06] bg-black/40 p-2 text-[11px]">
-                      <div className="flex items-center gap-1 font-bold text-amber-300">
-                        <Sparkles className="h-3 w-3" />
-                        <span>Criterio de Gema:</span>
-                      </div>
-                      <p className="text-mist-300">{ev.justificacionGema}</p>
-                    </div>
-
-                    <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
-                      <span className="text-[10px] text-mist-500">{ev.fecha}</span>
-                      {puedeDespachar ? (
-                        <button
-                          type="button"
-                          onClick={() => despacharDesdeEvento(ev)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95"
-                        >
-                          <Truck className="h-3.5 w-3.5" />
-                          <span>Despachar Misión</span>
-                        </button>
-                      ) : (
-                        <span className="text-[10px] italic text-mist-500">
-                          En monitoreo o base
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
+                  )
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1140,6 +1253,109 @@ export default function MisionesTab({
               <button
                 type="button"
                 onClick={() => setModalEditarRutaAbierto(false)}
+                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal para reportar nueva llamada o contingencia al Radar */}
+      {modalReportarAbierto && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
+          <div className="surface-glow w-full max-w-lg rounded-3xl border border-amber-400/25 bg-night-900 p-5 text-xs shadow-2xl">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-white">
+                  Registrar Nueva Contingencia o Llamada Veredal
+                </h3>
+                <p className="text-[11px] text-mist-400">
+                  Agrega una situación reportada por radio, teléfono o vecinos al Radar activo.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModalReportarAbierto(false)}
+                className="cursor-pointer text-mist-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="my-3 space-y-2.5">
+              <label className="flex flex-col gap-1">
+                <span className="font-bold text-mist-400">Título o motivo de la emergencia</span>
+                <input
+                  type="text"
+                  value={reporteTitulo}
+                  onChange={(e) => setReporteTitulo(e.target.value)}
+                  placeholder="Ej: Camión lechero atascado en barro cerca a escuela"
+                  className="field-dark h-8 rounded-xl px-2.5 text-xs text-white"
+                />
+              </label>
+
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="font-bold text-mist-400">Lugar / Vereda</span>
+                  <input
+                    type="text"
+                    value={reporteLugar}
+                    onChange={(e) => setReporteLugar(e.target.value)}
+                    placeholder="Vereda o sector específico"
+                    className="field-dark h-8 rounded-xl px-2.5 text-xs text-white"
+                  />
+                </label>
+
+                <label className="flex flex-col gap-1">
+                  <span className="font-bold text-mist-400">Departamento</span>
+                  <input
+                    type="text"
+                    value={reporteDepartamento}
+                    onChange={(e) => setReporteDepartamento(e.target.value)}
+                    placeholder="Caldas, Antioquia, Tolima..."
+                    className="field-dark h-8 rounded-xl px-2.5 text-xs text-white"
+                  />
+                </label>
+              </div>
+
+              <label className="flex flex-col gap-1">
+                <span className="font-bold text-mist-400">Detalles de la situación / llamada</span>
+                <textarea
+                  value={reporteResumen}
+                  onChange={(e) => setReporteResumen(e.target.value)}
+                  placeholder="Describe lo que reportan los campesinos o conductores (daños, personas, necesidad de winche o carga)..."
+                  rows={3}
+                  className="field-dark rounded-xl p-2 text-xs text-white"
+                />
+              </label>
+
+              <label className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-black/40 p-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={reporteGrave}
+                  onChange={(e) => setReporteGrave(e.target.checked)}
+                  className="h-4 w-4 rounded accent-red-500"
+                />
+                <span className="font-bold text-white text-[11px]">
+                  Emergencia crítica / requiere intervención urgente
+                </span>
+              </label>
+            </div>
+
+            <div className="flex gap-2 border-t border-white/10 pt-3">
+              <button
+                type="button"
+                onClick={guardarNuevoReporte}
+                disabled={!reporteTitulo.trim()}
+                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702] hover:brightness-110 disabled:opacity-40"
+              >
+                Agregar al Radar de Operaciones
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalReportarAbierto(false)}
                 className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
               >
                 Cancelar

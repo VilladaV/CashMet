@@ -135,6 +135,11 @@ function leerEstadoLocal(): EstadoPersistenteBears {
       if (!parsed.rutasHabituales || parsed.rutasHabituales.length === 0) {
         parsed.rutasHabituales = RUTAS_HABITUALES_INICIALES
       }
+      if (parsed.eventosRadar && Array.isArray(parsed.eventosRadar)) {
+        parsed.eventosRadar = parsed.eventosRadar.filter(
+          (e) => e.id !== 'rad-sim-6' && !e.titulo.toLowerCase().includes('standby')
+        )
+      }
       if (!parsed.eventosRadar || parsed.eventosRadar.length === 0) {
         parsed.eventosRadar = EVENTOS_RADAR_PREDETERMINADOS
       }
@@ -472,7 +477,21 @@ export function leerEventosRadar(): EventoRadarLocal[] {
 
 export function guardarEventosRadar(eventos: EventoRadarLocal[]) {
   const estado = leerEstadoLocal()
-  estado.eventosRadar = eventos
+  estado.eventosRadar = eventos.filter(
+    (e) => e.id !== 'rad-sim-6' && !e.titulo.toLowerCase().includes('standby')
+  )
+  guardarEstadoLocal(estado)
+}
+
+export function descartarEventoRadar(eventoId: string) {
+  const estado = leerEstadoLocal()
+  estado.eventosRadar = estado.eventosRadar.filter((e) => e.id !== eventoId)
+  guardarEstadoLocal(estado)
+}
+
+export function agregarEventoRadarManual(evento: EventoRadarLocal) {
+  const estado = leerEstadoLocal()
+  estado.eventosRadar = [evento, ...estado.eventosRadar.filter((e) => e.id !== evento.id)]
   guardarEstadoLocal(estado)
 }
 
