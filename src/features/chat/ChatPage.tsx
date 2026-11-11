@@ -254,7 +254,7 @@ export default function ChatPage() {
 
     if (op.nombre === 'transferir') {
       const monto = Number(p.monto) || 0
-      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const concepto = String(p.concepto ?? '').trim()
       let listaCuentas: CuentaBanco[] = cuentas
       try {
@@ -383,9 +383,13 @@ export default function ChatPage() {
           const porCat = new Map<string, number>()
           for (const m of delMes) {
             const val = Number(m.monto) || 0
-            if (m.tipo === 'ingreso') ingresos += val
-            else gastos += val
-            porCat.set(m.categoria || 'Otros', (porCat.get(m.categoria || 'Otros') || 0) + val)
+            if (m.tipo === 'ingreso') {
+              ingresos += val
+            } else if (m.tipo !== 'transferencia') {
+              // Las transferencias mueven dinero entre cuentas propias: no son gasto.
+              gastos += val
+              porCat.set(m.categoria || 'Otros', (porCat.get(m.categoria || 'Otros') || 0) + val)
+            }
           }
           const top = [...porCat.entries()]
             .filter(([, v]) => v > 0)
@@ -416,7 +420,7 @@ export default function ChatPage() {
     }
 
     if (op.nombre === 'pago_deuda') {
-      const hoyString = new Date().toISOString().slice(0, 10)
+      const hoyString = hoyISO()
       const monto = Number(p.monto) || 0
       const fecha = String(p.fecha ?? hoyString).slice(0, 10) || hoyString
       const nombreBuscado = String(p.nombre ?? p.deudaNombre ?? '').toLowerCase()
@@ -441,13 +445,32 @@ export default function ChatPage() {
           push({ rol: 'ia', texto: 'Primero necesitas crear una cuenta bancaria en la pestaña "Cuentas" para poder descontar el pago.' })
           return
         }
-        await registrarPagoDeuda(deuda.id, monto, fecha, cuentaDeudaId)
+        if (!monto || monto <= 0) {
+          push({ rol: 'ia', texto: '¿De cuánto es el abono? Dime el monto y lo registro.' })
+          return
+        }
+        const r = await registrarPagoDeuda(deuda.id, monto, fecha, cuentaDeudaId, 'chat_IA')
+        if (!r.ok) {
+          const mensajes: Record<string, string> = {
+            monto_invalido: 'El monto del abono debe ser mayor a cero.',
+            fecha_invalida: 'La fecha del abono no es válida.',
+            deuda_no_encontrada: 'No encontré esa deuda; puede que la hayan eliminado.',
+            deuda_pagada: `"${deuda.nombre}" ya está pagada. No registré otro abono.`,
+            monto_excede_saldo: `El abono de ${COD(monto)} supera el saldo pendiente de "${deuda.nombre}" (${COD(r.saldoPendiente ?? deuda.saldoPendiente ?? 0)}).`,
+            cuenta_no_encontrada: 'No encontré la cuenta para descontar el pago. Revisa la pestaña "Cuentas".',
+            saldo_insuficiente: `La cuenta solo tiene ${COD(r.saldoDisponible ?? 0)}, no alcanza para el abono de ${COD(monto)}.`,
+          }
+          push({ rol: 'ia', texto: mensajes[r.error] ?? 'No pude registrar el pago de la deuda.' })
+          return
+        }
         invalidarSnapshotFinanciero()
         listarCuentasBanco().then(setCuentas).catch(() => {})
         void cargarPulso()
         push({
           rol: 'ia',
-          texto: `✅ Listo, registré el pago de ${COD(monto)} a "${deuda.nombre}". Te queda un saldo de ${COD(Math.max(0, (deuda.saldoPendiente || 0) - monto))}.`,
+          texto: r.cerrada
+            ? `✅ Registré el pago de ${COD(monto)} a "${deuda.nombre}". ¡Quedó pagada por completo! 🎉`
+            : `✅ Listo, registré el pago de ${COD(monto)} a "${deuda.nombre}". Te queda un saldo de ${COD(r.saldoPendiente)}.`,
         })
       } catch (e: any) {
         console.error('Error al pagar deuda:', e)
@@ -457,7 +480,7 @@ export default function ChatPage() {
     }
 
     if (op.nombre === 'pagar_impuesto') {
-      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const impuestoId = String(p.impuestoId ?? '').trim()
       const nombreBuscado = normalizarNombreCuenta(String(p.nombre ?? p.impuesto ?? ''))
       try {
@@ -634,6 +657,13 @@ export default function ChatPage() {
           })
           return
         }
+        // Validamos la cuenta ANTES de guardar la tarea: si falta, no debe
+        // quedar un mantenimiento a medias sin su movimiento de costo.
+        const cuentaMantId = cuentaId || cuentas[0]?.id
+        if (monto > 0 && !cuentaMantId) {
+          push({ rol: 'ia', texto: 'Primero registra una cuenta en la pestaña "Cuentas" para descontar el costo del mantenimiento.' })
+          return
+        }
         const nombre = concepto.slice(0, 60)
         let tarea = (v.mantenimiento?.tareas ?? []).find((t) => t.nombre.toLowerCase() === nombre.toLowerCase())
         if (!tarea) {
@@ -644,12 +674,7 @@ export default function ChatPage() {
           km: Number.isFinite(km) ? km : undefined,
           fecha,
         })
-        const cuentaMantId = cuentaId || cuentas[0]?.id
         if (monto > 0) {
-          if (!cuentaMantId) {
-            push({ rol: 'ia', texto: 'Primero registra una cuenta en la pestaña "Cuentas" para descontar el costo del mantenimiento.' })
-            return
-          }
           await crearMovimiento({
             fecha,
             tipo: 'mantenimiento',
@@ -657,7 +682,7 @@ export default function ChatPage() {
             monto,
             categoria: 'Transporte',
             vehiculoId: v.id,
-            cuentaBancoId: cuentaMantId,
+            cuentaBancoId: cuentaMantId as string,
             fuente: 'chat_IA',
           })
           listarCuentasBanco().then(setCuentas).catch(() => {})
@@ -788,7 +813,7 @@ export default function ChatPage() {
 
     if (op.nombre === 'pago_nomina') {
       const monto = Number(p.monto) || 0
-      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const nombre = String(p.nombre ?? '').trim()
       try {
         const nominas = await listarNomina()
@@ -888,7 +913,7 @@ export default function ChatPage() {
     }
 
     if (op.nombre === 'crear_evento') {
-      const fecha = String(p.fecha ?? '').slice(0, 10) || new Date().toISOString().slice(0, 10)
+      const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const titulo = String(p.titulo ?? '').trim() || 'Evento'
       try {
         await crearEvento({

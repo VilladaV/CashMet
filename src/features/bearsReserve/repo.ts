@@ -709,6 +709,16 @@ export async function completarMisionComunitaria(
   const mision = estado.misiones.find((m) => m.id === misionId)
   if (!mision) throw new Error('Misión no encontrada')
 
+  // Idempotencia: si la misión ya se completó, no se vuelven a sumar kilómetros,
+  // combustible ni desgaste de llantas.
+  if (mision.estado === 'completada') {
+    return {
+      mision,
+      tanqueosAutomaticos: [],
+      cronica: mision.cronicaHistoria ?? generarCronicaMisionNarrativa(mision, [], [], resultado),
+    }
+  }
+
   const todosVehiculos = await listarVehiculosBears()
 
   // Determinar vehículos asignados
@@ -901,7 +911,23 @@ export async function ejecutarRutaHabitual(
  * Si es día de semana (lunes a viernes) y la hora actual sobrepasa el horario programado,
  * se ejecuta automáticamente la ruta escolar (mañana o tarde) con sus kilómetros y ralentí reales.
  */
-export async function verificarYCumplirRutasAutomaticas(): Promise<{
+let colaRutasAutomaticas: Promise<unknown> = Promise.resolve()
+
+export function verificarYCumplirRutasAutomaticas(): Promise<{ rutasEjecutadas: string[] }> {
+  // Serializa las verificaciones para que dos montajes del portal no ejecuten
+  // la misma ruta dos veces y dupliquen kilómetros/combustible.
+  const ejecucion = colaRutasAutomaticas.then(
+    () => ejecutarVerificacionRutasAutomaticas(),
+    () => ejecutarVerificacionRutasAutomaticas()
+  )
+  colaRutasAutomaticas = ejecucion.then(
+    () => undefined,
+    () => undefined
+  )
+  return ejecucion
+}
+
+async function ejecutarVerificacionRutasAutomaticas(): Promise<{
   rutasEjecutadas: string[]
 }> {
   const hoy = hoyISO()

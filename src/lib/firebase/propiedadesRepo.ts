@@ -1,4 +1,4 @@
-import { addDoc, collection, deleteDoc, doc, getDocs, updateDoc } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, deleteField, doc, getDoc, getDocs, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
@@ -40,7 +40,38 @@ export async function crearPropiedad(p: Partial<Propiedad>): Promise<string> {
 }
 
 export async function actualizarPropiedad(id: string, p: Partial<Propiedad>): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.PROPIEDADES, id), limpio({ ...p, actualizado: Date.now() }))
+  const ref = doc(db, COLLECTIONS.PROPIEDADES, id)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) throw new Error('propiedad_no_encontrada: la propiedad que se quiere actualizar no existe')
+  const actual = snap.data() as Record<string, unknown>
+
+  const payload: Record<string, unknown> = {}
+  for (const [clave, valor] of Object.entries(p)) {
+    if (clave === 'impuestos' || clave === 'id') continue
+    payload[clave] = valor === null ? deleteField() : valor
+  }
+
+  if (p.impuestos === null) {
+    payload.impuestos = deleteField()
+  } else if (p.impuestos !== undefined) {
+    // Los bloques anidados se mezclan con lo existente para no perder datos
+    // (por ejemplo, el municipio del predial) al editar un solo campo.
+    const actuales = (actual.impuestos ?? {}) as Record<string, unknown>
+    const cambios = p.impuestos as Record<string, unknown>
+    const combinado: Record<string, unknown> = { ...actuales, ...cambios }
+    for (const [clave, valor] of Object.entries(cambios)) {
+      if (valor === null) delete combinado[clave]
+    }
+    const predialActual = actuales.predial as Record<string, unknown> | undefined
+    if (cambios.predial && typeof cambios.predial === 'object' && !Array.isArray(cambios.predial)) {
+      combinado.predial = { ...(predialActual ?? {}), ...(cambios.predial as Record<string, unknown>) }
+    } else if (cambios.predial === null) {
+      delete combinado.predial
+    }
+    payload.impuestos = combinado
+  }
+
+  await updateDoc(ref, limpio({ ...payload, actualizado: Date.now() }))
 }
 
 export async function eliminarPropiedad(id: string): Promise<void> {

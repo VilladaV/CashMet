@@ -14,6 +14,7 @@ import {
   type Deuda,
 } from '@/lib/firebase/deudasRepo'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
+import { hoyISO } from '@/lib/fechas'
 
 const num = (s: string) => {
   const n = Number(String(s).replace(/[^\d.-]/g, ''))
@@ -29,7 +30,7 @@ function PagoDeuda({ cuentas }: { cuentas: CuentaBanco[] }) {
   const [deudaId, setDeudaId] = useState('')
   const [cuentaId, setCuentaId] = useState('')
   const [monto, setMonto] = useState('')
-  const [fecha, setFecha] = useState(() => new Date().toISOString().slice(0, 10))
+  const [fecha, setFecha] = useState(() => hoyISO())
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)

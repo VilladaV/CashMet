@@ -16,13 +16,14 @@ import {
   type GastoRecurrente,
 } from '@/lib/firebase/recurrentesRepo'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
+import { hoyISO } from '@/lib/fechas'
 
 const num = (s: string) => {
   const n = Number(String(s).replace(/[^\d.-]/g, ''))
   return Number.isFinite(n) ? n : undefined
 }
 
-const mesActual = () => new Date().toISOString().slice(0, 7)
+const mesActual = () => hoyISO().slice(0, 7)
 
 const VACIO: Record<string, string> = {
   categoria: 'hogar',

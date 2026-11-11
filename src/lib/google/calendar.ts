@@ -1,9 +1,11 @@
 import { listarEventos, marcarSincronizadoGoogle, type EventoDoc } from '@/lib/firebase/calendarioRepo'
+import { hoyISO } from '@/lib/fechas'
 
 const URL_GIS = 'https://accounts.google.com/gsi/client'
 const ALCANCE = 'https://www.googleapis.com/auth/calendar.events'
 const API = 'https://www.googleapis.com/calendar/v3'
-const CLAVE = 'cashmet_gcal_v1'
+/** Clave usada en versiones anteriores; se limpia para no dejar tokens en disco. */
+const CLAVE_LEGACY = 'cashmet_gcal_v1'
 
 const CLIENT_ID = (import.meta.env.VITE_GOOGLE_CALENDAR_CLIENT_ID as string | undefined)?.trim()
 
@@ -42,6 +44,16 @@ declare global {
 
 let promesaGIS: Promise<void> | null = null
 
+// El access token vive solo en memoria: nunca se persiste en localStorage ni
+// sessionStorage. Al recargar la página el usuario debe reconectar.
+let sesionEnMemoria: SesionGoogle | null = null
+
+try {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem(CLAVE_LEGACY)
+} catch {
+  /* almacenamiento no disponible */
+}
+
 function cargarGIS(): Promise<void> {
   if (typeof window === 'undefined') return Promise.reject(new Error('sin ventana'))
   if (window.google?.accounts?.oauth2) return Promise.resolve()
@@ -60,23 +72,13 @@ function cargarGIS(): Promise<void> {
 }
 
 function leerSesion(): SesionGoogle | null {
-  try {
-    const crudo = localStorage.getItem(CLAVE)
-    if (!crudo) return null
-    const s = JSON.parse(crudo) as SesionGoogle
-    if (!s?.token || typeof s.expira !== 'number') return null
-    return s
-  } catch {
-    return null
-  }
+  const s = sesionEnMemoria
+  if (!s?.token || typeof s.expira !== 'number' || s.expira <= Date.now()) return null
+  return s
 }
 
 function guardarSesion(s: SesionGoogle) {
-  try {
-    localStorage.setItem(CLAVE, JSON.stringify(s))
-  } catch {
-    /* sin persistencia disponible */
-  }
+  sesionEnMemoria = s
 }
 
 export function estadoGoogleCalendar(): { conectado: boolean } {
@@ -104,7 +106,7 @@ export async function conectarGoogleCalendar(): Promise<void> {
 }
 
 export function desconectarGoogleCalendar(): void {
-  const s = leerSesion()
+  const s = sesionEnMemoria
   if (s && window.google?.accounts?.oauth2) {
     try {
       window.google.accounts.oauth2.revoke(s.token)
@@ -112,8 +114,9 @@ export function desconectarGoogleCalendar(): void {
       /* revocado local de todos modos */
     }
   }
+  sesionEnMemoria = null
   try {
-    localStorage.removeItem(CLAVE)
+    localStorage.removeItem(CLAVE_LEGACY)
   } catch {
     /* sin persistencia disponible */
   }
@@ -170,7 +173,7 @@ export async function subirEvento(ev: EventoDoc): Promise<string | null> {
 }
 
 export async function sincronizarPendientes(): Promise<{ subidos: number; fallos: number }> {
-  const hoy = new Date().toISOString().slice(0, 10)
+  const hoy = hoyISO()
   const eventos = (await listarEventos(500)).filter((e) => !e.googleEventId && e.fechaInicio.slice(0, 10) >= hoy)
   let subidos = 0
   let fallos = 0

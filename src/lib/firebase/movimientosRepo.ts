@@ -4,16 +4,18 @@ import {
   deleteDoc,
   deleteField,
   doc,
-  getDoc,
   getDocs,
   increment,
-  setDoc,
+  limit,
+  orderBy,
+  query,
+  runTransaction,
   updateDoc,
-  writeBatch,
 } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
+import { hoyISO, parseFechaLocal } from '../fechas'
 
 export type TipoMovimiento =
   | 'gasto'
@@ -94,38 +96,83 @@ export interface MovimientoUpdate {
   cuentaDestinoId?: string
 }
 
-export async function crearMovimiento(input: MovimientoInput): Promise<string> {
-  const data = limpio({
+function validarEntradaMovimiento(input: MovimientoInput): number {
+  const monto = Math.round(Number(input.monto))
+  if (!Number.isFinite(monto) || monto <= 0) {
+    throw new Error('monto_invalido: el monto debe ser un número mayor a cero')
+  }
+  if (!parseFechaLocal(input.fecha)) {
+    throw new Error('fecha_invalida: la fecha debe existir y usar el formato YYYY-MM-DD')
+  }
+  if (!String(input.concepto ?? '').trim()) {
+    throw new Error('concepto_requerido: el movimiento necesita un concepto')
+  }
+  if (!String(input.categoria ?? '').trim()) {
+    throw new Error('categoria_requerida: el movimiento necesita una categoría')
+  }
+  if (input.tipo === 'transferencia') {
+    if (!input.cuentaBancoId || !input.cuentaDestinoId) {
+      throw new Error('cuenta_requerida: la transferencia necesita cuenta de origen y destino')
+    }
+    if (input.cuentaBancoId === input.cuentaDestinoId) {
+      throw new Error('misma_cuenta: la cuenta de origen y destino deben ser distintas')
+    }
+  }
+  return monto
+}
+
+export function datosMovimiento(input: MovimientoInput, ahora = Date.now()): Record<string, unknown> {
+  const monto = validarEntradaMovimiento(input)
+  return limpio({
     ...input,
+    monto,
     etiquetas: input.etiquetas ?? [],
     fuente: input.fuente ?? 'chat_IA',
     estado: 'confirmado',
-    creado: Date.now(),
-    actualizado: Date.now(),
+    creado: ahora,
+    actualizado: ahora,
   })
-  const ref = await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), data)
-  if (input.cuentaBancoId) {
-    const delta = input.tipo === 'ingreso' ? input.monto : -input.monto
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId),
-      {
-        saldoActual: increment(delta),
-        actualizado: Date.now(),
-      },
-      { merge: true }
-    )
+}
+
+export async function crearMovimiento(input: MovimientoInput): Promise<string> {
+  const monto = validarEntradaMovimiento(input)
+  const data = datosMovimiento(input)
+  const movRef = doc(collection(db, COLLECTIONS.MOVIMIENTOS))
+
+  if (!input.cuentaBancoId) {
+    await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), data)
+    return movRef.id
   }
-  if (input.tipo === 'transferencia' && input.cuentaDestinoId) {
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaDestinoId),
-      {
-        saldoActual: increment(input.monto),
-        actualizado: Date.now(),
-      },
-      { merge: true }
-    )
-  }
-  return ref.id
+
+  await runTransaction(db, async (tx) => {
+    const origenRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId as string)
+    const origenSnap = await tx.get(origenRef)
+    if (!origenSnap.exists()) {
+      throw new Error('cuenta_no_encontrada: la cuenta indicada no existe')
+    }
+
+    if (input.tipo === 'transferencia') {
+      const destinoId = input.cuentaDestinoId as string
+      const destinoRef = doc(db, COLLECTIONS.CUENTAS_BANCO, destinoId)
+      const destinoSnap = await tx.get(destinoRef)
+      if (!destinoSnap.exists()) {
+        throw new Error('cuenta_no_encontrada: la cuenta destino no existe')
+      }
+      const saldoOrigen = Number(origenSnap.data()?.saldoActual) || 0
+      if (saldoOrigen < monto) {
+        throw new Error('saldo_insuficiente: la cuenta de origen no tiene fondos suficientes')
+      }
+      tx.update(origenRef, { saldoActual: increment(-monto), actualizado: Date.now() })
+      tx.update(destinoRef, { saldoActual: increment(monto), actualizado: Date.now() })
+    } else {
+      const delta = input.tipo === 'ingreso' ? monto : -monto
+      tx.update(origenRef, { saldoActual: increment(delta), actualizado: Date.now() })
+    }
+
+    tx.set(movRef, data)
+  })
+
+  return movRef.id
 }
 
 export type ErrorTransferencia =
@@ -162,98 +209,134 @@ export async function transferirEntreCuentas(input: EntradaTransferencia): Promi
   if (monto <= 0) return { ok: false, error: 'monto_invalido' }
   if (!input.origenId || !input.destinoId) return { ok: false, error: 'cuenta_no_encontrada' }
   if (input.origenId === input.destinoId) return { ok: false, error: 'misma_cuenta' }
+  if (!parseFechaLocal(input.fecha)) {
+    throw new Error('fecha_invalida: la fecha debe existir y usar el formato YYYY-MM-DD')
+  }
 
   const origenRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.origenId)
   const destinoRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.destinoId)
-  const [origenSnap, destinoSnap] = await Promise.all([getDoc(origenRef), getDoc(destinoRef)])
-  if (!origenSnap.exists() || !destinoSnap.exists()) return { ok: false, error: 'cuenta_no_encontrada' }
-
-  const origen = { id: origenSnap.id, ...(origenSnap.data() as Record<string, unknown>) } as unknown as CuentaBanco
-  const destino = { id: destinoSnap.id, ...(destinoSnap.data() as Record<string, unknown>) } as unknown as CuentaBanco
-  const saldoOrigen = Number(origen.saldoActual) || 0
-  if (saldoOrigen < monto) {
-    return { ok: false, error: 'saldo_insuficiente', saldoDisponible: saldoOrigen, nombreOrigen: origen.nombre }
-  }
-
   const movRef = doc(collection(db, COLLECTIONS.MOVIMIENTOS))
-  const movimiento = limpio({
-    fecha: input.fecha,
-    tipo: 'transferencia',
-    concepto: input.concepto?.trim() || `Transferencia de ${origen.nombre} a ${destino.nombre}`,
-    descripcion: `De ${origen.nombre} a ${destino.nombre}`,
-    monto,
-    categoria: 'Transferencia',
-    cuentaBancoId: origen.id,
-    cuentaDestinoId: destino.id,
-    etiquetas: [],
-    fuente: input.fuente ?? 'chat_IA',
-    estado: 'confirmado',
-    creado: Date.now(),
-    actualizado: Date.now(),
-  })
 
-  const lote = writeBatch(db)
-  lote.set(movRef, movimiento)
-  lote.update(origenRef, { saldoActual: increment(-monto), actualizado: Date.now() })
-  lote.update(destinoRef, { saldoActual: increment(monto), actualizado: Date.now() })
-  await lote.commit()
+  return runTransaction<ResultadoTransferencia>(db, async (tx) => {
+    const origenSnap = await tx.get(origenRef)
+    const destinoSnap = await tx.get(destinoRef)
+    if (!origenSnap.exists() || !destinoSnap.exists()) return { ok: false, error: 'cuenta_no_encontrada' }
 
-  return {
-    ok: true,
-    movimientoId: movRef.id,
-    origen: { ...origen, saldoActual: saldoOrigen - monto },
-    destino: { ...destino, saldoActual: (Number(destino.saldoActual) || 0) + monto },
-  }
-}
+    const origen = { id: origenSnap.id, ...(origenSnap.data() as Record<string, unknown>) } as unknown as CuentaBanco
+    const destino = { id: destinoSnap.id, ...(destinoSnap.data() as Record<string, unknown>) } as unknown as CuentaBanco
+    const saldoOrigen = Number(origen.saldoActual) || 0
+    if (saldoOrigen < monto) {
+      return { ok: false, error: 'saldo_insuficiente', saldoDisponible: saldoOrigen, nombreOrigen: origen.nombre }
+    }
 
-export async function actualizarMovimiento(id: string, input: MovimientoUpdate): Promise<void> {
-  const ref = doc(db, COLLECTIONS.MOVIMIENTOS, id)
-  const snap = await getDoc(ref)
-  if (!snap.exists()) return
-  const viejo = snap.data() as Record<string, unknown>
-  const cuentaVieja = viejo.cuentaBancoId as string | undefined
-  const destinoViejo = viejo.cuentaDestinoId as string | undefined
-  const montoViejo = Number(viejo.monto) || 0
-  const tipoViejo = viejo.tipo as TipoMovimiento
-  if (cuentaVieja) {
-    const reverso = tipoViejo === 'ingreso' ? -montoViejo : montoViejo
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaVieja),
-      { saldoActual: increment(reverso), actualizado: Date.now() },
-      { merge: true }
-    )
-  }
-  if (tipoViejo === 'transferencia' && destinoViejo) {
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, destinoViejo),
-      { saldoActual: increment(-montoViejo), actualizado: Date.now() },
-      { merge: true }
-    )
-  }
-  if (input.cuentaBancoId) {
-    const delta = input.tipo === 'ingreso' ? input.monto : -input.monto
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, input.cuentaBancoId),
-      { saldoActual: increment(delta), actualizado: Date.now() },
-      { merge: true }
-    )
-  }
-  const destinoNuevo = input.tipo === 'transferencia' ? input.cuentaDestinoId ?? destinoViejo : undefined
-  if (destinoNuevo) {
-    await setDoc(
-      doc(db, COLLECTIONS.CUENTAS_BANCO, destinoNuevo),
-      { saldoActual: increment(input.monto), actualizado: Date.now() },
-      { merge: true }
-    )
-  }
-  await updateDoc(
-    ref,
-    limpio({
-      ...input,
-      cuentaDestinoId: destinoNuevo ?? deleteField(),
+    const movimiento = limpio({
+      fecha: input.fecha,
+      tipo: 'transferencia',
+      concepto: input.concepto?.trim() || `Transferencia de ${origen.nombre} a ${destino.nombre}`,
+      descripcion: `De ${origen.nombre} a ${destino.nombre}`,
+      monto,
+      categoria: 'Transferencia',
+      cuentaBancoId: origen.id,
+      cuentaDestinoId: destino.id,
+      etiquetas: [],
+      fuente: input.fuente ?? 'chat_IA',
+      estado: 'confirmado',
+      creado: Date.now(),
       actualizado: Date.now(),
     })
-  )
+
+    tx.set(movRef, movimiento)
+    tx.update(origenRef, { saldoActual: increment(-monto), actualizado: Date.now() })
+    tx.update(destinoRef, { saldoActual: increment(monto), actualizado: Date.now() })
+
+    return {
+      ok: true,
+      movimientoId: movRef.id,
+      origen: { ...origen, saldoActual: saldoOrigen - monto },
+      destino: { ...destino, saldoActual: (Number(destino.saldoActual) || 0) + monto },
+    }
+  })
+}
+
+const efectoEnOrigen = (tipo: TipoMovimiento, monto: number): number => (tipo === 'ingreso' ? monto : -monto)
+const efectoEnDestino = (tipo: TipoMovimiento, monto: number): number => (tipo === 'transferencia' ? monto : 0)
+
+export async function actualizarMovimiento(id: string, input: MovimientoUpdate): Promise<void> {
+  const monto = validarEntradaMovimiento(input)
+  const ref = doc(db, COLLECTIONS.MOVIMIENTOS, id)
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) {
+      throw new Error('movimiento_no_encontrado: el movimiento que se quiere editar no existe')
+    }
+    const viejo = snap.data() as Record<string, unknown>
+    const montoViejo = Number(viejo.monto) || 0
+    const tipoViejo = (viejo.tipo as TipoMovimiento) ?? 'otro'
+    const origenViejo = viejo.cuentaBancoId as string | undefined
+    const destinoViejo = tipoViejo === 'transferencia' ? (viejo.cuentaDestinoId as string | undefined) : undefined
+
+    // El delta se calcula como (efecto nuevo - efecto viejo) por cuenta, de modo
+    // que el ajuste sea idempotente y se aplique en una sola transacción.
+    const deltas = new Map<string, number>()
+    const acumular = (cuentaId: string | undefined, delta: number) => {
+      if (!cuentaId || !Number.isFinite(delta) || delta === 0) return
+      deltas.set(cuentaId, (deltas.get(cuentaId) ?? 0) + delta)
+    }
+
+    acumular(origenViejo, -efectoEnOrigen(tipoViejo, montoViejo))
+    acumular(destinoViejo, -efectoEnDestino(tipoViejo, montoViejo))
+
+    const destinoNuevo = input.tipo === 'transferencia' ? input.cuentaDestinoId : undefined
+    acumular(input.cuentaBancoId, efectoEnOrigen(input.tipo, monto))
+    acumular(destinoNuevo, efectoEnDestino(input.tipo, monto))
+
+    const saldos = new Map<string, number | null>()
+    for (const cuentaId of deltas.keys()) {
+      const cuentaSnap = await tx.get(doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId))
+      saldos.set(cuentaId, cuentaSnap.exists() ? Number(cuentaSnap.data()?.saldoActual) || 0 : null)
+    }
+
+    const requeridas = new Set<string>()
+    if (input.cuentaBancoId) requeridas.add(input.cuentaBancoId)
+    if (destinoNuevo) requeridas.add(destinoNuevo)
+    for (const cuentaId of requeridas) {
+      if (saldos.get(cuentaId) === null) {
+        throw new Error('cuenta_no_encontrada: la cuenta indicada no existe')
+      }
+    }
+
+    if (input.tipo === 'transferencia' && input.cuentaBancoId) {
+      const saldoFinal = (saldos.get(input.cuentaBancoId) ?? 0) + (deltas.get(input.cuentaBancoId) ?? 0)
+      if (saldoFinal < 0) {
+        throw new Error('saldo_insuficiente: la cuenta de origen no tiene fondos suficientes')
+      }
+    }
+
+    for (const [cuentaId, delta] of deltas) {
+      if (saldos.get(cuentaId) === null) continue // la cuenta vieja ya no existe: nada que revertir
+      tx.update(doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId), {
+        saldoActual: increment(delta),
+        actualizado: Date.now(),
+      })
+    }
+
+    tx.update(
+      ref,
+      limpio({
+        fecha: input.fecha,
+        tipo: input.tipo,
+        concepto: input.concepto,
+        monto,
+        categoria: input.categoria,
+        subcategoria: input.subcategoria,
+        descripcion: input.descripcion,
+        cuentaBancoId: input.cuentaBancoId,
+        cuentaDestinoId: destinoNuevo ?? deleteField(),
+        actualizado: Date.now(),
+      })
+    )
+  })
 }
 
 export async function listarCuentasBanco(): Promise<CuentaBanco[]> {
@@ -285,25 +368,20 @@ export async function obtenerResumenSaldos(): Promise<{ cuentas: CuentaBanco[]; 
   return { cuentas, total }
 }
 
-function ordenarMovimientosDesc(lista: MovimientoDoc[]): MovimientoDoc[] {
-  return [...lista].sort((a, b) => {
-    const cmpFecha = String(b.fecha ?? '').localeCompare(String(a.fecha ?? ''))
-    if (cmpFecha !== 0) return cmpFecha
-    return (Number(b.creado) || 0) - (Number(a.creado) || 0)
-  })
-}
-
-export async function listarTodosLosMovimientos(_max?: number): Promise<MovimientoDoc[]> {
-  void _max
-  const snap = await getDocs(collection(db, COLLECTIONS.MOVIMIENTOS))
-  const todos = snap.docs.map((d) => ({ id: d.id, ...(d.data() as Record<string, unknown>) })) as unknown as MovimientoDoc[]
-  return ordenarMovimientosDesc(todos)
+export async function listarTodosLosMovimientos(max?: number): Promise<MovimientoDoc[]> {
+  const col = collection(db, COLLECTIONS.MOVIMIENTOS)
+  const snap =
+    typeof max === 'number' && max > 0
+      ? await getDocs(query(col, orderBy('fecha', 'desc'), limit(Math.floor(max))))
+      : await getDocs(query(col, orderBy('fecha', 'desc')))
+  return snap.docs.map((d) => ({
+    id: d.id,
+    ...(d.data() as Record<string, unknown>),
+  })) as unknown as MovimientoDoc[]
 }
 
 export async function listarMovimientos(max?: number): Promise<MovimientoDoc[]> {
-  const todos = await listarTodosLosMovimientos()
-  if (typeof max === 'number' && max > 0) return todos.slice(0, max)
-  return todos
+  return listarTodosLosMovimientos(max)
 }
 
 const limpiarCelda = (v: unknown): string =>
@@ -381,7 +459,7 @@ export async function exportarMovimientosCompacto(): Promise<{
     else if (m.tipo !== 'transferencia') totalEgresos += v
   }
 
-  const fechaHoy = new Date().toISOString().slice(0, 10)
+  const fechaHoy = hoyISO()
   const lineas: string[] = [
     `# CASHMET_MOVIMIENTOS_COMPLETO v1 | exportado=${fechaHoy} | moneda=COP | total_movimientos=${cronologicos.length} | ingresos_acum=${Math.round(totalIngresos)} | egresos_acum=${Math.round(totalEgresos)} | balance_neto=${Math.round(totalIngresos - totalEgresos)}`,
     'fecha|hora|tipo|monto|concepto|categoria|subcategoria|cuenta|cuentaId|cuentaDestino|cuentaDestinoId|vinculo|descripcion|etiquetas|fuente|estado|notasIA|id|creado',
@@ -437,26 +515,32 @@ export async function eliminarCuentaBanco(id: string): Promise<void> {
 }
 
 export async function eliminarMovimiento(id: string): Promise<void> {
-  const documento = await getDoc(doc(db, COLLECTIONS.MOVIMIENTOS, id))
-  if (documento.exists()) {
+  const ref = doc(db, COLLECTIONS.MOVIMIENTOS, id)
+
+  await runTransaction(db, async (tx) => {
+    const documento = await tx.get(ref)
+    if (!documento.exists()) return
     const datos = documento.data() as Record<string, unknown>
+    const monto = Number(datos.monto) || 0
+    const tipo = (datos.tipo as TipoMovimiento) ?? 'otro'
     const cuentaBancoId = datos.cuentaBancoId as string | undefined
-    const cuentaDestinoId = datos.cuentaDestinoId as string | undefined
-    if (cuentaBancoId && typeof datos.monto === 'number') {
-      const reverso = datos.tipo === 'ingreso' ? -datos.monto : datos.monto
-      await setDoc(
-        doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaBancoId),
-        { saldoActual: increment(reverso), actualizado: Date.now() },
-        { merge: true }
-      )
+    const cuentaDestinoId = (datos.cuentaDestinoId as string | undefined) ?? undefined
+
+    const reversos = new Map<string, number>()
+    const acumular = (cuentaId: string | undefined, delta: number) => {
+      if (!cuentaId || !delta) return
+      reversos.set(cuentaId, (reversos.get(cuentaId) ?? 0) + delta)
     }
-    if (datos.tipo === 'transferencia' && cuentaDestinoId && typeof datos.monto === 'number') {
-      await setDoc(
-        doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaDestinoId),
-        { saldoActual: increment(-datos.monto), actualizado: Date.now() },
-        { merge: true }
-      )
+    acumular(cuentaBancoId, -efectoEnOrigen(tipo, monto))
+    if (tipo === 'transferencia') acumular(cuentaDestinoId, -efectoEnDestino(tipo, monto))
+
+    for (const [cuentaId, delta] of reversos) {
+      const cuentaRef = doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId)
+      const cuentaSnap = await tx.get(cuentaRef)
+      if (!cuentaSnap.exists()) continue
+      tx.update(cuentaRef, { saldoActual: increment(delta), actualizado: Date.now() })
     }
-  }
-  await deleteDoc(doc(db, COLLECTIONS.MOVIMIENTOS, id))
+
+    tx.delete(ref)
+  })
 }

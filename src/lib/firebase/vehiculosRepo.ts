@@ -1,4 +1,4 @@
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, deleteField, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
@@ -287,13 +287,23 @@ export async function crearVehiculo(v: VehiculoUpdate): Promise<string> {
 
 export async function actualizarVehiculo(id: string, v: VehiculoUpdate): Promise<void> {
   const actual = await obtenerVehiculo(id)
+  if (!actual) throw new Error('vehiculo_no_encontrado: el vehículo que se quiere actualizar no existe')
   const mezclado = mezclarVehiculo(actual, v)
-  const payload = limpio({
-    ...v,
+  const { id: _omitido, ...campos } = mezclado as Record<string, unknown>
+  const conCalculos: Record<string, unknown> = {
+    ...campos,
     gastosMensualesCalculados: calcularGastosMensuales(mezclado),
     actualizado: Date.now(),
-  } as Record<string, unknown>)
-  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), payload)
+  }
+
+  // null significa "borrar el bloque" (por ejemplo, quitar el SOAT), no
+  // escribir el literal null en Firestore.
+  const payload: Record<string, unknown> = {}
+  for (const [clave, valor] of Object.entries(conCalculos)) {
+    payload[clave] = valor === null ? deleteField() : valor
+  }
+
+  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), limpio(payload))
 }
 
 export async function eliminarVehiculo(id: string): Promise<void> {

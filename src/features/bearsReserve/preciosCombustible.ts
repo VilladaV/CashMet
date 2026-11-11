@@ -1,4 +1,5 @@
 import type { PreciosCombustible, TerrenoRuta, TipoCombustible } from './types'
+import { hoyISO } from '@/lib/fechas'
 
 const CLAVE_STORAGE_PRECIOS = 'bears_reserve_precios_combustible_v2'
 
@@ -19,7 +20,7 @@ export const PRECIOS_COMBUSTIBLE_BASE_COLOMBIA: PreciosCombustible = {
  * El usuario nunca tiene que buscarlos ni cambiarlos a mano.
  */
 export function obtenerPreciosCombustibleActuales(): PreciosCombustible {
-  const hoyStr = new Date().toISOString().slice(0, 10)
+  const hoyStr = hoyISO()
   try {
     const raw = localStorage.getItem(CLAVE_STORAGE_PRECIOS)
     if (raw) {

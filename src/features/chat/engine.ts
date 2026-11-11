@@ -105,9 +105,14 @@ function isoDe(d: Date): string {
 
 function fechaDeDia(dia: number): string {
   const hoy = new Date()
-  const base = new Date(hoy.getFullYear(), hoy.getMonth(), dia)
-  if (base.getTime() < new Date(hoy.toDateString()).getTime()) base.setMonth(base.getMonth() + 1)
-  return isoDe(base)
+  const objetivo = Math.max(1, Math.round(dia))
+  const ultimoEsteMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0).getDate()
+  const esteMes = new Date(hoy.getFullYear(), hoy.getMonth(), Math.min(objetivo, ultimoEsteMes))
+  if (esteMes.getTime() >= new Date(hoy.toDateString()).getTime()) return isoDe(esteMes)
+
+  // Si el día ya pasó, se usa el mismo día (recortado) del mes siguiente.
+  const ultimoProximoMes = new Date(hoy.getFullYear(), hoy.getMonth() + 2, 0).getDate()
+  return isoDe(new Date(hoy.getFullYear(), hoy.getMonth() + 1, Math.min(objetivo, ultimoProximoMes)))
 }
 
 function extraerDiaVencimiento(texto: string): number | undefined {
@@ -294,6 +299,19 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     /\b(movimiento|movimientos|gasto|gastos|ingreso|ingresos)\b/.test(t)
   ) {
     return { respuesta: 'Buscando movimientos recientes...', acciones: ['busqueda_movimientos'] }
+  }
+
+  // Preguntas de conversión ("¿cuánto son 100 dólares en pesos?") no deben
+  // registrarse como gasto/ingreso: solo se responde la consulta.
+  const preguntaConversion =
+    /\b(cuanto (son|es|valen|vale|cuesta)|equivalen?|equivalente|conversion|convertir|cambiar|tasa de cambio)\b/.test(t) &&
+    /\b(dolar|dolares|usd|euro|euros|eur|pesos|cop|moneda|divisa)\b/.test(t)
+  if (preguntaConversion) {
+    return {
+      respuesta: 'Puedo convertir ese monto con la tasa del día; dime la moneda y el monto exacto.',
+      acciones: ['consulta_conversion'],
+      params: { monto, moneda },
+    }
   }
 
   if (monto && monto > 0) {
