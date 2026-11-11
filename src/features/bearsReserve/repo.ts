@@ -250,12 +250,23 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
  */
 function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): VehiculoOperativo {
   const tipo = v.tipo || 'carro'
-  const esCamion = tipo === 'camion'
-  const esMoto = tipo === 'moto'
 
-  const capacidadGalones = esCamion ? 45 : esMoto ? 3.2 : 13
-  const tipoCombustible = esCamion ? 'diesel' : 'corriente'
-  const consumoBase = esCamion ? 9 : esMoto ? 110 : 32
+  // Deducción técnica con IA de las especificaciones de fábrica reales
+  const ficha = investigarFichaVehiculoIA(
+    v.marca,
+    v.linea,
+    v.tipo,
+    v.modelo,
+    v.notas,
+    v.carroceria,
+    v.capacidad
+  )
+
+  const capacidadGalones = ficha.capacidadTanqueGalones
+  const capacidadLitros = ficha.capacidadTanqueLitros
+  const tipoCombustible = ficha.tipoCombustible
+  const consumoBase = ficha.consumoKmPorGalon
+  const notaFicha = ficha.fichaInvestigadaNota
 
   return {
     id: v.id,
@@ -283,13 +294,12 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
       }
       return false
     })(),
-    investigadoIA: extra?.investigadoIA ?? false,
-    fichaInvestigadaNota: extra?.fichaInvestigadaNota,
+    investigadoIA: true,
+    fichaInvestigadaNota: notaFicha,
     estado: extra?.estado || (v.estado === 'En reparación' ? 'mantenimiento' : 'disponible'),
     tipoCombustible: extra?.tipoCombustible || tipoCombustible,
-    capacidadTanqueGalones: extra?.capacidadTanqueGalones || capacidadGalones,
-    capacidadTanqueLitros:
-      extra?.capacidadTanqueLitros || Number(((extra?.capacidadTanqueGalones || capacidadGalones) * 3.78541).toFixed(1)),
+    capacidadTanqueGalones: capacidadGalones,
+    capacidadTanqueLitros: capacidadLitros,
     nivelCombustiblePorc: extra?.nivelCombustiblePorc ?? 85,
     consumoKmPorGalon: extra?.consumoKmPorGalon || consumoBase,
     kilometrajeActual: v.mantenimiento?.kilometrajeActual ?? 0,

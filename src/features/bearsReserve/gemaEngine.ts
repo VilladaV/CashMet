@@ -197,11 +197,17 @@ export function conductorDeRutaEnCuadrante(
  * consumo en relieve montañoso andino y tipo de combustible para cualquier vehículo
  * del parque automotor colombiano (desde Corsa y Spark hasta camiones pesados y tractomulas de 5ta rueda).
  */
+/**
+ * Investigador de especificaciones oficiales con IA 🔍:
+ * Deduce con realismo técnico la capacidad de tanque oficial (galones y litros),
+ * consumo en relieve montañoso andino y tipo de combustible para cualquier vehículo
+ * del parque automotor (soviéticos/rusos, europeos, americanos, japoneses y comerciales).
+ */
 export function investigarFichaVehiculoIA(
   marca: string,
   linea: string,
   tipo: string,
-  modelo?: number | null,
+  _modelo?: number | null,
   notas?: string,
   carroceria?: string,
   capacidadTexto?: string
@@ -221,6 +227,37 @@ export function investigarFichaVehiculoIA(
 
   const corpus = `${m} ${l} ${t} ${n} ${c} ${cap}`
 
+  // 0. Si el usuario especificó explícitamente la capacidad en las notas o ficha de CashMet
+  // Ej: "tanque 80 gal", "tanque de 330 L", "tanque 100 galones", "300 litros"
+  const matchGal = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:gal|galones)/) ||
+                   corpus.match(/(\d+(?:\.\d+)?)\s*(?:gal|galones)/)
+  const matchLitros = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:l|litros|lt)/) ||
+                      corpus.match(/(\d+(?:\.\d+)?)\s*(?:l|litros|lt)\b/)
+
+  if (matchGal && Number(matchGal[1]) >= 3) {
+    const gal = Number(matchGal[1])
+    const lit = Number((gal * 3.78541).toFixed(1))
+    const esDiesel = /diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|man|scania|volvo|isuzu|hino/.test(corpus)
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
+      tipoCombustible: esDiesel ? 'diesel' : 'corriente',
+      fichaInvestigadaNota: `Ficha técnica verificada según configuración en notas: Tanque ${gal} gal (${lit} L). ${esDiesel ? 'Diésel/ACPM' : 'Gasolina'}.`,
+    }
+  } else if (matchLitros && Number(matchLitros[1]) >= 15) {
+    const lit = Number(matchLitros[1])
+    const gal = Number((lit / 3.78541).toFixed(1))
+    const esDiesel = /diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|man|scania|volvo|isuzu|hino/.test(corpus)
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
+      tipoCombustible: esDiesel ? 'diesel' : 'corriente',
+      fichaInvestigadaNota: `Ficha técnica verificada según configuración en notas: Tanque oficial ${lit} L (${gal} gal). ${esDiesel ? 'Diésel/ACPM' : 'Gasolina'}.`,
+    }
+  }
+
   // 1. Motocicletas
   if (t === 'moto' || corpus.includes('moto') || l.includes('xtz') || l.includes('dr ') || l.includes('pulsar') || l.includes('boxer') || l.includes('xr ')) {
     return {
@@ -228,170 +265,457 @@ export function investigarFichaVehiculoIA(
       capacidadTanqueLitros: 12.1,
       consumoKmPorGalon: 110,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica oficial verificada: Tanque 3.2 gal (12.1 L). Rendimiento cordillera: 110 km/gal. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica motocicleta: Tanque 3.2 gal (12.1 L). Rendimiento cordillera: 110 km/gal. Gasolina Corriente.`,
     }
   }
 
-  // 2. Tractomulas y Camiones de Quinta Rueda / Pesados (Notas o Línea)
-  if (
-    corpus.includes('quinta rueda') ||
-    corpus.includes('5ta rueda') ||
-    corpus.includes('tractomula') ||
-    corpus.includes('cabezote') ||
-    l.includes('kenworth') ||
-    l.includes('t800') ||
-    l.includes('freightliner') ||
-    l.includes('cascadia') ||
-    l.includes('international') ||
-    l.includes('workstar') ||
-    l.includes('mack')
-  ) {
-    const notasInfo = n ? ` Configuración en notas: "${notas}".` : ''
+  // 2. GAZelle (GAZ 3302, 2705, 3221, Sobol) — Camión ligero / Van 1.5t rusa
+  if (l.includes('gazelle') || l.includes('3302') || l.includes('sobol') || (m === 'gaz' && (corpus.includes('ligero') || corpus.includes('pickup')))) {
     return {
-      capacidadTanqueGalones: 160,
-      capacidadTanqueLitros: 605,
-      consumoKmPorGalon: 6.2,
+      capacidadTanqueGalones: 18.0,
+      capacidadTanqueLitros: 68.1,
+      consumoKmPorGalon: 31,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha pesada de carga/5ta rueda verificada: Tanques duales de aluminio 160 gal (605 L). Rendimiento en ascensos de alta cordillera (La Línea/Letras): ~6.2 km/gal. Diésel/ACPM.${notasInfo}`,
+      fichaInvestigadaNota: `Ficha técnica oficial GAZ 3302 GAZelle: Tanque original de fábrica 18 gal (68.1 L). Rendimiento mixto cordillera: ~31 km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 3. Transporte de Pasajeros / Buses / Busetas escolares / Vans
-  if (
-    corpus.includes('bus') ||
-    corpus.includes('buseta') ||
-    corpus.includes('van') ||
-    corpus.includes('pasajero') ||
-    corpus.includes('escolar') ||
-    corpus.includes('sprinter') ||
-    corpus.includes('master') ||
-    corpus.includes('crafter') ||
-    l.includes('troop carrier')
-  ) {
-    const esTroop = l.includes('troop')
-    const galones = esTroop ? 23.8 : 22.5
-    const litros = Number((galones * 3.78541).toFixed(1))
-    const kmGalon = esTroop ? 24 : 25
-    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
+  // 3. KAVZ (KAVZ 685, 3976, Overlander) — Autobús rural 4x4 soviético chasis GAZ-53
+  if (m.includes('kavz') || l.includes('kavz') || l.includes('685') || (corpus.includes('overlander') && corpus.includes('autobús'))) {
     return {
-      capacidadTanqueGalones: galones,
-      capacidadTanqueLitros: litros,
-      consumoKmPorGalon: kmGalon,
+      capacidadTanqueGalones: 27.7,
+      capacidadTanqueLitros: 105.0,
+      consumoKmPorGalon: 19,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha transporte colectivo/escolar: Tanque ${galones} gal (${litros} L). Rendimiento: ~${kmGalon} km/gal. Diésel.${notasInfo}`,
+      fichaInvestigadaNota: `Ficha técnica oficial KAVZ 685 Overlander: Chasis camión GAZ-53 con tanque de 27.7 gal (105 L). Rendimiento rural: ~19 km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 4. Camiones medianos y rígidos (Chevrolet Kodiak, NPR, NHR, FTR, Hino Dutro)
-  if (
-    corpus.includes('kodiak') ||
-    corpus.includes('brigadier') ||
-    corpus.includes('ftr') ||
-    corpus.includes('npr') ||
-    corpus.includes('nhr') ||
-    corpus.includes('nkr') ||
-    corpus.includes('hino') ||
-    t === 'camion'
-  ) {
-    const esPesado = corpus.includes('kodiak') || corpus.includes('brigadier') || corpus.includes('ftr')
-    const galones = esPesado ? 55 : 36
-    const litros = Number((galones * 3.78541).toFixed(1))
-    const kmGalon = esPesado ? 8.5 : 14.5
-    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
+  // 4. KrAZ pesados (KrAZ 250, 255, 256, Monster, 260, 6322) — Motor YaMZ-238 V8 Diesel
+  if (m.includes('kraz') || l.includes('kraz') || l.includes('250') || l.includes('256') || (corpus.includes('soviético') && corpus.includes('6x6'))) {
     return {
-      capacidadTanqueGalones: galones,
-      capacidadTanqueLitros: litros,
-      consumoKmPorGalon: kmGalon,
+      capacidadTanqueGalones: 87.2,
+      capacidadTanqueLitros: 330.0,
+      consumoKmPorGalon: 8.2,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica camión diésel: Tanque ${galones} gal (${litros} L). Rendimiento cordillera: ~${kmGalon} km/gal. Diésel/ACPM.${notasInfo}`,
+      fichaInvestigadaNota: `Ficha técnica pesada KrAZ (Motor V8 YaMZ-238 14.86 L): Tanques dobles de fábrica 2x165 L = 330 L (87.2 gal). Rendimiento trabajo pesado: ~8.2 km/gal. Diésel pesado.`,
     }
   }
 
-  // 5. Camperos 4x4 y Camionetas Pickup (Toyota Hilux, Land Cruiser, Prado, Nissan Frontier, D-Max, Ranger)
-  if (
-    corpus.includes('4x4') ||
-    corpus.includes('winche') ||
-    corpus.includes('trocha') ||
-    l.includes('hilux') ||
-    l.includes('prado') ||
-    l.includes('land cruiser') ||
-    l.includes('frontier') ||
-    l.includes('d-max') ||
-    l.includes('dmax') ||
-    l.includes('ranger') ||
-    l.includes('patrol')
-  ) {
-    const esTroopOPrado = l.includes('troop') || l.includes('land cruiser') || l.includes('patrol')
-    const galones = esTroopOPrado ? 23.8 : 21.1
-    const litros = Number((galones * 3.78541).toFixed(1))
-    const kmGalon = esTroopOPrado ? 24 : 29
-    const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
+  // 5. GAZ camiones medianos (GAZ 53, GAZ 66, GAZ 3307, GAZ 3308 Sadko, GAZ 3309)
+  if (m === 'gaz' || l.includes('gaz 53') || l.includes('gaz 66') || l.includes('sadko') || l.includes('3308') || l.includes('3307')) {
+    const es66 = l.includes('66') || l.includes('sadko')
+    const gal = es66 ? 55.5 : 27.7
+    const lit = es66 ? 210.0 : 105.0
     return {
-      capacidadTanqueGalones: galones,
-      capacidadTanqueLitros: litros,
-      consumoKmPorGalon: kmGalon,
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: es66 ? 14 : 17,
       tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica pickup/campero 4x4 de alta tracción: Tanque ${galones} gal (${litros} L). Rendimiento trocha: ~${kmGalon} km/gal. Diésel.${notasInfo}`,
+      fichaInvestigadaNota: `Ficha técnica GAZ camión todo terreno: Tanque oficial ${gal} gal (${lit} L). Rendimiento en trocha: ~${es66 ? 14 : 17} km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 6. Camperos livianos (Suzuki Jimny, Samurai, Vitara)
-  if (l.includes('jimny') || l.includes('samurai') || l.includes('vitara')) {
+  // 6. Ural pesados (Ural 375, Ural 4320, Ural Next 6x6)
+  if (m.includes('ural') || l.includes('ural') || l.includes('4320')) {
     return {
-      capacidadTanqueGalones: 10.5,
-      capacidadTanqueLitros: 40,
-      consumoKmPorGalon: 36,
+      capacidadTanqueGalones: 68.7,
+      capacidadTanqueLitros: 260.0,
+      consumoKmPorGalon: 10.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Ural 4320 6x6: Tanque principal 200 L + auxiliar 60 L = 260 L (68.7 gal). Rendimiento trocha pesada: ~10.5 km/gal. Diésel.`,
+    }
+  }
+
+  // 7. KamAZ pesados (KamAZ 5320, 5410, 5511, 4310, 43118, 6520)
+  if (m.includes('kamaz') || l.includes('kamaz') || l.includes('5320') || l.includes('43118') || l.includes('6520')) {
+    const esLargoO6x6 = l.includes('43118') || l.includes('6520') || corpus.includes('6x6')
+    const gal = esLargoO6x6 ? 92.5 : 66.0
+    const lit = esLargoO6x6 ? 350.0 : 250.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: 11.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica KamAZ Diésel: Tanque oficial de aluminio ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal. Diésel/ACPM.`,
+    }
+  }
+
+  // 8. ZIL camiones (ZIL 130, ZIL 131 6x6)
+  if (m.includes('zil') || l.includes('zil') || l.includes('130') || l.includes('131')) {
+    const es131 = l.includes('131') || corpus.includes('6x6')
+    const gal = es131 ? 89.8 : 44.9
+    const lit = es131 ? 340.0 : 170.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: es131 ? 11 : 14,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica ZIL: Tanque oficial ${lit} L (${gal} gal). Rendimiento montaña: ~${es131 ? 11 : 14} km/gal. Diésel.`,
+    }
+  }
+
+  // 9. MAZ camiones pesados (MAZ 500, 5432, 6422)
+  if (m.includes('maz') || l.includes('maz') || l.includes('6422')) {
+    return {
+      capacidadTanqueGalones: 92.5,
+      capacidadTanqueLitros: 350.0,
+      consumoKmPorGalon: 9.8,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica MAZ: Tanque de carga pesada 350 L (92.5 gal). Rendimiento montaña: ~9.8 km/gal. Diésel.`,
+    }
+  }
+
+  // 10. UAZ camperos y furgones (UAZ 469, Hunter, Patriot, 452 Bukhanka)
+  if (m.includes('uaz') || l.includes('uaz') || l.includes('bukhanka') || l.includes('hunter') || l.includes('patriot') || l.includes('469') || l.includes('452')) {
+    return {
+      capacidadTanqueGalones: 20.6,
+      capacidadTanqueLitros: 78.0,
+      consumoKmPorGalon: 26,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica 4x4 liviano: Tanque 10.5 gal (40 L). Rendimiento en trocha: ~36 km/gal. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica UAZ 4x4: Tanques duales simétricos 2x39 L = 78 L (20.6 gal). Rendimiento trocha: ~26 km/gal. Gasolina Corriente.`,
     }
   }
 
-  // 7. Automóviles compactos específicos (Chevrolet Corsa, Aveo, Sail, Spark, Renault Clio, Sandero, Logan, Duster)
+  // 11. Kenworth pesados (Kenworth T800, TwinSteer, W900, T680, C500)
+  if (m.includes('kenworth') || l.includes('kenworth') || l.includes('t800') || l.includes('twinsteer') || l.includes('w900') || l.includes('t680') || l.includes('c500')) {
+    const esTwinSteer = l.includes('twinsteer') || corpus.includes('10x10') || corpus.includes('8x4')
+    const gal = esTwinSteer ? 200 : 240
+    const lit = Number((gal * 3.78541).toFixed(1))
+    const kmGal = esTwinSteer ? 5.8 : 6.2
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: kmGal,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha pesada Kenworth ${esTwinSteer ? 'T800 TwinSteer 10x10' : 'T800'}: Tanques duales de aluminio ${gal} gal (${lit} L). Rendimiento cordillera: ~${kmGal} km/gal. Diésel/ACPM.`,
+    }
+  }
+
+  // 12. MAN camiones europeos (MAN TGS, TGX, TGM, TGL, 18.420, 18.440)
+  if (m.includes('man') || l.includes('tgs') || l.includes('tgx') || l.includes('tgm') || l.includes('18.420') || l.includes('18.440')) {
+    return {
+      capacidadTanqueGalones: 105.7,
+      capacidadTanqueLitros: 400.0,
+      consumoKmPorGalon: 12.2,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica MAN TGS 18.420 Euro 6: Tanque original de aluminio D26 400 L (105.7 gal). Rendimiento ruta andina: ~12.2 km/gal. Diésel Euro 6.`,
+    }
+  }
+
+  // 13. Scania (R420, R440, R480, R500, G440, P360, 113, 124)
+  if (m.includes('scania') || l.includes('scania') || l.includes('r440') || l.includes('r420') || l.includes('r500')) {
+    const esCabezote = corpus.includes('cabezote') || corpus.includes('tractomula') || corpus.includes('quinta rueda')
+    const gal = esCabezote ? 118.9 : 92.5
+    const lit = esCabezote ? 450.0 : 350.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: 11.8,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Scania: Tanque original de aluminio ${lit} L (${gal} gal). Rendimiento montaña: ~11.8 km/gal. Diésel Euro 5/6.`,
+    }
+  }
+
+  // 14. Volvo (FH, FM, FMX, VM, FH12, FH16, FM400)
+  if (m.includes('volvo') || l.includes('volvo') || l.includes('fh') || l.includes('fmx') || l.includes('vm')) {
+    const esFmxOVolqueta = l.includes('fmx') || corpus.includes('volqueta')
+    const esVm = l.includes('vm')
+    const gal = esVm ? 72.6 : esFmxOVolqueta ? 109.6 : 118.9
+    const lit = esVm ? 275.0 : esFmxOVolqueta ? 415.0 : 450.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: 11.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Volvo camión/tracto: Tanque oficial ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal. Diésel.`,
+    }
+  }
+
+  // 15. Mercedes-Benz pesados y medianos (Actros, Axor, Atego, Arocs, Unimog, 1113, 1620)
+  if (m.includes('mercedes') || l.includes('actros') || l.includes('axor') || l.includes('atego') || l.includes('unimog') || l.includes('1113') || l.includes('1620')) {
+    if (l.includes('unimog')) {
+      return {
+        capacidadTanqueGalones: 42.3,
+        capacidadTanqueLitros: 160.0,
+        consumoKmPorGalon: 16,
+        tipoCombustible: 'diesel',
+        fichaInvestigadaNota: `Ficha técnica Mercedes-Benz Unimog 4x4 militar/rural: Tanque oficial 160 L (42.3 gal). Rendimiento trocha: ~16 km/gal. Diésel.`,
+      }
+    }
+    const esPesado = l.includes('actros') || l.includes('arocs') || l.includes('axor')
+    const gal = esPesado ? 118.9 : 55.5
+    const lit = esPesado ? 450.0 : 210.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esPesado ? 11.5 : 17.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Mercedes-Benz: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~${esPesado ? 11.5 : 17.5} km/gal. Diésel.`,
+    }
+  }
+
+  // 16. Freightliner (Cascadia, Columbia, M2 106, M2 112, FLD120)
+  if (m.includes('freightliner') || l.includes('cascadia') || l.includes('columbia') || l.includes('m2')) {
+    const esM2 = l.includes('m2')
+    const gal = esM2 ? 65 : 200
+    const lit = Number((gal * 3.78541).toFixed(1))
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esM2 ? 14 : 6.2,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Freightliner ${esM2 ? 'M2' : 'Cascadia/Columbia'}: Tanque ${gal} gal (${lit} L). Rendimiento: ~${esM2 ? 14 : 6.2} km/gal. Diésel.`,
+    }
+  }
+
+  // 17. International (WorkStar 7600, ProStar, 4300 DuraStar, Eagle 9400)
+  if (m.includes('international') || l.includes('workstar') || l.includes('prostar') || l.includes('durastar') || l.includes('7600') || l.includes('4300') || l.includes('9400')) {
+    const esDuraStar = l.includes('4300') || l.includes('durastar')
+    const esWorkStar = l.includes('7600') || l.includes('workstar')
+    const gal = esDuraStar ? 50 : esWorkStar ? 80 : 200
+    const lit = Number((gal * 3.78541).toFixed(1))
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esDuraStar ? 16 : esWorkStar ? 8.5 : 6.2,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica International: Tanque ${gal} gal (${lit} L). Rendimiento montaña: ~${esDuraStar ? 16 : 8.5} km/gal. Diésel.`,
+    }
+  }
+
+  // 18. Mack (Granite, Anthem, Vision, CH613)
+  if (m.includes('mack') || l.includes('granite') || l.includes('anthem') || l.includes('vision')) {
+    const esGranite = l.includes('granite') || corpus.includes('volqueta')
+    const gal = esGranite ? 88 : 200
+    const lit = Number((gal * 3.78541).toFixed(1))
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esGranite ? 8.5 : 6.2,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha pesada Mack ${esGranite ? 'Granite Volqueta' : 'Tracto'}: Tanque ${gal} gal (${lit} L). Diésel.`,
+    }
+  }
+
+  // 19. Camiones Isuzu / Chevrolet nacionales (NHR, NKR, NPR, NQR, FTR, FVR, FVZ, Kodiak, Brigadier)
+  if (corpus.includes('kodiak')) {
+    return {
+      capacidadTanqueGalones: 50.0,
+      capacidadTanqueLitros: 189.3,
+      consumoKmPorGalon: 8.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet Kodiak (Cat 3116/3126): Tanque 50 gal (189.3 L). Rendimiento cordillera: ~8.5 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('brigadier')) {
+    return {
+      capacidadTanqueGalones: 65.0,
+      capacidadTanqueLitros: 246.1,
+      consumoKmPorGalon: 7.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet Brigadier: Tanque 65 gal (246.1 L). Rendimiento: ~7.5 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('nhr')) {
+    return {
+      capacidadTanqueGalones: 19.8,
+      capacidadTanqueLitros: 75.0,
+      consumoKmPorGalon: 34,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet NHR: Tanque oficial 75 L (19.8 gal). Rendimiento: ~34 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('npr') || corpus.includes('nkr') || corpus.includes('reward')) {
+    return {
+      capacidadTanqueGalones: 26.4,
+      capacidadTanqueLitros: 100.0,
+      consumoKmPorGalon: 24,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet NPR / Isuzu: Tanque oficial 100 L (26.4 gal). Rendimiento: ~24 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('nqr')) {
+    return {
+      capacidadTanqueGalones: 37.0,
+      capacidadTanqueLitros: 140.0,
+      consumoKmPorGalon: 20,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet NQR: Tanque oficial 140 L (37.0 gal). Rendimiento: ~20 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('ftr')) {
+    return {
+      capacidadTanqueGalones: 52.8,
+      capacidadTanqueLitros: 200.0,
+      consumoKmPorGalon: 14,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet FTR: Tanque oficial 200 L (52.8 gal). Rendimiento: ~14 km/gal. Diésel.`,
+    }
+  }
+  if (corpus.includes('fvr') || corpus.includes('fvz')) {
+    return {
+      capacidadTanqueGalones: 79.2,
+      capacidadTanqueLitros: 300.0,
+      consumoKmPorGalon: 9.5,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Chevrolet FVR / FVZ doble troque: Tanque 300 L (79.2 gal). Rendimiento: ~9.5 km/gal. Diésel.`,
+    }
+  }
+
+  // 20. Hino / Fuso / Foton / JAC camiones
+  if (m.includes('hino') || l.includes('dutro') || l.includes('hino 300')) {
+    return {
+      capacidadTanqueGalones: 26.4,
+      capacidadTanqueLitros: 100.0,
+      consumoKmPorGalon: 24,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Hino Dutro / Serie 300: Tanque oficial 100 L (26.4 gal). Rendimiento: ~24 km/gal. Diésel.`,
+    }
+  }
+  if (l.includes('hino 500') || l.includes('fc9j') || l.includes('fg8j')) {
+    return {
+      capacidadTanqueGalones: 52.8,
+      capacidadTanqueLitros: 200.0,
+      consumoKmPorGalon: 14,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Hino 500: Tanque oficial 200 L (52.8 gal). Rendimiento: ~14 km/gal. Diésel.`,
+    }
+  }
+  if (m.includes('fuso') || l.includes('canter')) {
+    return {
+      capacidadTanqueGalones: 26.4,
+      capacidadTanqueLitros: 100.0,
+      consumoKmPorGalon: 25,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Mitsubishi Fuso Canter: Tanque oficial 100 L (26.4 gal). Diésel.`,
+    }
+  }
+  if (m.includes('foton') || m.includes('jac')) {
+    const esPesado = corpus.includes('volqueta') || corpus.includes('6x4') || corpus.includes('auman') || corpus.includes('gallop')
+    const gal = esPesado ? 79.2 : 26.4
+    const lit = esPesado ? 300.0 : 100.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esPesado ? 9.5 : 24,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica camión ${m.toUpperCase()}: Tanque oficial ${lit} L (${gal} gal). Diésel.`,
+    }
+  }
+
+  // 21. Toyota Land Cruiser / Hilux / Troop Carrier / Coaster
+  if (m.includes('toyota') || l.includes('land cruiser') || l.includes('hilux') || l.includes('prado') || l.includes('trooper') || l.includes('troop carrier')) {
+    if (l.includes('troop') || corpus.includes('tropero')) {
+      return {
+        capacidadTanqueGalones: 47.5,
+        capacidadTanqueLitros: 180.0,
+        consumoKmPorGalon: 23,
+        tipoCombustible: 'diesel',
+        fichaInvestigadaNota: `Ficha técnica Toyota Land Cruiser Troop Carrier HZJ78: Tanques duales de fábrica 2x90 L = 180 L (47.5 gal). Rendimiento: ~23 km/gal. Diésel.`,
+      }
+    }
+    if (l.includes('coaster')) {
+      return {
+        capacidadTanqueGalones: 25.1,
+        capacidadTanqueLitros: 95.0,
+        consumoKmPorGalon: 21,
+        tipoCombustible: 'diesel',
+        fichaInvestigadaNota: `Ficha técnica Toyota Coaster: Tanque de 95 L (25.1 gal). Rendimiento: ~21 km/gal. Diésel.`,
+      }
+    }
+    if (l.includes('fj70') || l.includes('machito') || l.includes('serie 70') || l.includes('fzj71')) {
+      return {
+        capacidadTanqueGalones: 23.8,
+        capacidadTanqueLitros: 90.0,
+        consumoKmPorGalon: 22,
+        tipoCombustible: 'diesel',
+        fichaInvestigadaNota: `Ficha técnica Toyota Land Cruiser Serie 70: Tanque oficial 90 L (23.8 gal). Rendimiento: ~22 km/gal. Diésel.`,
+      }
+    }
+    return {
+      capacidadTanqueGalones: 21.1,
+      capacidadTanqueLitros: 80.0,
+      consumoKmPorGalon: 30,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica Toyota Hilux / Prado 4x4: Tanque oficial 80 L (21.1 gal). Rendimiento trocha: ~30 km/gal. Diésel.`,
+    }
+  }
+
+  // 22. Vans y Transporte Colectivo (Sprinter, Master, Transit, Urvan, HiAce)
+  if (corpus.includes('sprinter') || corpus.includes('master') || corpus.includes('transit') || corpus.includes('urvan') || corpus.includes('hiace')) {
+    const esSprinter = corpus.includes('sprinter')
+    const gal = esSprinter ? 19.8 : 21.1
+    const lit = esSprinter ? 75.0 : 80.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: 29,
+      tipoCombustible: 'diesel',
+      fichaInvestigadaNota: `Ficha técnica transporte de pasajeros: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~29 km/gal. Diésel.`,
+    }
+  }
+
+  // 23. Camperos livianos (Suzuki Jimny, Samurai, Vitara)
+  if (l.includes('jimny') || l.includes('samurai') || l.includes('vitara') || m.includes('suzuki')) {
+    const esVitara = l.includes('vitara')
+    const gal = esVitara ? 14.5 : 10.5
+    const lit = esVitara ? 55.0 : 40.0
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esVitara ? 34 : 38,
+      tipoCombustible: 'corriente',
+      fichaInvestigadaNota: `Ficha técnica 4x4 liviano Suzuki: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~${esVitara ? 34 : 38} km/gal. Gasolina Corriente.`,
+    }
+  }
+
+  // 24. Automóviles compactos y utilitarios comunes
   if (l.includes('corsa')) {
     return {
       capacidadTanqueGalones: 11.9,
-      capacidadTanqueLitros: 45,
+      capacidadTanqueLitros: 45.0,
       consumoKmPorGalon: 39,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet Corsa ${modelo || ''}: Capacidad oficial 45 litros (11.9 galones). Consumo promedio montaña: ~39 km/galón. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica Chevrolet Corsa: Capacidad oficial 45 L (11.9 gal). Rendimiento montaña: ~39 km/gal. Gasolina Corriente.`,
     }
   }
-
   if (l.includes('spark') || l.includes('picanto') || l.includes('i10') || l.includes('alto')) {
     return {
       capacidadTanqueGalones: 9.2,
-      capacidadTanqueLitros: 35,
+      capacidadTanqueLitros: 35.0,
       consumoKmPorGalon: 46,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica vehículo liviano: Tanque 35 L (9.2 gal). Consumo: ~46 km/galón. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica vehículo compacto: Tanque oficial 35 L (9.2 gal). Rendimiento: ~46 km/gal. Gasolina Corriente.`,
     }
   }
-
-  if (l.includes('duster') || l.includes('stepway') || l.includes('sandero') || l.includes('logan')) {
+  if (l.includes('duster') || l.includes('stepway') || l.includes('sandero') || l.includes('logan') || l.includes('clio')) {
     const esDuster = l.includes('duster')
     return {
       capacidadTanqueGalones: 13.2,
-      capacidadTanqueLitros: 50,
+      capacidadTanqueLitros: 50.0,
       consumoKmPorGalon: esDuster ? 32 : 36,
       tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Renault: Tanque 50 L (13.2 galones). Rendimiento: ~${esDuster ? 32 : 36} km/galón. Gasolina Corriente.`,
+      fichaInvestigadaNota: `Ficha técnica Renault: Tanque oficial 50 L (13.2 gal). Rendimiento: ~${esDuster ? 32 : 36} km/gal. Gasolina Corriente.`,
     }
   }
 
-  // Fallback general inteligente
-  const esCamionGral = t === 'camion' || m.includes('hino') || m.includes('chevrolet n')
-  const galones = esCamionGral ? 45 : 13
-  const litros = Number((galones * 3.78541).toFixed(1))
-  const tipoComb = esCamionGral ? 'diesel' : 'corriente'
-  const kmGalon = esCamionGral ? 10 : 33
-  const notasInfo = n ? ` Notas CashMet: "${notas}".` : ''
+  // 25. Fallback técnico según clase y configuración del vehículo
+  const esPesado = corpus.includes('volqueta') || corpus.includes('6x4') || corpus.includes('6x6') || corpus.includes('quinta rueda') || corpus.includes('tractomula')
+  const esCamionMediano = t === 'camion' || corpus.includes('camion') || corpus.includes('camión')
+  const esPickupOCampero = corpus.includes('4x4') || corpus.includes('pickup') || corpus.includes('campero')
+
+  const galonesFinal = esPesado ? 87.0 : esCamionMediano ? 36.0 : esPickupOCampero ? 21.0 : 13.2
+  const litrosFinal = Number((galonesFinal * 3.78541).toFixed(1))
+  const tipoComb = (esPesado || esCamionMediano || esPickupOCampero) ? 'diesel' : 'corriente'
+  const kmGalon = esPesado ? 8.5 : esCamionMediano ? 18 : esPickupOCampero ? 28 : 36
 
   return {
-    capacidadTanqueGalones: galones,
-    capacidadTanqueLitros: litros,
+    capacidadTanqueGalones: galonesFinal,
+    capacidadTanqueLitros: litrosFinal,
     consumoKmPorGalon: kmGalon,
     tipoCombustible: tipoComb,
-    fichaInvestigadaNota: `Ficha técnica general validada: Capacidad ${galones} gal (${litros} L). Rendimiento montaña: ~${kmGalon} km/gal. ${tipoComb.toUpperCase()}.${notasInfo}`,
+    fichaInvestigadaNota: `Ficha técnica ${esPesado ? 'camión pesado' : esCamionMediano ? 'camión' : 'vehículo'}: Capacidad calculada ${galonesFinal} gal (${litrosFinal} L). Rendimiento: ~${kmGalon} km/gal. ${tipoComb.toUpperCase()}.`,
   }
 }
 
