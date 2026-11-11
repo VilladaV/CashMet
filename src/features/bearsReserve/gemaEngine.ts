@@ -3,10 +3,164 @@ import type {
   EmpleadoOperativo,
   EventoRadarLocal,
   MisionComunitaria,
+  RutaHabitual,
   TipoCombustible,
   TurnoSemanal,
   VehiculoOperativo,
 } from './types'
+
+// ---------------------------------------------------------------------------
+// TRIPULACIÓN POR ROL 👥 — Gema elige quién va a cada misión
+// ---------------------------------------------------------------------------
+
+type RolMision = 'conductor' | 'conductor_pesado' | 'mecanico' | 'winche' | 'auxilios' | 'logistica'
+
+const PALABRAS_ROL: Record<RolMision, string[]> = {
+  conductor: ['conduc', 'chofer', 'trocha', 'montaña', 'manejo'],
+  conductor_pesado: ['c2', 'c3', 'pesado', 'camion', 'camión', 'tractomula', 'quinta rueda', '5ta rueda', 'volqueta'],
+  mecanico: ['mecan', 'mecán', 'tecnic', 'técnic', 'desvar'],
+  winche: ['winche', 'eslinga', 'remolque', 'rescate', 'barrizal', 'grua', 'grúa'],
+  auxilios: ['auxilio', 'primeros', 'paramédic', 'enfermer', 'aph', 'salud'],
+  logistica: ['logíst', 'logist', 'carga', 'bodega', 'comunitar', 'radio'],
+}
+
+function afinidadRol(emp: EmpleadoOperativo, rol: RolMision): number {
+  const corpus = `${emp.cargo} ${emp.habilidades.join(' ')}`.toLowerCase()
+  return PALABRAS_ROL[rol].reduce((acc, p) => (corpus.includes(p) ? acc + 1 : acc), 0)
+}
+
+function horaAMinutos(h: string): number {
+  const [hh, mm] = h.split(':').map(Number)
+  return (hh || 0) * 60 + (mm || 0)
+}
+
+/** Empleados que, según el cuadrante, están de guardia en esa fecha y hora. */
+export function empleadosEnTurnoAhora(
+  turnos: TurnoSemanal[],
+  empleados: EmpleadoOperativo[],
+  fechaISO: string,
+  horaHHMM: string
+): EmpleadoOperativo[] {
+  const min = horaAMinutos(horaHHMM)
+  const ids = new Set(
+    turnos
+      .filter(
+        (t) =>
+          t.fecha === fechaISO &&
+          !t.rutaHabitualId &&
+          horaAMinutos(t.horaInicio) <= min &&
+          min < horaAMinutos(t.horaFin)
+      )
+      .map((t) => t.empleadoId)
+  )
+  return empleados.filter((e) => e.activo && ids.has(e.id))
+}
+
+/**
+ * Gema arma la tripulación de una misión según lo que exige la situación:
+ * - Siempre 1 conductor por vehículo (si es pesado, prefiere licencia C2/C3).
+ * - Desvare → mecánico. Barrizal/volcamiento/derrumbe → operador de winche.
+ * - Accidente/herido → primeros auxilios. Trasteo/ayudas → apoyo logístico.
+ * Solo toma gente que está de guardia en ese momento; si no alcanza, entras tú.
+ */
+export function seleccionarTripulacionMision(
+  mision: { titulo: string; tipo: string; impactoSocial?: string },
+  vehiculosElegidos: VehiculoOperativo[],
+  empleados: EmpleadoOperativo[],
+  turnos: TurnoSemanal[],
+  fechaISO: string,
+  horaHHMM: string
+): { tripulacion: Array<{ id: string; nombre: string; rol: string }>; motivo: string } {
+  const texto = `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''}`.toLowerCase()
+  const incluye = (...ps: string[]) => ps.some((p) => texto.includes(p))
+
+  // Roles requeridos
+  const roles: Array<{ rol: RolMision; etiqueta: string }> = []
+  for (const v of vehiculosElegidos) {
+    const corpusV = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''}`.toLowerCase()
+    const pesado = v.tipo === 'camion' || /camion|camión|tractomula|kodiak|volqueta|5ta rueda|quinta rueda|bus/.test(corpusV)
+    roles.push({
+      rol: pesado ? 'conductor_pesado' : 'conductor',
+      etiqueta: `Conductor ${v.marca} ${v.linea}`,
+    })
+  }
+  if (roles.length === 0) roles.push({ rol: 'conductor', etiqueta: 'Conductor' })
+  if (incluye('desvar', 'varad', 'mecán', 'mecan', 'motor', 'llanta', 'pinch', 'batería', 'bateria'))
+    roles.push({ rol: 'mecanico', etiqueta: 'Mecánico' })
+  if (incluye('barrizal', 'barro', 'atasc', 'atrapad', 'volc', 'derrumbe', 'remolc', 'winche', 'zanja'))
+    roles.push({ rol: 'winche', etiqueta: 'Operador de winche' })
+  if (incluye('herid', 'accidente', 'lesion', 'lesión', 'enferm', 'parto', 'mordedura', 'adulto mayor'))
+    roles.push({ rol: 'auxilios', etiqueta: 'Primeros auxilios' })
+  if (incluye('trasteo', 'mudanza', 'mercado', 'ayudas', 'víveres', 'viveres', 'carga', 'tejas', 'donaci'))
+    roles.push({ rol: 'logistica', etiqueta: 'Apoyo de carga' })
+
+  // Pool: guardia activa en ese momento → si no hay cuadrante, activos no bloqueados por horario personal
+  let pool = empleadosEnTurnoAhora(turnos, empleados, fechaISO, horaHHMM)
+  let fuente = 'de guardia según el cuadrante'
+  if (pool.length === 0) {
+    const diaSemana = ((new Date(`${fechaISO}T12:00:00`).getDay() + 6) % 7) + 1
+    pool = empleados.filter(
+      (e) =>
+        e.activo &&
+        !e.horariosNoDisponibles.some(
+          (h) => h.diaSemana === diaSemana && h.horaInicio <= horaHHMM && horaHHMM < h.horaFin
+        )
+    )
+    fuente = 'disponibles (sin cuadrante cargado para esta hora)'
+  }
+
+  const usados = new Set<string>()
+  const tripulacion: Array<{ id: string; nombre: string; rol: string }> = []
+  const faltantes: string[] = []
+
+  for (const r of roles) {
+    const candidatos = pool
+      .filter((e) => !usados.has(e.id))
+      .map((e) => ({
+        e,
+        score:
+          afinidadRol(e, r.rol) * 10 +
+          (r.rol === 'conductor_pesado' ? afinidadRol(e, 'conductor') * 3 : 0),
+      }))
+      .sort((a, b) => b.score - a.score)
+
+    // Un conductor sin afinidad igual puede ir (todos manejan algo); los roles técnicos exigen afinidad,
+    // salvo que no haya nadie más y el rol sea secundario → se omite y se reporta
+    const elegido =
+      candidatos.find((c) => c.score > 0) ||
+      (r.rol === 'conductor' || r.rol === 'conductor_pesado' ? candidatos[0] : undefined)
+
+    if (elegido) {
+      usados.add(elegido.e.id)
+      tripulacion.push({ id: elegido.e.id, nombre: elegido.e.nombreCompleto, rol: r.etiqueta })
+    } else {
+      faltantes.push(r.etiqueta)
+    }
+  }
+
+  // Si nadie puede manejar, el coordinador cubre (regla de respaldo)
+  if (!tripulacion.some((t) => t.rol.startsWith('Conductor'))) {
+    tripulacion.unshift({ id: 'coord-user', nombre: 'Tú (Coordinador General)', rol: 'Conductor (respaldo)' })
+  }
+
+  let motivo = `Tripulación de ${tripulacion.length}: ${tripulacion.map((t) => `${t.nombre} (${t.rol})`).join(', ')}. Personal ${fuente}.`
+  if (faltantes.length > 0) {
+    motivo += ` Sin personal en turno para: ${faltantes.join(', ')} — salen sin ese apoyo.`
+  }
+  return { tripulacion, motivo }
+}
+
+/**
+ * Para las rutas de rutina: el conductor es el que quedó asignado en el cuadrante semanal.
+ */
+export function conductorDeRutaEnCuadrante(
+  turnos: TurnoSemanal[],
+  rutaId: string,
+  fechaISO: string
+): { id: string; nombre: string } | null {
+  const t = turnos.find((x) => x.rutaHabitualId === rutaId && x.fecha === fechaISO)
+  return t ? { id: t.empleadoId, nombre: t.empleadoNombre } : null
+}
 
 /**
  * Investigador de especificaciones oficiales con IA 🔍:
@@ -453,7 +607,8 @@ export function generarCronicaMisionNarrativa(
  */
 export function generarTurnosSemanalesIA(
   empleados: EmpleadoOperativo[],
-  fechaLunesISO: string
+  fechaLunesISO: string,
+  rutasHabituales: RutaHabitual[] = []
 ): TurnoSemanal[] {
   const turnos: TurnoSemanal[] = []
   const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
@@ -462,12 +617,61 @@ export function generarTurnosSemanalesIA(
   const horasAsignadas: Record<string, number> = {}
   empleados.forEach((e) => (horasAsignadas[e.id] = 0))
 
+  const sumarMinutos = (hhmm: string, minutos: number) => {
+    const total = horaAMinutos(hhmm) + minutos
+    return `${String(Math.floor(total / 60) % 24).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+  }
+
   for (let d = 0; d < 7; d++) {
     const fechaDia = new Date(baseFecha)
     fechaDia.setDate(baseFecha.getDate() + d)
     const fechaISO = fechaDia.toISOString().slice(0, 10)
     const diaSemanaNum = (fechaDia.getDay() + 6) % 7
     const nombreDia = DIAS[diaSemanaNum]
+
+    // 0. CONDUCTORES DE RUTAS DE RUTINA (se fijan al armar el cuadrante)
+    for (const ruta of rutasHabituales) {
+      if (!ruta.activa || !ruta.diasSemana.includes(diaSemanaNum + 1)) continue
+      const inicio = ruta.horaSalida || '06:00'
+      const duracion = ruta.duracionMinutos || 90
+      const fin = sumarMinutos(inicio, duracion)
+      const horas = Math.round((duracion / 60) * 10) / 10
+
+      const candidatos = empleados
+        .filter((emp) => {
+          if (!emp.activo) return false
+          if ((horasAsignadas[emp.id] || 0) + horas > 42) return false
+          return !emp.horariosNoDisponibles.some(
+            (h) => h.diaSemana === diaSemanaNum + 1 && h.horaInicio < fin && h.horaFin > inicio
+          )
+        })
+        .sort((a, b) => {
+          // Prioriza quien sabe conducir; a igualdad, quien lleva menos horas (rotación justa)
+          const ca = afinidadRol(a, 'conductor') + afinidadRol(a, 'conductor_pesado')
+          const cb = afinidadRol(b, 'conductor') + afinidadRol(b, 'conductor_pesado')
+          if (cb !== ca) return cb - ca
+          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
+        })
+
+      const elegido = candidatos[0]
+      if (elegido) horasAsignadas[elegido.id] = (horasAsignadas[elegido.id] || 0) + horas
+      turnos.push({
+        id: `tur-${fechaISO}-ruta-${ruta.id}`,
+        semanaISO: fechaLunesISO,
+        empleadoId: elegido ? elegido.id : 'coord-user',
+        empleadoNombre: elegido ? elegido.nombreCompleto : 'Tú (Coordinador General)',
+        esRespaldoCoordinador: !elegido,
+        fecha: fechaISO,
+        franja: horaAMinutos(inicio) < 13 * 60 ? 'manana' : 'tarde',
+        horaInicio: inicio,
+        horaFin: fin,
+        horas,
+        rolGuardia: `🚌 Conducción ${ruta.nombre} (${nombreDia})`,
+        cumplido: false,
+        rutaHabitualId: ruta.id,
+        notas: elegido ? undefined : 'Nadie de la nómina libre para esta ruta: la cubres tú.',
+      })
+    }
 
     const franjas: Array<{
       franja: TurnoSemanal['franja']
@@ -500,7 +704,14 @@ export function generarTurnosSemanalesIA(
           if (h.diaSemana !== diaSemanaNum + 1) return false
           return h.horaInicio < f.horaFin && h.horaFin > f.horaInicio
         })
-        return !choca
+        const yaOcupado = turnos.some(
+          (t) =>
+            t.fecha === fechaISO &&
+            t.empleadoId === emp.id &&
+            t.horaInicio < f.horaFin &&
+            t.horaFin > f.horaInicio
+        )
+        return !choca && !yaOcupado
       })
 
       candidatos.sort((a, b) => (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0))

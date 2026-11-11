@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
   completarMisionComunitaria,
+  ejecutarRutaHabitual,
   guardarExtraEmpleado,
   guardarExtraVehiculo,
   guardarMision,
@@ -16,12 +17,12 @@ import {
   listarTurnos,
   listarVehiculosBears,
   reemplazarLlantasVehiculo,
-  resolverConductorDeTurno,
   tanquearVehiculoCompleto,
   verificarYCumplirRutasAutomaticas,
 } from './repo'
 import { BASE_BEARS_RESERVE } from './geo'
 import { generarTurnosSemanalesIA } from './gemaEngine'
+import { hoyISO } from '@/lib/fechas'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
 import type {
   EmpleadoOperativo,
@@ -34,6 +35,13 @@ import type {
 } from './types'
 
 import TarjetaCombustibleWidget from './TarjetaCombustibleWidget'
+
+/** Lunes de la semana actual (en domingo devuelve el lunes anterior, no el siguiente). */
+function lunesDeEstaSemanaISO(): string {
+  const d = new Date()
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 import FlotaTab from './FlotaTab'
 import TurnosTab from './TurnosTab'
 import MisionesTab from './MisionesTab'
@@ -76,11 +84,15 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       setEmpleados(emps)
       setVehiculos(vehs)
       setCuentasCashmet(cuentas)
+      // Cuadrante semanal: si no existe el de esta semana, Gema lo arma (guardias + conductores de rutas)
+      const rutas = listarRutasHabituales()
       let turnosExistentes = listarTurnos()
-      if (turnosExistentes.length === 0 && emps.length > 0) {
-        const hoy = new Date()
-        const lunes = new Date(hoy.setDate(hoy.getDate() - hoy.getDay() + 1)).toISOString().slice(0, 10)
-        turnosExistentes = generarTurnosSemanalesIA(emps, lunes)
+      const lunesActual = lunesDeEstaSemanaISO()
+      const semanaActual = turnosExistentes.filter((t) => t.semanaISO === lunesActual)
+      const faltanRutas =
+        rutas.some((r) => r.activa) && !semanaActual.some((t) => t.rutaHabitualId)
+      if (emps.length > 0 && (semanaActual.length === 0 || faltanRutas)) {
+        turnosExistentes = generarTurnosSemanalesIA(emps, lunesActual, rutas)
         guardarTurnos(turnosExistentes)
       }
       setTurnos(turnosExistentes)
@@ -103,11 +115,9 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     })
   }, [cargarTodo])
 
-  // Rotar turnos con Gema
+  // Rotar turnos con Gema (incluye conductores de rutas de rutina)
   const rotarTurnos = () => {
-    const hoy = new Date()
-    const lunes = new Date(hoy.setDate(hoy.getDate() - hoy.getDay() + 1)).toISOString().slice(0, 10)
-    const nuevosTurnos = generarTurnosSemanalesIA(empleados, lunes)
+    const nuevosTurnos = generarTurnosSemanalesIA(empleados, lunesDeEstaSemanaISO(), rutasHabituales)
     guardarTurnos(nuevosTurnos)
     setTurnos(nuevosTurnos)
   }
@@ -148,51 +158,12 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     return res
   }
 
-  // Cumplir ruta habitual
-  const cumplirRutaHabitual = async (
-    ruta: RutaHabitual,
-    vehiculoId: string,
-    conductorId?: string
-  ) => {
-    const v = vehiculos.find((x) => x.id === vehiculoId)
-    const hoyStr = new Date().toISOString().slice(0, 10)
-
-    const conductor = conductorId
-      ? empleados.find((e) => e.id === conductorId)
-        ? { id: conductorId, nombre: empleados.find((e) => e.id === conductorId)!.nombreCompleto }
-        : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
-      : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
-
-    const misionRuta: MisionComunitaria = {
-      id: `rut-mis-${Date.now()}`,
-      titulo: ruta.nombre,
-      tipo: 'ruta_habitual',
-      prioridad: 'media',
-      origen: ruta.origen,
-      destino: ruta.destino,
-      departamento: 'Caldas',
-      prioridadGeografica: 'local_manizales',
-      terreno: 'trocha_moderada',
-      distanciaKmIdaYVuelta: ruta.distanciaKm,
-      duracionMinutos: ruta.duracionMinutos || 90,
-      minutosRodamientoEstimados: ruta.minutosRodamiento || 55,
-      minutosRalentiEstimados: ruta.minutosRalenti || 35,
-      vehiculosAsignados: v ? [{ id: v.id, nombre: `${v.marca} ${v.linea}`, placa: v.placa }] : [],
-      tripulantesAsignados: [{ id: conductor.id, nombre: conductor.nombre }],
-      galonesConsumidosEstimados: Number((ruta.distanciaKm / 22).toFixed(1)),
-      costoCombustibleEstimadoCOP: Math.round((ruta.distanciaKm / 22) * 15850),
-      desgasteLlantasIncrementoPorc: 0.3,
-      fecha: hoyStr,
-      estado: 'en_curso',
-      impactoSocial: `${ruta.descripcion} · Conductor en turno: ${conductor.nombre}`,
-      esNoticiaWebReal: false,
-    }
-    guardarMision(misionRuta)
-
-    ruta.ultimoCumplimientoFecha = hoyStr
-    guardarRutaHabitual(ruta)
-
-    await completarMisionComunitaria(misionRuta.id, 'exito')
+  // Cumplir ruta habitual: conductor = el del cuadrante; vehículo = el fijado o el que elija Gema
+  const cumplirRutaHabitual = async (ruta: RutaHabitual, vehiculoId?: string) => {
+    // Mismo id de cumplimiento que el motor automático, para que no la vuelva a ejecutar hoy
+    const hoy = hoyISO()
+    const idCumplimiento = ruta.tipoHorario ? `${hoy}-${ruta.tipoHorario}` : hoy
+    await ejecutarRutaHabitual(ruta, idCumplimiento, vehiculoId)
     await cargarTodo()
   }
 

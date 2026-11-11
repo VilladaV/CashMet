@@ -82,6 +82,8 @@ export interface TurnoSemanal {
   rolGuardia: string
   cumplido?: boolean
   notas?: string
+  /** Si este turno es la conducción de una ruta habitual (asignada al armar el cuadrante) */
+  rutaHabitualId?: string
 }
 
 export interface MisionComunitaria {
@@ -132,7 +134,6 @@ export interface RutaHabitual {
   horaSalida?: string // "06:00", "15:00"
   esAutomatica?: boolean
   vehiculoIdDefault?: string
-  conductorIdDefault?: string
   activa: boolean
   ultimoCumplimientoFecha?: string
   coordenadasParadas?: Array<{ nombre: string; lat: number; lng: number }>

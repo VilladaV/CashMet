@@ -14,9 +14,11 @@ import {
   PARADAS_RUTA_ESCOLAR_VESPERTINA,
 } from './geo'
 import {
+  conductorDeRutaEnCuadrante,
   EVENTOS_RADAR_PREDETERMINADOS,
   generarCronicaMisionNarrativa,
   investigarFichaVehiculoIA,
+  seleccionarVehiculosOptimosMision,
 } from './gemaEngine'
 import type {
   EmpleadoOperativo,
@@ -665,103 +667,42 @@ export async function liquidarTarjetaEnCashmet(cuentaBancoId: string): Promise<T
 }
 
 /**
- * Determina el tripulante/conductor de guardia para un día y horario específico,
- * consultando la rotación de turnos activa de la semana. Si no hay guardia asignada
- * o hay un hueco, asigna al Coordinador General como respaldo (regla comunitaria).
+ * Conductor de una ruta de rutina: sale del cuadrante semanal armado por Gema.
+ * Si el cuadrante no tiene a nadie para esa ruta ese día, la cubre el coordinador.
  */
-export function resolverConductorDeTurno(
-  fechaISO: string,
-  horaOFranja?: string,
-  empleados?: EmpleadoOperativo[]
-): { id: string; nombre: string; rol?: string } {
-  const estado = leerEstadoLocal()
-  const turnos = estado.turnos || []
-
-  // Determinar la franja según la hora (ej: "06:00" -> mañana, "15:00" -> tarde)
-  let franja: 'manana' | 'tarde' | 'noche' | 'jornada_completa' = 'manana'
-  if (horaOFranja === 'tarde' || (horaOFranja && parseInt(horaOFranja, 10) >= 13 && parseInt(horaOFranja, 10) < 20)) {
-    franja = 'tarde'
-  } else if (horaOFranja === 'noche' || (horaOFranja && parseInt(horaOFranja, 10) >= 20)) {
-    franja = 'noche'
-  }
-
-  // 1. Buscar turno exacto para la fecha y franja
-  const turno = turnos.find(
-    (t) => t.fecha === fechaISO && (t.franja === franja || t.franja === 'jornada_completa')
+export function obtenerConductorRuta(rutaId: string, fechaISO: string): { id: string; nombre: string } {
+  const turnos = leerEstadoLocal().turnos || []
+  return (
+    conductorDeRutaEnCuadrante(turnos, rutaId, fechaISO) || {
+      id: 'coord-user',
+      nombre: 'Tú (Coordinador General)',
+    }
   )
-
-  if (turno) {
-    return {
-      id: turno.empleadoId,
-      nombre: turno.empleadoNombre,
-      rol: turno.rolGuardia,
-    }
-  }
-
-  // 2. Si no hay turno hoy para esa fecha pero hay turnos de la semana para esa franja
-  const turnoFranja = turnos.find((t) => t.franja === franja && !t.esRespaldoCoordinador)
-  if (turnoFranja) {
-    return {
-      id: turnoFranja.empleadoId,
-      nombre: turnoFranja.empleadoNombre,
-      rol: turnoFranja.rolGuardia,
-    }
-  }
-
-  // 3. Buscar primer empleado activo
-  if (empleados && empleados.length > 0) {
-    const enTurno = empleados.find((e) => e.activo && e.enTurnoActivo) || empleados.find((e) => e.activo)
-    if (enTurno) {
-      return {
-        id: enTurno.id,
-        nombre: enTurno.nombreCompleto,
-        rol: enTurno.cargo || 'Operador de Turno',
-      }
-    }
-  }
-
-  // 4. Respaldo general: Coordinador (el usuario)
-  return {
-    id: 'coord-user',
-    nombre: 'Tú (Coordinador General - Respaldo)',
-    rol: 'Guardia y Respaldo Comunitario',
-  }
 }
 
 /**
  * Ejecuta una ruta habitual (escolar o comunitaria):
- * Calcula km reales, rodamiento y ralentí, asignando al conductor en turno de guardia.
+ * Calcula km reales, rodamiento y ralentí. El conductor es el del cuadrante semanal;
+ * el vehículo es el fijado en la ruta o, si no hay, el que Gema considere más apto.
  */
 export async function ejecutarRutaHabitual(
   ruta: RutaHabitual,
   idCumplimiento?: string,
-  vehiculoIdElegido?: string,
-  conductorIdElegido?: string
+  vehiculoIdElegido?: string
 ): Promise<{ mision: MisionComunitaria }> {
   const vehiculos = await listarVehiculosBears()
-  const empleados = await listarEmpleadosBears()
 
   const vehiculo =
-    vehiculos.find((v) => v.id === vehiculoIdElegido || v.id === ruta.vehiculoIdDefault) ||
-    vehiculos.find((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 20) ||
-    vehiculos[0]
+    vehiculos.find((v) => v.id === (vehiculoIdElegido || ruta.vehiculoIdDefault)) ||
+    (vehiculos.length > 0
+      ? seleccionarVehiculosOptimosMision(
+          { titulo: ruta.nombre, tipo: 'ruta_habitual', impactoSocial: ruta.descripcion },
+          vehiculos
+        ).vehiculoElegido
+      : undefined)
 
   const hoyStr = hoyISO()
-  let conductor: { id: string; nombre: string; rol?: string }
-
-  if (conductorIdElegido) {
-    const emp = empleados.find((e) => e.id === conductorIdElegido)
-    conductor = emp
-      ? { id: emp.id, nombre: emp.nombreCompleto, rol: emp.cargo }
-      : { id: 'coord-user', nombre: 'Tú (Coordinador General - Respaldo)', rol: 'Guardia' }
-  } else if (ruta.conductorIdDefault) {
-    const emp = empleados.find((e) => e.id === ruta.conductorIdDefault)
-    conductor = emp
-      ? { id: emp.id, nombre: emp.nombreCompleto, rol: emp.cargo }
-      : resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
-  } else {
-    conductor = resolverConductorDeTurno(hoyStr, ruta.horaSalida || ruta.tipoHorario, empleados)
-  }
+  const conductor = obtenerConductorRuta(ruta.id, hoyStr)
 
   const misionRuta: MisionComunitaria = {
     id: `rut-mis-${Date.now()}`,
@@ -786,7 +727,7 @@ export async function ejecutarRutaHabitual(
     desgasteLlantasIncrementoPorc: 0.3,
     fecha: hoyStr,
     estado: 'en_curso',
-    impactoSocial: `${ruta.descripcion} · Conductor en turno: ${conductor.nombre} (${conductor.rol || 'Guardia'})`,
+    impactoSocial: `${ruta.descripcion} · Conductor según cuadrante: ${conductor.nombre}`,
     esNoticiaWebReal: false,
   }
 
