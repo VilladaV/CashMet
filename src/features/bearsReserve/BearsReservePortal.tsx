@@ -4,20 +4,27 @@ import {
   guardarExtraEmpleado,
   guardarExtraVehiculo,
   guardarMision,
+  guardarRutaHabitual,
   guardarTurnos,
+  investigarVehiculosPendientesIA,
+  leerEventosRadar,
+  leerTarjetaCombustible,
   liquidarTarjetaEnCashmet,
   listarEmpleadosBears,
   listarMisiones,
+  listarRutasHabituales,
   listarTurnos,
   listarVehiculosBears,
-  leerTarjetaCombustible,
+  reemplazarLlantasVehiculo,
   tanquearVehiculoCompleto,
 } from './repo'
 import { generarTurnosSemanalesIA } from './gemaEngine'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
 import type {
   EmpleadoOperativo,
+  EventoRadarLocal,
   MisionComunitaria,
+  RutaHabitual,
   TarjetaCombustibleReserva,
   TurnoSemanal,
   VehiculoOperativo,
@@ -50,6 +57,8 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
   const [vehiculos, setVehiculos] = useState<VehiculoOperativo[]>([])
   const [turnos, setTurnos] = useState<TurnoSemanal[]>([])
   const [misiones, setMisiones] = useState<MisionComunitaria[]>([])
+  const [rutasHabituales, setRutasHabituales] = useState<RutaHabitual[]>([])
+  const [eventosRadar, setEventosRadar] = useState<EventoRadarLocal[]>([])
   const [tarjetaCombustible, setTarjetaCombustible] = useState<TarjetaCombustibleReserva>(leerTarjetaCombustible)
   const [cuentasCashmet, setCuentasCashmet] = useState<CuentaBanco[]>([])
   const [cargando, setCargando] = useState(true)
@@ -66,6 +75,8 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       setCuentasCashmet(cuentas)
       setTurnos(listarTurnos())
       setMisiones(listarMisiones())
+      setRutasHabituales(listarRutasHabituales())
+      setEventosRadar(leerEventosRadar())
       setTarjetaCombustible(leerTarjetaCombustible())
     } finally {
       setCargando(false)
@@ -98,11 +109,62 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     setTarjetaCombustible({ ...res })
   }
 
-  // Completar misión
-  const completarMision = async (misionId: string) => {
-    const res = await completarMisionComunitaria(misionId)
+  // Investigar con IA fichas pendientes
+  const ejecutarInvestigacionFichasIA = async () => {
+    const res = await investigarVehiculosPendientesIA()
     await cargarTodo()
     return res
+  }
+
+  // Reemplazar llantas (discreto)
+  const ejecutarReemplazoLlantas = (id: string) => {
+    reemplazarLlantasVehiculo(id)
+    void cargarTodo()
+  }
+
+  // Completar misión con desenlace realista
+  const completarMision = async (
+    misionId: string,
+    resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
+  ) => {
+    const res = await completarMisionComunitaria(misionId, resultado)
+    await cargarTodo()
+    return res
+  }
+
+  // Cumplir ruta habitual
+  const cumplirRutaHabitual = async (ruta: RutaHabitual, vehiculoId: string) => {
+    const v = vehiculos.find((x) => x.id === vehiculoId)
+    const hoyStr = new Date().toISOString().slice(0, 10)
+    const misionRuta: MisionComunitaria = {
+      id: `rut-mis-${Date.now()}`,
+      titulo: ruta.nombre,
+      tipo: 'ruta_habitual',
+      prioridad: 'media',
+      origen: ruta.origen,
+      destino: ruta.destino,
+      departamento: 'Caldas',
+      prioridadGeografica: 'local_manizales',
+      terreno: 'trocha_moderada',
+      distanciaKmIdaYVuelta: ruta.distanciaKm,
+      duracionMinutos: 90,
+      vehiculosAsignados: v ? [{ id: v.id, nombre: `${v.marca} ${v.linea}`, placa: v.placa }] : [],
+      tripulantesAsignados: empleados.slice(0, 1).map((e) => ({ id: e.id, nombre: e.nombreCompleto })),
+      galonesConsumidosEstimados: Number((ruta.distanciaKm / 22).toFixed(1)),
+      costoCombustibleEstimadoCOP: Math.round((ruta.distanciaKm / 22) * 15850),
+      desgasteLlantasIncrementoPorc: 0.3,
+      fecha: hoyStr,
+      estado: 'en_curso',
+      impactoSocial: ruta.descripcion,
+      esNoticiaWebReal: false,
+    }
+    guardarMision(misionRuta)
+
+    ruta.ultimoCumplimientoFecha = hoyStr
+    guardarRutaHabitual(ruta)
+
+    await completarMisionComunitaria(misionRuta.id, 'exito')
+    await cargarTodo()
   }
 
   return (
@@ -134,7 +196,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                   </span>
                 </div>
                 <p className="text-[11px] text-mist-400">
-                  Flota y Guardia de Rescate · Manizales, Caldas y Cordillera Central
+                  Flota y Guardia de Auxilio Rural · Manizales, Caldas y Cordillera Central
                 </p>
               </div>
             </div>
@@ -143,7 +205,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
           <div className="hidden items-center gap-2 sm:flex">
             <span className="flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
               <Radio className="h-3 w-3 animate-pulse" />
-              Radio Base Activa
+              Guardia Comunitaria Activa
             </span>
             <span className="rounded-full border border-white/10 bg-black/40 px-2.5 py-1 text-[11px] font-medium text-mist-400">
               Gema 💎 en línea
@@ -234,11 +296,14 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                 misiones={misiones}
                 vehiculos={vehiculos}
                 empleados={empleados}
+                rutasHabituales={rutasHabituales}
+                eventosRadar={eventosRadar}
                 onCrearMision={(m) => {
                   guardarMision(m)
                   setMisiones(listarMisiones())
                 }}
                 onCompletarMision={completarMision}
+                onCumplirRutaHabitual={cumplirRutaHabitual}
               />
             )}
 
@@ -250,6 +315,8 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                   void cargarTodo()
                 }}
                 onTanquearVehiculo={tanquear}
+                onInvestigarFichasPendientesIA={ejecutarInvestigacionFichasIA}
+                onReemplazarLlantas={ejecutarReemplazoLlantas}
               />
             )}
 

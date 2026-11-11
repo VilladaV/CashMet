@@ -11,6 +11,7 @@ export interface PreciosCombustible {
   dieselPorGalon: number
   extraPorGalon: number
   actualizado: string
+  fuente: string
 }
 
 export interface VehiculoOperativo {
@@ -21,12 +22,14 @@ export interface VehiculoOperativo {
   linea: string
   modelo?: number | null
   tipo: 'carro' | 'moto' | 'camion' | 'otro'
-  rolOperativo: 'rescate_pesado' | 'transporte_rural_escolar' | 'apoyo_rapido' | 'logistica_ayudas' | 'campero_trochero'
-  disponibleParaTrabajo: boolean
+  disponibleParaTrabajo: boolean // Solo los que están habilitados para Bear's Reserve
+  investigadoIA?: boolean // Si ya se investigó su tanque y consumo oficial
+  fichaInvestigadaNota?: string
   estado: EstadoVehiculoOperativo
   // Tanque y combustible
   tipoCombustible: TipoCombustible
   capacidadTanqueGalones: number
+  capacidadTanqueLitros?: number
   nivelCombustiblePorc: number // 0 a 100
   consumoKmPorGalon: number // En montaña/trocha
   // Odómetro y telemetría de desgaste
@@ -50,15 +53,7 @@ export interface EmpleadoOperativo {
   nominaId?: string
   nombreCompleto: string
   cargo: string
-  habilidades: Array<
-    | 'conductor_trocha_pesada'
-    | 'mecanica_emergencia'
-    | 'primeros_auxilios'
-    | 'rescate_en_barro'
-    | 'logistica_comunitaria'
-    | 'comunicacion_radio'
-    | 'navegacion_rural'
-  >
+  habilidades: string[]
   horasSemanalesAsignadas: number // Meta legal: máx 42h
   maxHorasSemanales: number // 42
   activo: boolean
@@ -69,11 +64,11 @@ export interface EmpleadoOperativo {
 
 export interface TurnoSemanal {
   id: string
-  semanaISO: string // ej. "2026-W46"
+  semanaISO: string
   empleadoId: string
   empleadoNombre: string
-  esRespaldoCoordinador?: boolean // Para cuando tú quedas asignado de emergencia
-  fecha: string // YYYY-MM-DD
+  esRespaldoCoordinador?: boolean
+  fecha: string
   franja: 'manana' | 'tarde' | 'noche' | 'jornada_completa'
   horaInicio: string
   horaFin: string
@@ -86,26 +81,43 @@ export interface TurnoSemanal {
 export interface MisionComunitaria {
   id: string
   titulo: string
-  tipo: 'escolar_rural' | 'derrumbe_via_tapada' | 'desvarado_auxilio' | 'rescate_barrizal' | 'entrega_ayudas' | 'contingencia_vial'
+  tipo: 'auxilio_comunitario' | 'desvarado_rural' | 'rescate_barrizal' | 'transporte_humanitario' | 'apoyo_vial' | 'ruta_habitual'
   prioridad: 'baja' | 'media' | 'alta' | 'critica_extrema'
   origen: string
   destino: string
   departamento: 'Caldas' | 'Risaralda' | 'Tolima' | 'Antioquia' | 'Otro'
   prioridadGeografica: PrioridadGeografica
-  justificacionSalidaLejana?: string
   terreno: TerrenoRuta
   distanciaKmIdaYVuelta: number
-  duracionEstimadaHoras: number
-  empleadosAsignados: Array<{ id: string; nombre: string }>
-  vehiculoId: string
-  vehiculoNombre: string
+  duracionMinutos: number // Desde 15 min hasta 8 horas
+  // Varios vehículos y varios tripulantes posibles
+  vehiculosAsignados: Array<{ id: string; nombre: string; placa?: string }>
+  tripulantesAsignados: Array<{ id: string; nombre: string }>
   galonesConsumidosEstimados: number
   costoCombustibleEstimadoCOP: number
   desgasteLlantasIncrementoPorc: number
   fecha: string
-  estado: 'programada' | 'en_curso' | 'completada' | 'cancelada'
+  horaInicio?: string
+  horaFin?: string
+  estado: 'programada' | 'en_curso' | 'completada' | 'inconclusa_repliegue'
+  resultado?: 'exito' | 'parcial' | 'fallida_dificultad' | 'en_curso'
+  // Crónica / historia humana de lo que ocurrió
+  cronicaHistoria?: string
   impactoSocial: string
-  esProgramadaCalendario?: boolean
+  esNoticiaWebReal?: boolean
+}
+
+export interface RutaHabitual {
+  id: string
+  nombre: string
+  descripcion: string
+  origen: string
+  destino: string
+  distanciaKm: number
+  diasSemana: number[] // 1: Lun, 2: Mar, etc.
+  vehiculoIdDefault?: string
+  activa: boolean
+  ultimoCumplimientoFecha?: string
 }
 
 export interface TanqueoRegistro {
@@ -125,7 +137,7 @@ export interface TanqueoRegistro {
 
 export interface TarjetaCombustibleReserva {
   id: string
-  mes: string // YYYY-MM
+  mes: string
   saldoAcumuladoCOP: number
   totalGalonesMes: number
   tanqueos: TanqueoRegistro[]
@@ -145,6 +157,7 @@ export interface EventoRadarLocal {
   fecha: string
   esEmergenciaGrave: boolean
   atencionOficialPresente: boolean
-  recomendacionGema: 'intervenir_urgente' | 'apoyo_logistico' | 'ruta_escolar_rutinaria' | 'monitorear_sin_intervenir'
+  esNoticiaWebReal: boolean // True si proviene de internet (chulito discreto), False si es llamada comunitaria
+  recomendacionGema: 'intervenir_urgente' | 'apoyo_logistico' | 'monitorear_sin_intervenir'
   justificacionGema: string
 }

@@ -88,6 +88,7 @@ export default function GemaChatTab({
   }
 
   const chips = [
+    '📋 Generar informe de hoy',
     '¿Quién está de guardia hoy? 👤',
     'Rotar turnos semanales (máx 42h) 💎',
     '¿Cómo está el combustible de la flota? ⛽',

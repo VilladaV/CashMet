@@ -8,24 +8,56 @@ import {
 import { crearMovimiento } from '@/lib/firebase/movimientosRepo'
 import { hoyISO } from '@/lib/fechas'
 import { calcularConsumoMision, obtenerPrecioGalon } from './preciosCombustible'
+import {
+  EVENTOS_RADAR_PREDETERMINADOS,
+  generarCronicaMisionNarrativa,
+  investigarFichaVehiculoIA,
+} from './gemaEngine'
 import type {
   EmpleadoOperativo,
+  EventoRadarLocal,
   MisionComunitaria,
+  RutaHabitual,
   TanqueoRegistro,
   TarjetaCombustibleReserva,
   TurnoSemanal,
   VehiculoOperativo,
 } from './types'
 
-const CLAVE_STORAGE = 'bears_reserve_data_v1'
+const CLAVE_STORAGE = 'bears_reserve_data_v2'
 
 interface EstadoPersistenteBears {
   vehiculosExtra: Record<string, Partial<VehiculoOperativo>>
   empleadosExtra: Record<string, Partial<EmpleadoOperativo>>
   turnos: TurnoSemanal[]
   misiones: MisionComunitaria[]
+  rutasHabituales: RutaHabitual[]
+  eventosRadar: EventoRadarLocal[]
   tarjetaCombustible: TarjetaCombustibleReserva
 }
+
+const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
+  {
+    id: 'rut-hab-1',
+    nombre: 'Ruta Escolar Veredal: El Rosario ↔ Escuela La Trinidad',
+    descripcion: 'Transporte matutino y vespertino diario de 14 niños campesinos por trocha destapada.',
+    origen: 'Vereda El Rosario',
+    destino: 'Escuela Rural La Trinidad (Manizales)',
+    distanciaKm: 26,
+    diasSemana: [1, 2, 3, 4, 5],
+    activa: true,
+  },
+  {
+    id: 'rut-hab-2',
+    nombre: 'Ruta Solidaria de Apoyo a Campesinos (Día de Mercado)',
+    descripcion: 'Auxilio de transporte de productos agrícolas y víveres para pequeños productores de la vereda La Cabaña hacia la plaza.',
+    origen: 'Vereda La Cabaña',
+    destino: 'Plaza de Mercado / Central de Manizales',
+    distanciaKm: 34,
+    diasSemana: [6], // Sábados
+    activa: true,
+  },
+]
 
 const estadoInicial = (): EstadoPersistenteBears => {
   const mesActual = hoyISO().slice(0, 7)
@@ -34,6 +66,8 @@ const estadoInicial = (): EstadoPersistenteBears => {
     empleadosExtra: {},
     turnos: [],
     misiones: [],
+    rutasHabituales: RUTAS_HABITUALES_INICIALES,
+    eventosRadar: EVENTOS_RADAR_PREDETERMINADOS,
     tarjetaCombustible: {
       id: `tarjeta-${mesActual}`,
       mes: mesActual,
@@ -61,10 +95,16 @@ function leerEstadoLocal(): EstadoPersistenteBears {
           liquidadoEnCashmet: false,
         }
       }
+      if (!parsed.rutasHabituales || parsed.rutasHabituales.length === 0) {
+        parsed.rutasHabituales = RUTAS_HABITUALES_INICIALES
+      }
+      if (!parsed.eventosRadar || parsed.eventosRadar.length === 0) {
+        parsed.eventosRadar = EVENTOS_RADAR_PREDETERMINADOS
+      }
       return parsed
     }
   } catch {
-    /* fallback a estado inicial */
+    /* fallback */
   }
   return estadoInicial()
 }
@@ -73,7 +113,7 @@ function guardarEstadoLocal(estado: EstadoPersistenteBears) {
   try {
     localStorage.setItem(CLAVE_STORAGE, JSON.stringify(estado))
   } catch {
-    /* almacenamiento lleno o bloqueado */
+    /* error storage */
   }
 }
 
@@ -83,14 +123,15 @@ function guardarEstadoLocal(estado: EstadoPersistenteBears) {
 function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>): EmpleadoOperativo {
   const nombre = nomina.nombreCompleto || 'Colaborador'
   const cargo = nomina.cargo || 'Operador'
-  const habilidadesDefault: EmpleadoOperativo['habilidades'] = []
+  const habilidadesDefault: string[] = []
 
-  if (cargo.toLowerCase().includes('chofer') || cargo.toLowerCase().includes('conductor')) {
-    habilidadesDefault.push('conductor_trocha_pesada', 'navegacion_rural')
-  } else if (cargo.toLowerCase().includes('mecanic') || cargo.toLowerCase().includes('tecnic')) {
-    habilidadesDefault.push('mecanica_emergencia', 'rescate_en_barro')
+  const cargoLower = cargo.toLowerCase()
+  if (cargoLower.includes('chofer') || cargoLower.includes('conductor')) {
+    habilidadesDefault.push('Conducción en alta montaña', 'Navegación de trochas')
+  } else if (cargoLower.includes('mecanic') || cargoLower.includes('tecnic')) {
+    habilidadesDefault.push('Mecánica de emergencia', 'Manejo de winche y eslingas')
   } else {
-    habilidadesDefault.push('logistica_comunitaria', 'primeros_auxilios')
+    habilidadesDefault.push('Logística comunitaria', 'Primeros auxilios básicos')
   }
 
   return {
@@ -109,24 +150,16 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
 }
 
 /**
- * Mapea un vehículo de CashMet a VehiculoOperativo de Bear's Reserve.
+ * Mapea un vehículo de CashMet a VehiculoOperativo de Bear's Reserve (sin categorías rígidas).
  */
 function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): VehiculoOperativo {
   const tipo = v.tipo || 'carro'
   const esCamion = tipo === 'camion'
   const esMoto = tipo === 'moto'
 
-  const rolDefault: VehiculoOperativo['rolOperativo'] = esCamion
-    ? 'rescate_pesado'
-    : esMoto
-      ? 'apoyo_rapido'
-      : (v.linea || '').toLowerCase().includes('campero') || (v.claseVehiculo || '').toLowerCase().includes('camioneta')
-        ? 'campero_trochero'
-        : 'transporte_rural_escolar'
-
-  const capacidadGalones = esCamion ? 55 : esMoto ? 3.5 : 16
+  const capacidadGalones = esCamion ? 45 : esMoto ? 3.2 : 13
   const tipoCombustible = esCamion ? 'diesel' : 'corriente'
-  const consumoBase = esCamion ? 8.5 : esMoto ? 110 : 25
+  const consumoBase = esCamion ? 9 : esMoto ? 110 : 32
 
   return {
     id: v.id,
@@ -136,15 +169,19 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     linea: v.linea,
     modelo: v.modelo,
     tipo,
-    rolOperativo: extra?.rolOperativo || rolDefault,
-    disponibleParaTrabajo: extra?.disponibleParaTrabajo ?? (v.activo !== false && v.estado !== 'Vendido' && v.estado !== 'Dañado'),
+    disponibleParaTrabajo:
+      extra?.disponibleParaTrabajo ?? (v.activo !== false && v.estado !== 'Vendido' && v.estado !== 'Dañado'),
+    investigadoIA: extra?.investigadoIA ?? false,
+    fichaInvestigadaNota: extra?.fichaInvestigadaNota,
     estado: extra?.estado || (v.estado === 'En reparación' ? 'mantenimiento' : 'disponible'),
     tipoCombustible: extra?.tipoCombustible || tipoCombustible,
     capacidadTanqueGalones: extra?.capacidadTanqueGalones || capacidadGalones,
+    capacidadTanqueLitros:
+      extra?.capacidadTanqueLitros || Number(((extra?.capacidadTanqueGalones || capacidadGalones) * 3.78541).toFixed(1)),
     nivelCombustiblePorc: extra?.nivelCombustiblePorc ?? 85,
     consumoKmPorGalon: extra?.consumoKmPorGalon || consumoBase,
     kilometrajeActual: v.mantenimiento?.kilometrajeActual ?? 0,
-    desgasteLlantasPorc: extra?.desgasteLlantasPorc ?? 22,
+    desgasteLlantasPorc: extra?.desgasteLlantasPorc ?? 18,
     estadoBateriaPorc: extra?.estadoBateriaPorc ?? 95,
     totalGalonesConsumidos: extra?.totalGalonesConsumidos ?? 0,
     totalCostoCombustibleCOP: extra?.totalCostoCombustibleCOP ?? 0,
@@ -159,13 +196,12 @@ export async function listarEmpleadosBears(): Promise<EmpleadoOperativo[]> {
   const nominados = await listarNomina().catch(() => [])
   const estado = leerEstadoLocal()
   if (!nominados.length) {
-    // Si todavía no hay nóminas en CashMet, creamos 2 empleados base representativos
     return [
       {
         id: 'emp-demo-1',
         nombreCompleto: 'Andrés Morales Gómez',
         cargo: 'Conductor de Rescate Rural',
-        habilidades: ['conductor_trocha_pesada', 'mecanica_emergencia', 'rescate_en_barro'],
+        habilidades: ['Conducción en barrizal', 'Mecánica de emergencia', 'Winche pesado'],
         horasSemanalesAsignadas: 28,
         maxHorasSemanales: 42,
         activo: true,
@@ -174,21 +210,21 @@ export async function listarEmpleadosBears(): Promise<EmpleadoOperativo[]> {
           { diaSemana: 4, horaInicio: '18:00', horaFin: '22:00', motivo: 'Universidad de Caldas' },
         ],
         enTurnoActivo: true,
-        turnoActualTexto: 'Turno Mañana · Vía La Cabaña',
+        turnoActualTexto: 'Guardia Matutina Activa',
       },
       {
         id: 'emp-demo-2',
         nombreCompleto: 'Valentina Osorio Ríos',
-        cargo: 'Coordinadora de Ruta Escolar y Primeros Auxilios',
-        habilidades: ['primeros_auxilios', 'logistica_comunitaria', 'comunicacion_radio'],
+        cargo: 'Coordinadora de Enlace Veredal',
+        habilidades: ['Primeros auxilios', 'Logística comunitaria', 'Radio comunicaciones'],
         horasSemanalesAsignadas: 35,
         maxHorasSemanales: 42,
         activo: true,
         horariosNoDisponibles: [
-          { diaSemana: 6, horaInicio: '08:00', horaFin: '12:00', motivo: 'Especialización' },
+          { diaSemana: 6, horaInicio: '08:00', horaFin: '12:00', motivo: 'Formación de posgrado' },
         ],
         enTurnoActivo: true,
-        turnoActualTexto: 'Turno Mañana · Vereda El Rosario',
+        turnoActualTexto: 'Guardia Matutina Activa',
       },
     ]
   }
@@ -208,16 +244,18 @@ export async function listarVehiculosBears(): Promise<VehiculoOperativo[]> {
         linea: 'Kodiak 4x4 Rescate',
         modelo: 2018,
         tipo: 'camion',
-        rolOperativo: 'rescate_pesado',
         disponibleParaTrabajo: true,
+        investigadoIA: true,
+        fichaInvestigadaNota: 'Ficha técnica validada con IA: Tanque 55 gal (208.2 L). Rendimiento cordillera: 8.5 km/gal. Diésel/ACPM.',
         estado: 'disponible',
         tipoCombustible: 'diesel',
-        capacidadTanqueGalones: 50,
-        nivelCombustiblePorc: 72,
+        capacidadTanqueGalones: 55,
+        capacidadTanqueLitros: 208,
+        nivelCombustiblePorc: 78,
         consumoKmPorGalon: 8.5,
         kilometrajeActual: 142350,
-        desgasteLlantasPorc: 34,
-        estadoBateriaPorc: 90,
+        desgasteLlantasPorc: 24,
+        estadoBateriaPorc: 92,
         totalGalonesConsumidos: 120,
         totalCostoCombustibleCOP: 1254000,
       },
@@ -229,16 +267,18 @@ export async function listarVehiculosBears(): Promise<VehiculoOperativo[]> {
         linea: 'Land Cruiser Troop Carrier',
         modelo: 2021,
         tipo: 'carro',
-        rolOperativo: 'transporte_rural_escolar',
         disponibleParaTrabajo: true,
+        investigadoIA: true,
+        fichaInvestigadaNota: 'Ficha técnica validada con IA: Tanque 23.8 gal (90 L). Rendimiento trocha: 24 km/gal. Diésel de alto torque.',
         estado: 'disponible',
-        tipoCombustible: 'corriente',
-        capacidadTanqueGalones: 22,
-        nivelCombustiblePorc: 65,
-        consumoKmPorGalon: 22,
+        tipoCombustible: 'diesel',
+        capacidadTanqueGalones: 23.8,
+        capacidadTanqueLitros: 90,
+        nivelCombustiblePorc: 68,
+        consumoKmPorGalon: 24,
         kilometrajeActual: 89400,
-        desgasteLlantasPorc: 28,
-        estadoBateriaPorc: 94,
+        desgasteLlantasPorc: 22,
+        estadoBateriaPorc: 95,
         totalGalonesConsumidos: 84,
         totalCostoCombustibleCOP: 1331400,
       },
@@ -257,6 +297,46 @@ export function guardarExtraEmpleado(id: string, extra: Partial<EmpleadoOperativ
   const estado = leerEstadoLocal()
   estado.empleadosExtra[id] = { ...(estado.empleadosExtra[id] || {}), ...extra }
   guardarEstadoLocal(estado)
+}
+
+/**
+ * Investigar con IA las fichas técnicas solo de los vehículos que:
+ * 1. Están habilitados para Bear's Reserve (`disponibleParaTrabajo === true`)
+ * 2. Aún NO han sido investigados (`!investigadoIA`).
+ */
+export async function investigarVehiculosPendientesIA(): Promise<{
+  procesados: number
+  nombres: string[]
+}> {
+  const vehiculos = await listarVehiculosBears()
+  const pendientes = vehiculos.filter((v) => v.disponibleParaTrabajo && !v.investigadoIA)
+
+  const procesadosNombres: string[] = []
+
+  for (const v of pendientes) {
+    const ficha = investigarFichaVehiculoIA(v.marca, v.linea, v.tipo, v.modelo)
+    guardarExtraVehiculo(v.id, {
+      investigadoIA: true,
+      fichaInvestigadaNota: ficha.fichaInvestigadaNota,
+      capacidadTanqueGalones: ficha.capacidadTanqueGalones,
+      capacidadTanqueLitros: ficha.capacidadTanqueLitros,
+      consumoKmPorGalon: ficha.consumoKmPorGalon,
+      tipoCombustible: ficha.tipoCombustible,
+    })
+    procesadosNombres.push(`${v.marca} ${v.linea}`)
+  }
+
+  return {
+    procesados: pendientes.length,
+    nombres: procesadosNombres,
+  }
+}
+
+/**
+ * Restablece discretamente el desgaste de llantas de un vehículo al 0% (llantas nuevas instaladas).
+ */
+export function reemplazarLlantasVehiculo(id: string) {
+  guardarExtraVehiculo(id, { desgasteLlantasPorc: 0 })
 }
 
 export function listarTurnos(): TurnoSemanal[] {
@@ -284,12 +364,37 @@ export function guardarMision(mision: MisionComunitaria) {
   guardarEstadoLocal(estado)
 }
 
+export function listarRutasHabituales(): RutaHabitual[] {
+  return leerEstadoLocal().rutasHabituales
+}
+
+export function guardarRutaHabitual(ruta: RutaHabitual) {
+  const estado = leerEstadoLocal()
+  const idx = estado.rutasHabituales.findIndex((r) => r.id === ruta.id)
+  if (idx >= 0) {
+    estado.rutasHabituales[idx] = ruta
+  } else {
+    estado.rutasHabituales.push(ruta)
+  }
+  guardarEstadoLocal(estado)
+}
+
+export function leerEventosRadar(): EventoRadarLocal[] {
+  return leerEstadoLocal().eventosRadar
+}
+
+export function guardarEventosRadar(eventos: EventoRadarLocal[]) {
+  const estado = leerEstadoLocal()
+  estado.eventosRadar = eventos
+  guardarEstadoLocal(estado)
+}
+
 export function leerTarjetaCombustible(): TarjetaCombustibleReserva {
   return leerEstadoLocal().tarjetaCombustible
 }
 
 /**
- * Registra una recarga/tanqueo de combustible al 100% y lo suma a la tarjeta de combustible.
+ * Tanqueo de combustible al 100% que se acumula en la Tarjeta mensual de Bear's Reserve.
  */
 export async function tanquearVehiculoCompleto(
   vehiculoId: string,
@@ -323,14 +428,12 @@ export async function tanquearVehiculoCompleto(
     motivo,
   }
 
-  // Actualizar vehículo a 100% de combustible
   guardarExtraVehiculo(v.id, {
     nivelCombustiblePorc: 100,
     totalGalonesConsumidos: (v.totalGalonesConsumidos || 0) + galonesFaltantes,
     totalCostoCombustibleCOP: (v.totalCostoCombustibleCOP || 0) + totalCOP,
   })
 
-  // Acumular en la tarjeta mensual de combustible
   const estado = leerEstadoLocal()
   estado.tarjetaCombustible.saldoAcumuladoCOP += totalCOP
   estado.tarjetaCombustible.totalGalonesMes = Number(
@@ -343,81 +446,104 @@ export async function tanquearVehiculoCompleto(
 }
 
 /**
- * Ejecuta o completa una misión comunitaria:
- * 1. Suma los km al odómetro real del vehículo en CashMet mediante `actualizarKilometraje`.
- * 2. Consume combustible según terreno de montaña.
- * 3. Si el tanque cae entre 15% y 2%, tanquea automáticamente de 0 a 100 y suma a la tarjeta.
- * 4. Incrementa el desgaste de llantas de acuerdo al terreno.
+ * Completa una misión comunitaria soportando múltiples vehículos y tripulantes:
+ * - Suma los km al odómetro real de CashMet de cada vehículo asignado.
+ * - Consume combustible según terreno andino.
+ * - Si baja a reserva (15% o menos), auto-tanquea al 100% y lo carga a la Tarjeta.
+ * - Incrementa desgaste de llantas de cada vehículo.
+ * - Genera la crónica humana en `cronicaHistoria`.
  */
-export async function completarMisionComunitaria(misionId: string): Promise<{
+export async function completarMisionComunitaria(
+  misionId: string,
+  resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
+): Promise<{
   mision: MisionComunitaria
-  kmActualizado: number
-  tanqueoAutomatico?: TanqueoRegistro
+  tanqueosAutomaticos: TanqueoRegistro[]
+  cronica: string
 }> {
   const estado = leerEstadoLocal()
   const mision = estado.misiones.find((m) => m.id === misionId)
   if (!mision) throw new Error('Misión no encontrada')
 
-  const vehiculos = await listarVehiculosBears()
-  const v = vehiculos.find((x) => x.id === mision.vehiculoId || x.vehiculoId === mision.vehiculoId)
-  if (!v) throw new Error('Vehículo asignado no disponible')
+  const todosVehiculos = await listarVehiculosBears()
 
-  const { galones, desgasteLlantasPorc } = calcularConsumoMision(
-    v.tipo,
-    mision.distanciaKmIdaYVuelta,
-    mision.terreno
+  // Determinar vehículos asignados
+  const vehiculosIds =
+    mision.vehiculosAsignados?.length > 0
+      ? mision.vehiculosAsignados.map((x) => x.id)
+      : []
+
+  const vehiculosParticipantes = todosVehiculos.filter((v) =>
+    vehiculosIds.includes(v.id) || vehiculosIds.includes(v.vehiculoId)
   )
 
-  // 1. Actualizar odómetro en CashMet directamente
-  const nuevoKm = Math.round(v.kilometrajeActual + mision.distanciaKmIdaYVuelta)
-  if (v.vehiculoId && !v.vehiculoId.startsWith('veh-demo')) {
-    const existeEnCashmet = await obtenerVehiculo(v.vehiculoId).catch(() => null)
-    if (existeEnCashmet) {
-      await actualizarKilometraje(v.vehiculoId, nuevoKm)
+  const tanqueosAuto: TanqueoRegistro[] = []
+  let totalGalonesConsumidosMision = 0
+
+  for (const v of vehiculosParticipantes) {
+    const { galones, desgasteLlantasPorc } = calcularConsumoMision(
+      v.tipo,
+      mision.distanciaKmIdaYVuelta,
+      mision.terreno,
+      v.consumoKmPorGalon
+    )
+    totalGalonesConsumidosMision += galones
+
+    // Actualizar odómetro en CashMet
+    const nuevoKm = Math.round(v.kilometrajeActual + mision.distanciaKmIdaYVuelta)
+    if (v.vehiculoId && !v.vehiculoId.startsWith('veh-demo')) {
+      const existe = await obtenerVehiculo(v.vehiculoId).catch(() => null)
+      if (existe) {
+        await actualizarKilometraje(v.vehiculoId, nuevoKm)
+      }
+    }
+
+    // Combustible y llantas
+    const galonesCapacidad = v.capacidadTanqueGalones || 20
+    const porcConsumido = (galones / galonesCapacidad) * 100
+    let nuevoNivel = Math.max(1, Math.round(v.nivelCombustiblePorc - porcConsumido))
+    const nuevoDesgaste = Math.min(100, Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2)))
+
+    if (nuevoNivel <= 15) {
+      guardarExtraVehiculo(v.id, {
+        kilometrajeActual: nuevoKm,
+        nivelCombustiblePorc: nuevoNivel,
+        desgasteLlantasPorc: nuevoDesgaste,
+      })
+      const resTq = await tanquearVehiculoCompleto(v.id, 'reserva_automatica')
+      tanqueosAuto.push(resTq.tanqueo)
+      nuevoNivel = 100
+    } else {
+      guardarExtraVehiculo(v.id, {
+        kilometrajeActual: nuevoKm,
+        nivelCombustiblePorc: nuevoNivel,
+        desgasteLlantasPorc: nuevoDesgaste,
+        totalGalonesConsumidos: (v.totalGalonesConsumidos || 0) + galones,
+      })
     }
   }
 
-  // 2. Consumir combustible del tanque
-  const galonesCapacidad = v.capacidadTanqueGalones || 20
-  const porcConsumido = (galones / galonesCapacidad) * 100
-  let nuevoNivelCombustible = Math.max(1, Math.round(v.nivelCombustiblePorc - porcConsumido))
+  // Generar crónica humana
+  const nombresVehs = vehiculosParticipantes.map((x) => `${x.marca} ${x.linea}`)
+  const nombresTrip = (mision.tripulantesAsignados || []).map((t) => t.nombre)
+  const cronica = generarCronicaMisionNarrativa(mision, nombresVehs, nombresTrip, resultado)
 
-  // 3. Incremento de desgaste de llantas
-  const nuevoDesgasteLlantas = Math.min(100, Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2)))
-
-  let tanqueoAuto: TanqueoRegistro | undefined
-
-  // 4. Si el tanque cae en zona de reserva (entre 15% y 2%), se activa el tanqueo automático completo
-  if (nuevoNivelCombustible <= 15) {
-    guardarExtraVehiculo(v.id, {
-      kilometrajeActual: nuevoKm,
-      nivelCombustiblePorc: nuevoNivelCombustible,
-      desgasteLlantasPorc: nuevoDesgasteLlantas,
-    })
-    const resTanqueo = await tanquearVehiculoCompleto(v.id, 'reserva_automatica')
-    tanqueoAuto = resTanqueo.tanqueo
-    nuevoNivelCombustible = 100
-  } else {
-    guardarExtraVehiculo(v.id, {
-      kilometrajeActual: nuevoKm,
-      nivelCombustiblePorc: nuevoNivelCombustible,
-      desgasteLlantasPorc: nuevoDesgasteLlantas,
-      totalGalonesConsumidos: (v.totalGalonesConsumidos || 0) + galones,
-    })
-  }
-
-  // 5. Marcar misión como completada
   mision.estado = 'completada'
-  mision.galonesConsumidosEstimados = galones
-  mision.desgasteLlantasIncrementoPorc = desgasteLlantasPorc
+  mision.resultado = resultado
+  mision.cronicaHistoria = cronica
+  mision.galonesConsumidosEstimados = Number(totalGalonesConsumidosMision.toFixed(2))
+
   guardarMision(mision)
 
-  return { mision, kmActualizado: nuevoKm, tanqueoAutomatico: tanqueoAuto }
+  return {
+    mision,
+    tanqueosAutomaticos: tanqueosAuto,
+    cronica,
+  }
 }
 
 /**
- * Liquida la Tarjeta de Combustible mensual en CashMet:
- * Crea el movimiento de gasto y descuenta el saldo de la cuenta bancaria de CashMet seleccionada.
+ * Liquida la Tarjeta de Combustible en CashMet.
  */
 export async function liquidarTarjetaEnCashmet(cuentaBancoId: string): Promise<TarjetaCombustibleReserva> {
   const estado = leerEstadoLocal()
