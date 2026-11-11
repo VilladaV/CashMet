@@ -22,6 +22,8 @@ import {
   reemplazarLlantasVehiculo,
   tanquearVehiculoCompleto,
   verificarYCumplirRutasAutomaticas,
+  obtenerRotacionContador,
+  guardarRotacionContador,
 } from './repo'
 import { BASE_BEARS_RESERVE } from './geo'
 import { generarTurnosSemanalesIA } from './gemaEngine'
@@ -87,14 +89,19 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
       setEmpleados(emps)
       setVehiculos(vehs)
       setCuentasCashmet(cuentas)
-      // Cuadrante semanal 24/7: si no existe el de esta semana o es incompleto, Gema lo arma
+      // Cuadrante semanal 24/7: si no existe el de esta semana, faltan turnos o algún activo quedó en 0h, Gema lo arma
       const rutas = listarRutasHabituales()
       let turnosExistentes = listarTurnos()
       const lunesActual = lunesDeEstaSemanaISO()
       const semanaActual = turnosExistentes.filter((t) => t.semanaISO === lunesActual)
-      const faltaNocheOIncompleto = !semanaActual.some((t) => t.franja === 'noche') || semanaActual.length < 21
+      const algunActivoSinHoras = emps
+        .filter((e) => e.activo !== false)
+        .some((e) => !semanaActual.some((t) => t.empleadoId === e.id))
+      const faltaNocheOIncompleto =
+        !semanaActual.some((t) => t.franja === 'noche') || semanaActual.length < 21 || algunActivoSinHoras
       if (emps.length > 0 && (semanaActual.length === 0 || faltaNocheOIncompleto)) {
-        turnosExistentes = generarTurnosSemanalesIA(emps, lunesActual, rutas)
+        const contadorActual = obtenerRotacionContador()
+        turnosExistentes = generarTurnosSemanalesIA(emps, lunesActual, rutas, contadorActual)
         guardarTurnos(turnosExistentes)
       }
       setTurnos(turnosExistentes)
@@ -117,9 +124,11 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     })
   }, [cargarTodo])
 
-  // Rotar turnos con Gema (incluye conductores de rutas de rutina)
+  // Rotar turnos con Gema (reorganiza equitativamente alternando roles y días en cada clic)
   const rotarTurnos = () => {
-    const nuevosTurnos = generarTurnosSemanalesIA(empleados, lunesDeEstaSemanaISO(), rutasHabituales)
+    const siguiente = obtenerRotacionContador() + 1
+    guardarRotacionContador(siguiente)
+    const nuevosTurnos = generarTurnosSemanalesIA(empleados, lunesDeEstaSemanaISO(), rutasHabituales, siguiente)
     guardarTurnos(nuevosTurnos)
     setTurnos(nuevosTurnos)
   }

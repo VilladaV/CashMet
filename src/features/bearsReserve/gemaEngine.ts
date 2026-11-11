@@ -745,7 +745,8 @@ export function generarCronicaMisionNarrativa(
 export function generarTurnosSemanalesIA(
   empleados: EmpleadoOperativo[],
   fechaLunesISO: string,
-  _rutasHabituales: RutaHabitual[] = []
+  _rutasHabituales: RutaHabitual[] = [],
+  rotacionOffset: number = 0
 ): TurnoSemanal[] {
   const turnos: TurnoSemanal[] = []
   const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
@@ -756,9 +757,14 @@ export function generarTurnosSemanalesIA(
 
   // Solo colaboradores operativos activos (excluye cargos administrativos u omitidos como editores)
   const empleadosActivos = empleados.filter((e) => e.activo !== false)
+  const n = empleadosActivos.length
+
+  // Rotación circular del pool según el contador de rotación para variar las asignaciones en cada clic
+  const shift = n > 0 ? (Math.abs(rotacionOffset) * 3) % n : 0
+  const poolRotado = n > 0 ? [...empleadosActivos.slice(shift), ...empleadosActivos.slice(0, shift)] : []
 
   const horasAsignadas: Record<string, number> = {}
-  empleadosActivos.forEach((e) => (horasAsignadas[e.id] = 0))
+  poolRotado.forEach((e) => (horasAsignadas[e.id] = 0))
 
   // Registro de quién trabajó en la noche del día anterior para asegurar descanso
   let empleadosEnNocheAnterior = new Set<string>()
@@ -780,65 +786,95 @@ export function generarTurnosSemanalesIA(
     const empleadosOcupadosHoy = new Set<string>()
     const empleadosEnNocheHoy = new Set<string>()
 
-    // Configuración de los 3 turnos continuos de 8 horas (cobertura total 24/7)
+    // Configuración de los turnos continuos de 8 horas (cobertura total 24/7 con refuerzo diurno si el equipo lo requiere)
     const franjasDia: Array<{
       franja: 'manana' | 'tarde' | 'noche'
       horaInicio: string
       horaFin: string
       horas: number
-      puestoConductor: {
+      puestos: Array<{
+        idSufijo: string
+        tipoPuesto: 'conductor' | 'mecanico'
         rol: string
         rutaHabitualId?: string
-      }
-      puestoMecanico: {
-        rol: string
-      }
+        esOpcional?: boolean
+      }>
     }> = [
       {
         franja: 'manana',
         horaInicio: '06:00',
         horaFin: '14:00',
         horas: 8,
-        puestoConductor: {
-          rol:
-            d <= 4
-              ? `🚌 Conducción Ruta Escolar Matutina 06:00 + Guardia Base (${nombreDia})`
-              : d === 5
-                ? `🧺 Conducción Ruta Solidaria Mercado Campesino 05:30 + Guardia Base (${nombreDia})`
-                : `🚗 Conductor de Guardia Matutina & Base Central (${nombreDia})`,
-          rutaHabitualId: d <= 4 ? 'rut-escolar-matutina' : d === 5 ? 'rut-mercado-campesino' : undefined,
-        },
-        puestoMecanico: {
-          rol: `🔧 Mecánico de Base / Soporte Técnico & Alistamiento Flota (${nombreDia})`,
-        },
+        puestos: [
+          {
+            idSufijo: 'cond-ruta',
+            tipoPuesto: 'conductor',
+            rol:
+              d <= 4
+                ? `🚌 Conducción Ruta Escolar Matutina 06:00 + Guardia Base (${nombreDia})`
+                : d === 5
+                  ? `🧺 Conducción Ruta Solidaria Mercado Campesino 05:30 + Guardia Base (${nombreDia})`
+                  : `🚗 Conductor de Guardia Matutina & Base Central (${nombreDia})`,
+            rutaHabitualId: d <= 4 ? 'rut-escolar-matutina' : d === 5 ? 'rut-mercado-campesino' : undefined,
+          },
+          {
+            idSufijo: 'mec',
+            tipoPuesto: 'mecanico',
+            rol: `🔧 Mecánico de Base / Soporte Técnico & Alistamiento Flota (${nombreDia})`,
+          },
+          {
+            idSufijo: 'cond-apoyo',
+            tipoPuesto: 'conductor',
+            rol: `🚗 Conductor de Apoyo / Guardia Rápida Veredal (${nombreDia})`,
+            esOpcional: true, // Se activa para que los conductores alcancen sus 40 horas completas
+          },
+        ],
       },
       {
         franja: 'tarde',
         horaInicio: '14:00',
         horaFin: '22:00',
         horas: 8,
-        puestoConductor: {
-          rol:
-            d <= 4
-              ? `🚌 Conducción Ruta Escolar Vespertina 15:00 + Guardia Base (${nombreDia})`
-              : `🚗 Conductor de Guardia Vespertina & Auxilio Veredal (${nombreDia})`,
-          rutaHabitualId: d <= 4 ? 'rut-escolar-vespertina' : undefined,
-        },
-        puestoMecanico: {
-          rol: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
-        },
+        puestos: [
+          {
+            idSufijo: 'cond-ruta',
+            tipoPuesto: 'conductor',
+            rol:
+              d <= 4
+                ? `🚌 Conducción Ruta Escolar Vespertina 15:00 + Guardia Base (${nombreDia})`
+                : `🚗 Conductor de Guardia Vespertina & Auxilio Veredal (${nombreDia})`,
+            rutaHabitualId: d <= 4 ? 'rut-escolar-vespertina' : undefined,
+          },
+          {
+            idSufijo: 'mec',
+            tipoPuesto: 'mecanico',
+            rol: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
+          },
+          {
+            idSufijo: 'cond-apoyo',
+            tipoPuesto: 'conductor',
+            rol: `🚗 Conductor de Asistencia Comunitaria & Despacho Rápido (${nombreDia})`,
+            esOpcional: true, // Se activa para que el personal complete sus 40 horas
+          },
+        ],
       },
       {
         franja: 'noche',
         horaInicio: '22:00',
         horaFin: '06:00',
         horas: 8,
-        puestoConductor: {
-          rol: `🚗 Conductor Nocturno & Respuesta Inmediata a Emergencias (${nombreDia})`,
-        },
-        puestoMecanico: {
-          rol: `🔧 Mecánico Nocturno & Rescate Pesado / Alerta Cordillera (${nombreDia})`,
-        },
+        puestos: [
+          {
+            idSufijo: 'cond',
+            tipoPuesto: 'conductor',
+            rol: `🚗 Conductor Nocturno & Respuesta Inmediata a Emergencias (${nombreDia})`,
+          },
+          {
+            idSufijo: 'mec',
+            tipoPuesto: 'mecanico',
+            rol: `🔧 Mecánico Nocturno & Rescate Pesado / Alerta Cordillera (${nombreDia})`,
+          },
+        ],
       },
     ]
 
@@ -874,110 +910,75 @@ export function generarTurnosSemanalesIA(
         return true
       }
 
-      // --- ASIGNAR PUESTO 1: CONDUCTOR ---
-      const candidatosConductor = empleadosActivos
-        .filter((emp) => puedeAsignarse(emp, 'conductor'))
-        .sort((a, b) => {
-          const ca = afinidadConductor(a)
-          const cb = afinidadConductor(b)
-          // Si uno tiene mayor afinidad de conducción
-          if (cb !== ca) return cb - ca
-          // A igual habilidad, quien lleve menos horas asignadas en la semana (rotación equitativa)
-          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
-        })
+      for (const puesto of f.puestos) {
+        // Si es un puesto de apoyo opcional, solo crearlo si hay colaboradores que aún no han llegado a sus 40 horas
+        if (puesto.esOpcional) {
+          const alguienNecesitaHoras = poolRotado.some(
+            (e) => (horasAsignadas[e.id] || 0) < 40 && puedeAsignarse(e, puesto.tipoPuesto)
+          )
+          if (!alguienNecesitaHoras) {
+            continue
+          }
+        }
 
-      const conductorElegido = candidatosConductor[0]
+        // Selección de candidatos priorizando SIEMPRE a quien lleve menos horas asignadas
+        const candidatos = poolRotado
+          .filter((emp) => puedeAsignarse(emp, puesto.tipoPuesto))
+          .sort((a, b) => {
+            // 1. Quien tenga MENOS horas asignadas siempre va de primero para garantizar equidad absoluta (40h todos)
+            const hA = horasAsignadas[a.id] || 0
+            const hB = horasAsignadas[b.id] || 0
+            if (hA !== hB) return hA - hB
 
-      if (conductorElegido) {
-        horasAsignadas[conductorElegido.id] = (horasAsignadas[conductorElegido.id] || 0) + f.horas
-        empleadosOcupadosHoy.add(conductorElegido.id)
-        if (f.franja === 'noche') empleadosEnNocheHoy.add(conductorElegido.id)
+            // 2. A igual número de horas acumuladas, idoneidad de rol
+            const scA = puesto.tipoPuesto === 'mecanico' ? afinidadMecanico(a) : afinidadConductor(a)
+            const scB = puesto.tipoPuesto === 'mecanico' ? afinidadMecanico(b) : afinidadConductor(b)
+            if (scB !== scA) return scB - scA
 
-        turnos.push({
-          id: `tur-${fechaISO}-${f.franja}-cond`,
-          semanaISO: fechaLunesISO,
-          empleadoId: conductorElegido.id,
-          empleadoNombre: conductorElegido.nombreCompleto,
-          esRespaldoCoordinador: false,
-          fecha: fechaISO,
-          franja: f.franja,
-          horaInicio: f.horaInicio,
-          horaFin: f.horaFin,
-          horas: f.horas,
-          rolGuardia: f.puestoConductor.rol,
-          cumplido: false,
-          rutaHabitualId: f.puestoConductor.rutaHabitualId,
-        })
-      } else {
-        // Respaldo de emergencia del Coordinador General
-        turnos.push({
-          id: `tur-${fechaISO}-${f.franja}-cond-respaldo`,
-          semanaISO: fechaLunesISO,
-          empleadoId: 'coord-user',
-          empleadoNombre: 'Tú (Coordinador General)',
-          esRespaldoCoordinador: true,
-          fecha: fechaISO,
-          franja: f.franja,
-          horaInicio: f.horaInicio,
-          horaFin: f.horaFin,
-          horas: f.horas,
-          rolGuardia: `🚨 ${f.puestoConductor.rol} · Respaldo de Emergencia`,
-          cumplido: false,
-          rutaHabitualId: f.puestoConductor.rutaHabitualId,
-          notas: 'Asignado a ti: la nómina completó sus 42h semanales o tiene compromisos de estudio en esta franja.',
-        })
-      }
+            return 0
+          })
 
-      // --- ASIGNAR PUESTO 2: MECÁNICO / POLIVALENTE ---
-      const candidatosMecanico = empleadosActivos
-        .filter((emp) => puedeAsignarse(emp, 'mecanico'))
-        .sort((a, b) => {
-          const ma = afinidadMecanico(a)
-          const mb = afinidadMecanico(b)
-          // Priorizar mecánico puro sobre polivalente
-          if (mb !== ma) return mb - ma
-          // A igual habilidad, quien lleve menos horas asignadas
-          return (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0)
-        })
+        const elegido = candidatos[0]
 
-      const mecanicoElegido = candidatosMecanico[0]
+        if (elegido) {
+          horasAsignadas[elegido.id] = (horasAsignadas[elegido.id] || 0) + f.horas
+          empleadosOcupadosHoy.add(elegido.id)
+          if (f.franja === 'noche') empleadosEnNocheHoy.add(elegido.id)
 
-      if (mecanicoElegido) {
-        horasAsignadas[mecanicoElegido.id] = (horasAsignadas[mecanicoElegido.id] || 0) + f.horas
-        empleadosOcupadosHoy.add(mecanicoElegido.id)
-        if (f.franja === 'noche') empleadosEnNocheHoy.add(mecanicoElegido.id)
-
-        turnos.push({
-          id: `tur-${fechaISO}-${f.franja}-mec`,
-          semanaISO: fechaLunesISO,
-          empleadoId: mecanicoElegido.id,
-          empleadoNombre: mecanicoElegido.nombreCompleto,
-          esRespaldoCoordinador: false,
-          fecha: fechaISO,
-          franja: f.franja,
-          horaInicio: f.horaInicio,
-          horaFin: f.horaFin,
-          horas: f.horas,
-          rolGuardia: f.puestoMecanico.rol,
-          cumplido: false,
-        })
-      } else {
-        // Respaldo de emergencia del Coordinador General
-        turnos.push({
-          id: `tur-${fechaISO}-${f.franja}-mec-respaldo`,
-          semanaISO: fechaLunesISO,
-          empleadoId: 'coord-user',
-          empleadoNombre: 'Tú (Coordinador General)',
-          esRespaldoCoordinador: true,
-          fecha: fechaISO,
-          franja: f.franja,
-          horaInicio: f.horaInicio,
-          horaFin: f.horaFin,
-          horas: f.horas,
-          rolGuardia: `🚨 ${f.puestoMecanico.rol} · Respaldo de Emergencia`,
-          cumplido: false,
-          notas: 'Asignado a ti: nómina con 42h copadas o sin mecánico/polivalente libre.',
-        })
+          turnos.push({
+            id: `tur-${fechaISO}-${f.franja}-${puesto.idSufijo}`,
+            semanaISO: fechaLunesISO,
+            empleadoId: elegido.id,
+            empleadoNombre: elegido.nombreCompleto,
+            esRespaldoCoordinador: false,
+            fecha: fechaISO,
+            franja: f.franja,
+            horaInicio: f.horaInicio,
+            horaFin: f.horaFin,
+            horas: f.horas,
+            rolGuardia: puesto.rol,
+            cumplido: false,
+            rutaHabitualId: puesto.rutaHabitualId,
+          })
+        } else if (!puesto.esOpcional) {
+          // Puesto troncal sin cubrir: respaldo del Coordinador General
+          turnos.push({
+            id: `tur-${fechaISO}-${f.franja}-${puesto.idSufijo}-respaldo`,
+            semanaISO: fechaLunesISO,
+            empleadoId: 'coord-user',
+            empleadoNombre: 'Tú (Coordinador General)',
+            esRespaldoCoordinador: true,
+            fecha: fechaISO,
+            franja: f.franja,
+            horaInicio: f.horaInicio,
+            horaFin: f.horaFin,
+            horas: f.horas,
+            rolGuardia: `🚨 ${puesto.rol} · Respaldo de Emergencia`,
+            cumplido: false,
+            rutaHabitualId: puesto.rutaHabitualId,
+            notas: 'Asignado a ti: nómina en compromisos de estudio o copando sus 42h legales.',
+          })
+        }
       }
     }
 

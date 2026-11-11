@@ -95,6 +95,20 @@ export default function TurnosTab({
   const [horaFin, setHoraFin] = useState('22:00')
   const [motivo, setMotivo] = useState('Universidad / Clases')
   const [vista, setVista] = useState<'horario' | 'tarjetas'>('horario')
+  const [animandoRotacion, setAnimandoRotacion] = useState(false)
+  const [mensajeRotacion, setMensajeRotacion] = useState<string | null>(null)
+
+  const handleRotar = () => {
+    setAnimandoRotacion(true)
+    onRotarTurnosPorIA()
+    setMensajeRotacion('✨ ¡Turnos rotados por Gema exitosamente! Se reorganizó la cuadrilla equitativamente.')
+    setTimeout(() => {
+      setAnimandoRotacion(false)
+    }, 600)
+    setTimeout(() => {
+      setMensajeRotacion(null)
+    }, 4500)
+  }
 
   const agregarRestriccionHorario = () => {
     if (!empSeleccionado) return
@@ -158,13 +172,21 @@ export default function TurnosTab({
 
         <button
           type="button"
-          onClick={onRotarTurnosPorIA}
-          className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-sky-400 via-teal-400 to-emerald-400 px-5 py-3 font-black text-[#04241a] shadow-lg transition hover:brightness-110 active:scale-95 shrink-0"
+          onClick={handleRotar}
+          className={`inline-flex cursor-pointer items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-sky-400 via-teal-400 to-emerald-400 px-5 py-3 font-black text-[#04241a] shadow-lg transition active:scale-95 shrink-0 ${
+            animandoRotacion ? 'scale-95 brightness-125' : 'hover:brightness-110'
+          }`}
         >
-          <Sparkles className="h-4 w-4" />
+          <Sparkles className={`h-4 w-4 ${animandoRotacion ? 'animate-spin' : ''}`} />
           <span>💎 Gema: Rotar turnos 24/7</span>
         </button>
       </div>
+
+      {mensajeRotacion && (
+        <div className="rounded-2xl border border-emerald-400/40 bg-emerald-500/15 p-2.5 text-center text-xs font-bold text-emerald-200 shadow-md">
+          {mensajeRotacion}
+        </div>
+      )}
 
       {/* Grid de Empleados con Desactivador / Habilitador y Horas Reales */}
       <div>
@@ -489,17 +511,6 @@ export default function TurnosTab({
                       const turnosCelda = turnos.filter(
                         (t) => t.fecha === dia.fechaISO && t.franja === franja.clave
                       )
-                      const tCond =
-                        turnosCelda.find(
-                          (t) => t.id.includes('-cond') || t.rolGuardia.toLowerCase().includes('conduc')
-                        ) || turnosCelda[0]
-                      const tMec =
-                        turnosCelda.find(
-                          (t) =>
-                            t.id.includes('-mec') ||
-                            t.rolGuardia.toLowerCase().includes('mec') ||
-                            t.rolGuardia.toLowerCase().includes('soporte')
-                        ) || (turnosCelda.length > 1 && turnosCelda[1] !== tCond ? turnosCelda[1] : undefined)
 
                       return (
                         <td
@@ -509,64 +520,62 @@ export default function TurnosTab({
                           }`}
                         >
                           <div className="flex flex-col gap-1.5 min-h-[115px]">
-                            {/* Puesto 1: Conductor */}
-                            {tCond ? (
-                              <div
-                                className={`rounded-xl border p-2 space-y-0.5 shadow-sm ${
-                                  tCond.esRespaldoCoordinador
-                                    ? 'border-red-400/40 bg-red-500/10 text-red-200'
-                                    : 'border-sky-400/25 bg-sky-500/[0.08] text-white'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-1">
-                                  <span className="font-extrabold text-[11px] truncate flex items-center gap-1 text-sky-200">
-                                    <span>{tCond.rutaHabitualId ? '🚌' : '🚗'}</span>
-                                    <span className="truncate">{tCond.empleadoNombre}</span>
-                                  </span>
-                                  {tCond.esRespaldoCoordinador && (
-                                    <span className="rounded bg-red-400/30 px-1 text-[8px] font-black text-red-300 shrink-0">
-                                      SOS
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[9px] text-mist-400 line-clamp-2 leading-tight">
-                                  {tCond.rolGuardia}
-                                </div>
+                            {turnosCelda.length === 0 ? (
+                              <div className="rounded-xl border border-dashed border-white/10 p-2 text-[9px] text-mist-500 italic text-center">
+                                Sin guardia asignada
                               </div>
                             ) : (
-                              <div className="rounded-xl border border-dashed border-white/10 p-2 text-[9px] text-mist-500 italic text-center">
-                                Sin conductor
-                              </div>
-                            )}
+                              turnosCelda.map((t) => {
+                                const esConductor =
+                                  t.id.includes('-cond') || t.rolGuardia.toLowerCase().includes('conduc')
+                                const esMecanico =
+                                  t.id.includes('-mec') ||
+                                  t.rolGuardia.toLowerCase().includes('mec') ||
+                                  t.rolGuardia.toLowerCase().includes('soporte')
+                                const esRuta = Boolean(t.rutaHabitualId)
 
-                            {/* Puesto 2: Mecánico / Polivalente */}
-                            {tMec ? (
-                              <div
-                                className={`rounded-xl border p-2 space-y-0.5 shadow-sm ${
-                                  tMec.esRespaldoCoordinador
-                                    ? 'border-red-400/40 bg-red-500/10 text-red-200'
-                                    : 'border-emerald-400/25 bg-emerald-500/[0.08] text-white'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-1">
-                                  <span className="font-extrabold text-[11px] truncate flex items-center gap-1 text-emerald-200">
-                                    <span>🔧</span>
-                                    <span className="truncate">{tMec.empleadoNombre}</span>
-                                  </span>
-                                  {tMec.esRespaldoCoordinador && (
-                                    <span className="rounded bg-red-400/30 px-1 text-[8px] font-black text-red-300 shrink-0">
-                                      SOS
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[9px] text-mist-400 line-clamp-2 leading-tight">
-                                  {tMec.rolGuardia}
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="rounded-xl border border-dashed border-white/10 p-2 text-[9px] text-mist-500 italic text-center">
-                                Sin mecánico
-                              </div>
+                                return (
+                                  <div
+                                    key={t.id}
+                                    className={`rounded-xl border p-2 space-y-0.5 shadow-sm transition-all ${
+                                      t.esRespaldoCoordinador
+                                        ? 'border-red-400/40 bg-red-500/10 text-red-200'
+                                        : esRuta
+                                          ? 'border-sky-400/35 bg-sky-500/[0.12] text-white'
+                                          : esConductor
+                                            ? 'border-blue-400/25 bg-blue-500/[0.08] text-white'
+                                            : esMecanico
+                                              ? 'border-emerald-400/25 bg-emerald-500/[0.08] text-white'
+                                              : 'border-white/15 bg-white/[0.04] text-white'
+                                    }`}
+                                  >
+                                    <div className="flex items-center justify-between gap-1">
+                                      <span
+                                        className={`font-extrabold text-[11px] truncate flex items-center gap-1 ${
+                                          t.esRespaldoCoordinador
+                                            ? 'text-red-300'
+                                            : esRuta
+                                              ? 'text-sky-300'
+                                              : esConductor
+                                                ? 'text-blue-200'
+                                                : 'text-emerald-200'
+                                        }`}
+                                      >
+                                        <span>{esRuta ? '🚌' : esConductor ? '🚗' : '🔧'}</span>
+                                        <span className="truncate">{t.empleadoNombre}</span>
+                                      </span>
+                                      {t.esRespaldoCoordinador && (
+                                        <span className="rounded bg-red-400/30 px-1 text-[8px] font-black text-red-300 shrink-0">
+                                          SOS
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[9px] text-mist-400 line-clamp-2 leading-tight">
+                                      {t.rolGuardia}
+                                    </div>
+                                  </div>
+                                )
+                              })
                             )}
                           </div>
                         </td>

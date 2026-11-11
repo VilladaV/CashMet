@@ -473,6 +473,22 @@ export function reemplazarLlantasVehiculo(id: string) {
   guardarExtraVehiculo(id, { desgasteLlantasPorc: 0 })
 }
 
+export function obtenerRotacionContador(): number {
+  try {
+    return Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
+  } catch {
+    return 0
+  }
+}
+
+export function guardarRotacionContador(contador: number): void {
+  try {
+    localStorage.setItem('bears_reserve_rotacion_contador_v1', String(contador))
+  } catch {
+    /* ignore */
+  }
+}
+
 export function listarTurnos(): TurnoSemanal[] {
   return leerEstadoLocal().turnos
 }
