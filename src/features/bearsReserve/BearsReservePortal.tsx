@@ -307,6 +307,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                 onCumplirRutaHabitual={cumplirRutaHabitual}
                 onActualizarRuta={(r) => {
                   guardarRutaHabitual(r)
+                  setRutasHabituales((prev) => prev.map((x) => (x.id === r.id ? r : x)))
                   void cargarTodo()
                 }}
               />

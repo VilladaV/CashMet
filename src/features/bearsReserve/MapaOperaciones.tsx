@@ -8,6 +8,7 @@ import {
   PARADAS_RUTA_ESCOLAR_VESPERTINA,
 } from './geo'
 import { trazarRutaCarreteraGps } from './ruteoGps'
+import { guardarRutaHabitual } from './repo'
 import type { EventoRadarLocal, MisionComunitaria, RutaHabitual } from './types'
 import {
   Navigation,
@@ -30,6 +31,8 @@ interface Props {
   onActualizarRuta?: (ruta: RutaHabitual) => void
 }
 
+type FiltroCapa = 'todos' | 'manana' | 'tarde' | 'radar'
+
 export default function MapaOperaciones({
   eventosRadar,
   misiones,
@@ -42,7 +45,13 @@ export default function MapaOperaciones({
   const mapInstanceRef = useRef<L.Map | null>(null)
   const routeLayerGroupRef = useRef<L.LayerGroup | null>(null)
 
-  const [capaActiva, setCapaActiva] = useState<'todos' | 'radar' | 'escolares'>('todos')
+  // Rutas editadas localmente en memoria para renderizado instantáneo
+  const [rutasEditadasLocales, setRutasEditadasLocales] = useState<Record<string, RutaHabitual>>({})
+
+  // Fusión reactiva de rutas del padre con las ediciones inmediatas
+  const rutasLocales = rutasHabituales.map((r) => rutasEditadasLocales[r.id] || r)
+
+  const [capaActiva, setCapaActiva] = useState<FiltroCapa>('manana')
   const [puntoInspeccionado, setPuntoInspeccionado] = useState<{
     titulo: string
     lugar: string
@@ -102,7 +111,11 @@ export default function MapaOperaciones({
   // Iniciar modo edición para una ruta específica
   const iniciarEdicionRuta = useCallback(
     (rutaId: string) => {
-      const ruta = rutasHabituales.find((r) => r.id === rutaId) || rutasHabituales[0]
+      const ruta =
+        rutasLocales.find((r) => r.id === rutaId) ||
+        rutasHabituales.find((r) => r.id === rutaId) ||
+        rutasLocales[0] ||
+        rutasHabituales[0]
       if (!ruta) return
 
       const paradasIniciales =
@@ -125,12 +138,14 @@ export default function MapaOperaciones({
         }
       })
     },
-    [rutasHabituales]
+    [rutasLocales, rutasHabituales]
   )
 
-  // Guardar trazado editado
+  // Guardar trazado editado con persistencia sincrónica directa
   const guardarTrazadoEditado = () => {
-    const ruta = rutasHabituales.find((r) => r.id === rutaIdEditando)
+    const ruta =
+      rutasLocales.find((r) => r.id === rutaIdEditando) ||
+      rutasHabituales.find((r) => r.id === rutaIdEditando)
     if (!ruta) return
 
     const kmFinal = distanciaGpsLive > 0 ? distanciaGpsLive : ruta.distanciaKm
@@ -139,26 +154,42 @@ export default function MapaOperaciones({
 
     const rutaGuardada: RutaHabitual = {
       ...ruta,
-      coordenadasParadas: paradasEditando,
+      coordenadasParadas: [...paradasEditando],
       distanciaKm: kmFinal,
       minutosRodamiento: tiempoRodamientoFinal,
       duracionMinutos: tiempoRodamientoFinal + ralenti,
     }
 
+    // 1. Persistencia inmediata en localStorage
+    guardarRutaHabitual(rutaGuardada)
+
+    // 2. Actualizar estado local de inmediato en este componente
+    setRutasEditadasLocales((prev) => ({ ...prev, [rutaGuardada.id]: rutaGuardada }))
+
+    // 3. Notificar al padre (BearsReservePortal)
     if (onActualizarRuta) {
       onActualizarRuta(rutaGuardada)
     }
 
+    // 4. Enfocar la vista normal en la ruta que acabamos de guardar
+    if (rutaGuardada.tipoHorario === 'tarde') {
+      setCapaActiva('tarde')
+    } else {
+      setCapaActiva('manana')
+    }
+
     setFeedbackMensaje(
-      `✅ ¡Trazado de "${rutaGuardada.nombre}" guardado con ${kmFinal} km reales por carretera!`
+      `✅ ¡Trazado de "${rutaGuardada.nombre}" guardado con ${paradasEditando.length} paradas y ${kmFinal} km reales por carretera!`
     )
-    window.setTimeout(() => setFeedbackMensaje(''), 4500)
+    window.setTimeout(() => setFeedbackMensaje(''), 5000)
     setModoEdicionRuta(false)
   }
 
   // Restablecer paradas originales
   const restablecerParadasOriginales = () => {
-    const ruta = rutasHabituales.find((r) => r.id === rutaIdEditando)
+    const ruta =
+      rutasLocales.find((r) => r.id === rutaIdEditando) ||
+      rutasHabituales.find((r) => r.id === rutaIdEditando)
     const porDefecto =
       ruta?.tipoHorario === 'tarde' ? PARADAS_RUTA_ESCOLAR_VESPERTINA : PARADAS_RUTA_ESCOLAR_MATUTINA
     setParadasEditando([...porDefecto])
@@ -373,9 +404,11 @@ export default function MapaOperaciones({
     }
 
     // ------------------- MODO VISTA NORMAL -------------------
-    // 2. RUTAS HABITUALES / ESCOLARES (Trazado real por carreteras con OSRM)
-    if (capaActiva === 'todos' || capaActiva === 'escolares') {
-      const rutaManana = rutasHabituales.find((r) => r.tipoHorario === 'manana')
+    // 2. RUTAS HABITUALES / ESCOLARES (Usa siempre rutasLocales con los cambios del usuario)
+    if (capaActiva === 'todos' || capaActiva === 'manana') {
+      const rutaManana =
+        rutasLocales.find((r) => r.id === 'rut-escolar-manana') ||
+        rutasLocales.find((r) => r.tipoHorario === 'manana')
       const paradasManana =
         rutaManana?.coordenadasParadas && rutaManana.coordenadasParadas.length > 0
           ? rutaManana.coordenadasParadas
@@ -386,35 +419,60 @@ export default function MapaOperaciones({
         {
           color: '#38bdf8',
           weight: 4.5,
-          opacity: 0.9,
+          opacity: 0.95,
         }
       ).bindTooltip(`Ruta Escolar Matutina 06:00 (${rutaManana?.distanciaKm || 38.4} km)`, { sticky: true })
       layerGroup.addLayer(lineaManana)
 
+      // Cargar trazado exacto por carreteras reales
       void trazarRutaCarreteraGps(paradasManana).then((resGps) => {
         if (resGps && resGps.coordenadas.length > 0) {
           lineaManana.setLatLngs(resGps.coordenadas)
         }
       })
 
+      // Marcadores visibles para cada parada guardada de la ruta matutina
       paradasManana.forEach((p, idx) => {
         if (idx === 0 || idx === paradasManana.length - 1) return
         const stopIcon = L.divIcon({
           className: 'custom-stop-icon',
-          html: `<div style="background: #38bdf8; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 8px #38bdf8;"></div>`,
-          iconSize: [12, 12],
-          iconAnchor: [6, 6],
+          html: `
+            <div style="
+              background: #38bdf8;
+              color: #04241a;
+              font-weight: 900;
+              font-size: 10px;
+              width: 22px;
+              height: 22px;
+              border-radius: 50%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              border: 2px solid white;
+              box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
+            ">
+              #${idx}
+            </div>
+          `,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
         })
         const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
-          <div style="color: #0f172a; font-size: 11px;">
-            <b>🚌 Parada Ruta Matutina (${idx}):</b><br/>${p.nombre}
+          <div style="color: #0f172a; font-size: 11px; font-family: sans-serif;">
+            <b>🚌 Parada #${idx} (${rutaManana?.nombre || 'Ruta Matutina'}):</b><br/>
+            <span style="font-weight: bold; color: #0284c7;">${p.nombre}</span><br/>
+            <span style="font-size: 10px; color: #64748b;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
           </div>
         `)
         layerGroup.addLayer(m)
       })
+    }
 
-      // Ruta Vespertina (Tarde)
-      const rutaTarde = rutasHabituales.find((r) => r.tipoHorario === 'tarde')
+    // Ruta Vespertina (Tarde)
+    if (capaActiva === 'todos' || capaActiva === 'tarde') {
+      const rutaTarde =
+        rutasLocales.find((r) => r.id === 'rut-escolar-tarde') ||
+        rutasLocales.find((r) => r.tipoHorario === 'tarde')
       const paradasTarde =
         rutaTarde?.coordenadasParadas && rutaTarde.coordenadasParadas.length > 0
           ? rutaTarde.coordenadasParadas
@@ -425,7 +483,7 @@ export default function MapaOperaciones({
         {
           color: '#c084fc',
           weight: 3.5,
-          opacity: 0.85,
+          opacity: 0.9,
           dashArray: '6, 6',
         }
       ).bindTooltip(`Ruta Escolar Vespertina 15:00 (${rutaTarde?.distanciaKm || 38.4} km)`, { sticky: true })
@@ -436,6 +494,43 @@ export default function MapaOperaciones({
           lineaTarde.setLatLngs(resGps.coordenadas)
         }
       })
+
+      if (capaActiva === 'tarde') {
+        paradasTarde.forEach((p, idx) => {
+          if (idx === 0 || idx === paradasTarde.length - 1) return
+          const stopIcon = L.divIcon({
+            className: 'custom-stop-icon',
+            html: `
+              <div style="
+                background: #c084fc;
+                color: #1e0a3c;
+                font-weight: 900;
+                font-size: 10px;
+                width: 22px;
+                height: 22px;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                border: 2px solid white;
+                box-shadow: 0 0 10px rgba(192, 132, 252, 0.7);
+              ">
+                #${idx}
+              </div>
+            `,
+            iconSize: [22, 22],
+            iconAnchor: [11, 11],
+          })
+          const m = L.marker([p.lat, p.lng], { icon: stopIcon }).bindPopup(`
+            <div style="color: #0f172a; font-size: 11px; font-family: sans-serif;">
+              <b>🎒 Parada #${idx} (${rutaTarde?.nombre || 'Ruta Vespertina'}):</b><br/>
+              <span style="font-weight: bold; color: #7c3aed;">${p.nombre}</span><br/>
+              <span style="font-size: 10px; color: #64748b;">${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}</span>
+            </div>
+          `)
+          layerGroup.addLayer(m)
+        })
+      }
     }
 
     // 3. EVENTOS DEL RADAR
@@ -547,13 +642,18 @@ export default function MapaOperaciones({
   }, [
     eventosRadar,
     misiones,
-    rutasHabituales,
+    rutasLocales,
     capaActiva,
     misionSeleccionada,
     onSeleccionarEvento,
     modoEdicionRuta,
     paradasEditando,
   ])
+
+  // Obtener datos de la ruta activa para el banner informativo
+  const rutaActivaActual =
+    rutasLocales.find((r) => (capaActiva === 'tarde' ? r.id === 'rut-escolar-tarde' : r.id === 'rut-escolar-manana')) ||
+    rutasLocales[0]
 
   return (
     <div className="space-y-3">
@@ -599,14 +699,25 @@ export default function MapaOperaciones({
               </button>
               <button
                 type="button"
-                onClick={() => setCapaActiva('escolares')}
+                onClick={() => setCapaActiva('manana')}
                 className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
-                  capaActiva === 'escolares'
-                    ? 'bg-sky-400/20 text-sky-200 border border-sky-400/30'
+                  capaActiva === 'manana'
+                    ? 'bg-sky-400/25 text-sky-200 border border-sky-400/40 shadow-sm'
                     : 'bg-white/[0.04] text-mist-400 hover:text-white'
                 }`}
               >
-                Rutas Escolares (Mañana / Tarde)
+                🚌 Ruta Mañana 06:00
+              </button>
+              <button
+                type="button"
+                onClick={() => setCapaActiva('tarde')}
+                className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
+                  capaActiva === 'tarde'
+                    ? 'bg-purple-400/25 text-purple-200 border border-purple-400/40 shadow-sm'
+                    : 'bg-white/[0.04] text-mist-400 hover:text-white'
+                }`}
+              >
+                🎒 Ruta Tarde 15:00
               </button>
               <button
                 type="button"
@@ -618,13 +729,15 @@ export default function MapaOperaciones({
                 }`}
               >
                 <Radio className="h-3 w-3 inline mr-1" />
-                Contingencias Radar
+                Radar
               </button>
 
               {/* BOTÓN DESTACADO PARA EDITAR ARRASTRANDO EN EL MAPA */}
               <button
                 type="button"
-                onClick={() => iniciarEdicionRuta('rut-escolar-manana')}
+                onClick={() =>
+                  iniciarEdicionRuta(capaActiva === 'tarde' ? 'rut-escolar-tarde' : 'rut-escolar-manana')
+                }
                 className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg border border-sky-400/40 bg-gradient-to-r from-sky-500/20 to-teal-500/20 px-3 py-1 text-[11px] font-black text-sky-200 hover:brightness-125 transition"
               >
                 <Move className="h-3.5 w-3.5 text-sky-400" />
@@ -639,7 +752,7 @@ export default function MapaOperaciones({
                 onChange={(e) => iniciarEdicionRuta(e.target.value)}
                 className="field-dark h-7 rounded-lg px-2 text-[11px] font-bold text-amber-200"
               >
-                {rutasHabituales.map((r) => (
+                {rutasLocales.map((r) => (
                   <option key={r.id} value={r.id}>
                     {r.nombre}
                   </option>
@@ -715,7 +828,7 @@ export default function MapaOperaciones({
           <div className="flex items-center gap-2">
             <RouteIcon className="h-3.5 w-3.5 text-sky-400" />
             <span>
-              <b>Trazado oficial de carreteras:</b> Salida desde Finca El Guadual (San Peregrino) hacia veredas y colegios de Manizales.
+              <b>Trazado en Pantalla:</b> {rutaActivaActual?.nombre || 'Ruta'} ({rutaActivaActual?.distanciaKm || 0} km reales) · {rutaActivaActual?.coordenadasParadas?.length || 0} paradas guardadas.
             </span>
           </div>
           <span className="text-[10px] text-amber-300 font-bold">
