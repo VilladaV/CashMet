@@ -265,48 +265,84 @@ function migrarMesTarjetaSiCambio(estado: EstadoBearsCompleto): boolean {
 
 function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null {
   if (typeof localStorage === 'undefined') return null
+
+  const vehiculosExtra: Record<string, Partial<VehiculoOperativo>> = {}
+  const empleadosExtra: Record<string, Partial<EmpleadoOperativo>> = {}
+  let parsed: Partial<EstadoBearsCompleto> = {}
+  let encontroAlgo = false
+
+  // 1. Leer estado principal legacy (sin abortar si falla)
   try {
     const raw = localStorage.getItem(CLAVE_STORAGE_LEGACY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<EstadoBearsCompleto>
+    if (raw) {
+      parsed = JSON.parse(raw) as Partial<EstadoBearsCompleto>
+      if (parsed.vehiculosExtra && typeof parsed.vehiculosExtra === 'object') {
+        Object.assign(vehiculosExtra, parsed.vehiculosExtra)
+        if (Object.keys(parsed.vehiculosExtra).length > 0) encontroAlgo = true
+      }
+      if (parsed.empleadosExtra && typeof parsed.empleadosExtra === 'object') {
+        Object.assign(empleadosExtra, parsed.empleadosExtra)
+        if (Object.keys(parsed.empleadosExtra).length > 0) encontroAlgo = true
+      }
+      if (Array.isArray(parsed.misiones) && parsed.misiones.length > 0) encontroAlgo = true
+      if (Array.isArray(parsed.turnos) && parsed.turnos.length > 0) encontroAlgo = true
+    }
+  } catch {
+    /* continuar con mapas independientes */
+  }
 
-    const vehiculosExtra = { ...(parsed.vehiculosExtra || {}) }
-    const empleadosExtra = { ...(parsed.empleadosExtra || {}) }
-
+  // 2. Leer mapa independiente de vehículos habilitados (incluso si bears_reserve_data_v2 faltaba)
+  try {
     const rawVehHab = localStorage.getItem('bears_reserve_habilitados_map_v1')
     if (rawVehHab) {
       const map = JSON.parse(rawVehHab) as Record<string, boolean>
       for (const [id, val] of Object.entries(map)) {
         if (typeof val === 'boolean') {
           vehiculosExtra[id] = { ...(vehiculosExtra[id] || {}), disponibleParaTrabajo: val }
+          encontroAlgo = true
         }
       }
     }
+  } catch {
+    /* ignore */
+  }
 
+  // 3. Leer mapa independiente de empleados habilitados
+  try {
     const rawEmpHab = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
     if (rawEmpHab) {
       const map = JSON.parse(rawEmpHab) as Record<string, boolean>
       for (const [id, val] of Object.entries(map)) {
         if (typeof val === 'boolean') {
           empleadosExtra[id] = { ...(empleadosExtra[id] || {}), activo: val }
+          encontroAlgo = true
         }
       }
     }
-
-    const rotacionContador = Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
-
-    return {
-      vehiculosExtra,
-      empleadosExtra,
-      rutasHabituales: parsed.rutasHabituales,
-      rotacionContador: Number.isFinite(rotacionContador) ? rotacionContador : 0,
-      turnos: Array.isArray(parsed.turnos) ? parsed.turnos : [],
-      misiones: Array.isArray(parsed.misiones) ? parsed.misiones : [],
-      eventosRadar: filtrarEventosRadarVigentes(parsed.eventosRadar || []),
-      tarjetaCombustible: parsed.tarjetaCombustible,
-    }
   } catch {
-    return null
+    /* ignore */
+  }
+
+  if (!encontroAlgo) return null
+
+  const rotacionContador = Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
+
+  let eventosSeguros: EventoRadarLocal[] = []
+  try {
+    eventosSeguros = filtrarEventosRadarVigentes(parsed.eventosRadar || [])
+  } catch {
+    eventosSeguros = []
+  }
+
+  return {
+    vehiculosExtra,
+    empleadosExtra,
+    rutasHabituales: parsed.rutasHabituales,
+    rotacionContador: Number.isFinite(rotacionContador) ? rotacionContador : 0,
+    turnos: Array.isArray(parsed.turnos) ? parsed.turnos : [],
+    misiones: Array.isArray(parsed.misiones) ? parsed.misiones : [],
+    eventosRadar: eventosSeguros,
+    tarjetaCombustible: parsed.tarjetaCombustible,
   }
 }
 
@@ -413,9 +449,11 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
       console.warn('Error leyendo Bear\'s Reserve desde Firestore:', err)
     }
 
-    // Migración única desde localStorage si Firestore estaba vacío
+    // Migración o recuperación segura desde localStorage:
+    // - Si Firestore estaba vacío, migra todo.
+    // - Si Firestore ya existía pero `vehiculosExtra` o `empleadosExtra` quedaron vacíos (ej. migración previa incompleta o primer ingreso desde otro navegador), recupera los registros locales sin pisar lo que ya exista en Firestore.
+    const legacy = leerMigracionLegacyLocalStorage()
     if (!existiaEnFirestore) {
-      const legacy = leerMigracionLegacyLocalStorage()
       if (legacy) {
         if (legacy.vehiculosExtra) base.vehiculosExtra = legacy.vehiculosExtra
         if (legacy.empleadosExtra) base.empleadosExtra = legacy.empleadosExtra
@@ -433,10 +471,28 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
         persistirCombustible(base),
       ])
     } else {
-      const cambioMes = migrarMesTarjetaSiCambio(base)
-      if (cambioMes) {
-        await persistirCombustible(base)
+      let recuperoConfig = false
+      if (legacy) {
+        if (
+          Object.keys(base.vehiculosExtra).length === 0 &&
+          legacy.vehiculosExtra &&
+          Object.keys(legacy.vehiculosExtra).length > 0
+        ) {
+          base.vehiculosExtra = legacy.vehiculosExtra
+          recuperoConfig = true
+        }
+        if (
+          Object.keys(base.empleadosExtra).length === 0 &&
+          legacy.empleadosExtra &&
+          Object.keys(legacy.empleadosExtra).length > 0
+        ) {
+          base.empleadosExtra = legacy.empleadosExtra
+          recuperoConfig = true
+        }
       }
+      const cambioMes = migrarMesTarjetaSiCambio(base)
+      if (recuperoConfig) await persistirConfig(base)
+      if (cambioMes) await persistirCombustible(base)
     }
 
     establecerPreciosCombustibleCache(base.preciosCombustible)

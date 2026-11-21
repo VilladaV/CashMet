@@ -1047,7 +1047,7 @@ export function filtrarEventosRadarVigentes(
 ): EventoRadarLocal[] {
   return (eventos || []).filter((e) => {
     if (!e || !e.id) return false
-    if (e.id === 'rad-sim-6' || e.titulo.toLowerCase().includes('standby')) return false
+    if (e.id === 'rad-sim-6' || String(e.titulo || '').toLowerCase().includes('standby')) return false
     if (typeof e.expiraEn === 'number' && Number.isFinite(e.expiraEn)) {
       if (e.expiraEn <= ahora) return false
     }

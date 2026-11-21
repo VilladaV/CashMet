@@ -69,6 +69,170 @@ function haceNDiasISO(dias: number): string {
   return isoLocal(d)
 }
 
+interface RssNewsItem {
+  title?: string
+  pubDate?: string
+  link?: string
+  author?: string
+  description?: string
+}
+
+/**
+ * Fuente web real de respaldo (gratis, sin cuota de Google Search Grounding):
+ * Consulta Google News Colombia RSS (`when:2d`) vía rss2json.com (CORS abierto)
+ * para Manizales, Caldas y Eje Cafetero, validando estrictamente fecha <= 2 días.
+ */
+async function buscarNoticiasGoogleNewsRSS(
+  eventosExistentes: EventoRadarLocal[]
+): Promise<{ eventos: EventoRadarLocal[]; consultado: boolean }> {
+  const hoy = hoyISO()
+  const query = encodeURIComponent(
+    '(Manizales OR Caldas OR Chinchiná OR Villamaría OR "Alto de Letras") (vía OR derrumbe OR cierre OR lluvias OR emergencia OR accidente) when:2d'
+  )
+  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=es-419&gl=CO&ceid=CO:es-419`
+  const apiUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`
+
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 7000)
+    const r = await fetch(apiUrl, { signal: controller.signal })
+    clearTimeout(timer)
+    if (!r.ok) return { eventos: [], consultado: false }
+
+    const json = (await r.json()) as { status?: string; items?: RssNewsItem[] }
+    if (json.status !== 'ok' || !Array.isArray(json.items)) {
+      return { eventos: [], consultado: false }
+    }
+
+    const ahora = Date.now()
+    const acumulados = [...eventosExistentes]
+    const candidatosValidos: Array<{
+      titulo: string
+      fuente: string
+      link: string
+      fechaPub: string
+      resumenRaw: string
+    }> = []
+
+    for (const item of json.items) {
+      if (candidatosValidos.length >= 3) break
+      const tituloRaw = String(item.title || '').trim()
+      if (!tituloRaw) continue
+
+      // Google News suele formatear "Titular - Nombre del Medio"
+      const partes = tituloRaw.split(' - ')
+      const fuente = partes.length > 1 ? partes.pop()!.trim() : String(item.author || 'Prensa Regional').trim()
+      const titulo = partes.join(' - ').trim() || tituloRaw
+
+      let fechaPub = ''
+      if (item.pubDate) {
+        const dt = new Date(item.pubDate.replace(' ', 'T') + (item.pubDate.includes('Z') ? '' : 'Z'))
+        if (!Number.isNaN(dt.getTime())) {
+          fechaPub = isoLocal(dt)
+        }
+      }
+      if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
+
+      const resumenRaw = String(item.description || '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+      if (esEventoRedundante({ titulo, lugar: 'Manizales · Caldas', resumen: resumenRaw, esNoticiaWebReal: true }, acumulados)) {
+        continue
+      }
+
+      candidatosValidos.push({
+        titulo,
+        fuente,
+        link: String(item.link || '').trim(),
+        fechaPub,
+        resumenRaw: resumenRaw.slice(0, 220),
+      })
+    }
+
+    if (candidatosValidos.length === 0) {
+      return { eventos: [], consultado: true }
+    }
+
+    // Si Gemini normal (sin grounding) está disponible, le pedimos enriquecer lugar, criterio y recomendación
+    let enriquecidos: Array<{
+      lugar?: string
+      departamento?: string
+      resumen?: string
+      esEmergenciaGrave?: boolean
+      recomendacionGema?: EventoRadarLocal['recomendacionGema']
+      justificacionGema?: string
+    }> = []
+
+    if (geminiDisponible) {
+      try {
+        const prompt = `Analiza estas noticias REALES recientes de Manizales/Caldas para Bear's Reserve (base Finca El Guadual, San Peregrino, Manizales):
+${candidatosValidos.map((c, i) => `[${i}] (${c.fechaPub} · ${c.fuente}) ${c.titulo} — ${c.resumenRaw}`).join('\n')}
+
+Devuelve ÚNICAMENTE un JSON válido con un array "items" del mismo tamaño y orden:
+{"items":[{"lugar":"Sector/Municipio","departamento":"Caldas","resumen":"Resumen claro en 1-2 frases","esEmergenciaGrave":false,"recomendacionGema":"apoyo_logistico","justificacionGema":"Criterio breve de Bear's Reserve"}]}`
+
+        const { res } = await llamarGemini({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+        })
+        if (res) {
+          const data = (await res.json()) as GeminiCandidateResponse
+          const { texto } = extraerTextoYFuentes(data)
+          const parsed = JSON.parse(limpiarJson(texto)) as { items?: typeof enriquecidos }
+          if (Array.isArray(parsed.items)) enriquecidos = parsed.items
+        }
+      } catch {
+        /* continuamos con los datos directos del RSS */
+      }
+    }
+
+    const eventos: EventoRadarLocal[] = candidatosValidos.map((c, idx) => {
+      const enr = enriquecidos[idx] || {}
+      const lugar = String(enr.lugar || 'Manizales · Caldas').trim()
+      const departamento = String(enr.departamento || 'Caldas').trim()
+      const coords = resolverCoordenadasLugar(lugar, departamento)
+      const [yP, mP, dP] = c.fechaPub.split('-').map(Number)
+      const expiraDesdePub = new Date(yP, mP - 1, dP, 23, 59, 0).getTime() + 24 * 60 * 60 * 1000
+      const expiraEn = Math.max(ahora + 12 * 60 * 60 * 1000, Math.min(ahora + TTL_NOTICIA_WEB_MS, expiraDesdePub))
+
+      const rec =
+        enr.recomendacionGema === 'intervenir_urgente' ||
+        enr.recomendacionGema === 'apoyo_logistico' ||
+        enr.recomendacionGema === 'monitorear_sin_intervenir'
+          ? enr.recomendacionGema
+          : 'apoyo_logistico'
+
+      return {
+        id: `rad-rss-${ahora}-${idx}`,
+        titulo: c.titulo,
+        lugar,
+        departamento,
+        lat: coords.lat,
+        lng: coords.lng,
+        fuenteNoticia: c.fuente,
+        urlFuente: c.link || undefined,
+        resumen: String(enr.resumen || c.resumenRaw || c.titulo).trim(),
+        fecha: c.fechaPub,
+        creadoEn: ahora,
+        expiraEn,
+        esEmergenciaGrave: Boolean(enr.esEmergenciaGrave),
+        atencionOficialPresente: true,
+        esNoticiaWebReal: true,
+        recomendacionGema: rec,
+        justificacionGema:
+          String(enr.justificacionGema || '').trim() ||
+          'Noticia reciente publicada en prensa regional. Evaluar cercanía a Finca El Guadual.',
+      }
+    })
+
+    return { eventos, consultado: true }
+  } catch {
+    return { eventos: [], consultado: false }
+  }
+}
+
 /**
  * 1. PRECIOS REALES DE COMBUSTIBLE EN COLOMBIA (Manizales / Caldas) — Pipeline en 2 pasos
  * Paso 1: Gemini + Google Search Grounding en texto natural (sin forzar JSON).
@@ -227,6 +391,21 @@ REGLA ESTRICTA: Si no encuentras ninguna novedad vial o emergencia publicada ent
     )
 
     if (!resPaso1 || !usoBusqueda) {
+      // Respaldo web real vía Google News Colombia RSS (when:2d) si Google Search Grounding devolvió 429/error
+      const rss = await buscarNoticiasGoogleNewsRSS(eventosExistentes)
+      if (rss.consultado) {
+        const horaTxt = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+        return {
+          eventos: rss.eventos,
+          busquedaWebActiva: true,
+          descartadasPorViejas: 0,
+          diagnostico:
+            rss.eventos.length > 0
+              ? `🌐 Prensa regional en vivo (${horaTxt} · Google News CO): ${rss.eventos.length} noticia(s) real(es) <48h.`
+              : `🌐 Prensa regional consultada (${horaTxt} · Google News CO): sin cierres ni emergencias viales publicadas en las últimas 48h.`,
+        }
+      }
+
       return {
         eventos: [],
         busquedaWebActiva: false,

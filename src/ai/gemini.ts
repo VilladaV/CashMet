@@ -2,8 +2,8 @@ import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 import { normalizarMoneda } from '@/lib/fx'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
-const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-2.5-flash-lite'
-const MODELOS_FALLBACK = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-3.1-flash-lite']
+const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.1-flash-lite'
+const MODELOS_FALLBACK = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
@@ -154,13 +154,10 @@ export async function llamarGeminiConBusqueda(
     }
   }
 
-  // Priorizamos modelos con mejor soporte de Google Search Grounding
-  const candidatosBusqueda = [
-    'gemini-2.5-flash',
-    MODELO,
-    'gemini-2.5-flash-lite',
-    'gemini-2.0-flash',
-  ].filter((m, i, a) => m && a.indexOf(m) === i)
+  // Mismos modelos activos que usa Lucía en CashMet + gemini-3.8-flash recomendado por la API
+  const candidatosBusqueda = [MODELO, 'gemini-3.8-flash', 'gemini-3.5-flash-lite'].filter(
+    (m, i, a) => m && a.indexOf(m) === i
+  )
 
   let cuotaAgotada = false
   const errores: string[] = []

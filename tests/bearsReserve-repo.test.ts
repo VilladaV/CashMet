@@ -173,4 +173,47 @@ describe("Bear's Reserve · persistencia Firestore, liquidación y auto-cierre",
     expect(encontrado?.nivelCombustiblePorc).toBe(42)
     expect(encontrado?.desgasteLlantasPorc).toBe(0)
   })
+
+  it('recupera vehículos habilitados e investigados desde localStorage si Firestore quedó con vehiculosExtra vacío', async () => {
+    __seed('vehiculos', 'v-rec', {
+      marca: 'Toyota',
+      linea: 'Hilux',
+      tipo: 'carro',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 12000, tareas: [] },
+    })
+    // Firestore ya existe pero con vehiculosExtra vacío
+    __seed('configuracion_sistema', 'bears_reserve_config', {
+      vehiculosExtra: {},
+      empleadosExtra: {},
+      rutasHabituales: [],
+      rotacionContador: 0,
+    })
+    // localStorage aún conserva la configuración previa del usuario
+    localStorage.setItem(
+      'bears_reserve_habilitados_map_v1',
+      JSON.stringify({ 'v-rec': true })
+    )
+    localStorage.setItem(
+      'bears_reserve_data_v2',
+      JSON.stringify({
+        vehiculosExtra: {
+          'v-rec': {
+            disponibleParaTrabajo: true,
+            investigadoIA: true,
+            capacidadTanqueGalones: 21.1,
+            tipoCombustible: 'diesel',
+          },
+        },
+      })
+    )
+
+    const vehs = await listarVehiculosBears()
+    const v = vehs.find((x) => x.id === 'v-rec')
+    expect(v?.disponibleParaTrabajo).toBe(true)
+    expect(v?.investigadoIA).toBe(true)
+    expect(v?.capacidadTanqueGalones).toBe(21.1)
+    expect(v?.tipoCombustible).toBe('diesel')
+  })
 })
