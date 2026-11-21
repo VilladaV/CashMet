@@ -27,6 +27,7 @@ import {
 } from './geo'
 import {
   conductorDeRutaEnCuadrante,
+  deduplicarEventosRadar,
   evaluarDesenlaceMisionLocal,
   filtrarEventosRadarVigentes,
   generarLlamadasComunitariasRespaldo,
@@ -997,7 +998,7 @@ export async function guardarRutaHabitual(ruta: RutaHabitual): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export function leerEventosRadar(): EventoRadarLocal[] {
-  return filtrarEventosRadarVigentes(obtenerCacheSincrono().eventosRadar)
+  return deduplicarEventosRadar(filtrarEventosRadarVigentes(obtenerCacheSincrono().eventosRadar))
 }
 
 export function leerDiagnosticoRadar(): string {
@@ -1031,12 +1032,32 @@ export async function agregarEventoRadarManual(evento: EventoRadarLocal): Promis
   await persistirOperaciones(estado)
 }
 
+// Cola para serializar escaneos del radar (evita duplicados si el auto-escaneo y el botón corren al mismo tiempo)
+let colaEscaneoRadar: Promise<unknown> = Promise.resolve()
+
 /**
- * Purga eventos expirados (> 1–2 días) y, si toca refresco periódico (cada 6h) o lo pide el usuario:
- * 1. Busca noticias viales reales recientes (<48h) con Gemini + Google Search Grounding en 2 pasos.
+ * Purga eventos expirados (> 1–2 días), deduplica y, si toca refresco periódico (cada 6h) o lo pide el usuario:
+ * 1. Busca noticias reales de TODO COLOMBIA (<48h) filtradas por Gemini IA según capacidad real de apoyo de Bear's Reserve.
  * 2. Regenera llamadas comunitarias veredales frescas evitando repetir veredas ni temáticas ya activas.
  */
-export async function sincronizarRadarAutomatico(forzar = false): Promise<{
+export function sincronizarRadarAutomatico(forzar = false): Promise<{
+  eventos: EventoRadarLocal[]
+  noticiasRealesAgregadas: number
+  llamadasAgregadas: number
+  diagnosticoWeb: string
+}> {
+  const ejecucion = colaEscaneoRadar.then(
+    () => ejecutarSincronizacionRadar(forzar),
+    () => ejecutarSincronizacionRadar(forzar)
+  )
+  colaEscaneoRadar = ejecucion.then(
+    () => undefined,
+    () => undefined
+  )
+  return ejecucion
+}
+
+async function ejecutarSincronizacionRadar(forzar = false): Promise<{
   eventos: EventoRadarLocal[]
   noticiasRealesAgregadas: number
   llamadasAgregadas: number
@@ -1045,8 +1066,8 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
   const estado = await hidratarEstadoBears()
   const ahora = Date.now()
 
-  const vigentesAntes = filtrarEventosRadarVigentes(estado.eventosRadar, ahora)
-  const expiradosEliminados = vigentesAntes.length !== estado.eventosRadar.length
+  const vigentesAntes = deduplicarEventosRadar(filtrarEventosRadarVigentes(estado.eventosRadar, ahora))
+  const cambioLimpieza = vigentesAntes.length !== estado.eventosRadar.length
   estado.eventosRadar = vigentesAntes
 
   const debeEscanear =
@@ -1055,7 +1076,7 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
     vigentesAntes.length === 0
 
   if (!debeEscanear) {
-    if (expiradosEliminados) await persistirOperaciones(estado)
+    if (cambioLimpieza) await persistirOperaciones(estado)
     return {
       eventos: estado.eventosRadar,
       noticiasRealesAgregadas: 0,
@@ -1064,16 +1085,21 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
     }
   }
 
-  const noticiasVigentes = estado.eventosRadar.filter((e) => e.esNoticiaWebReal && !e.despachado)
-  const llamadasVigentes = estado.eventosRadar.filter((e) => !e.esNoticiaWebReal && !e.despachado)
+  // Si el usuario fuerza un escaneo manual, limpiamos noticias web anteriores no despachadas para re-evaluarlas con el curador IA
+  const baseParaBusqueda = forzar
+    ? estado.eventosRadar.filter((e) => !e.esNoticiaWebReal || e.despachado)
+    : estado.eventosRadar
+
+  const noticiasVigentes = baseParaBusqueda.filter((e) => e.esNoticiaWebReal && !e.despachado)
+  const llamadasVigentes = baseParaBusqueda.filter((e) => !e.esNoticiaWebReal && !e.despachado)
 
   let noticiasReales: EventoRadarLocal[] = []
   let llamadasNuevas: EventoRadarLocal[] = []
   let diagnosticoWeb = estado.ultimoDiagnosticoRadar || ''
 
-  // 1. Buscar noticias web reales (<48h) en 2 pasos con Google Search Grounding
+  // 1. Buscar noticias web reales de TODO Colombia (<48h) curadas por Gemini IA
   if (forzar || noticiasVigentes.length < 2) {
-    const resWeb = await buscarNoticiasVialesRealesAI(estado.eventosRadar)
+    const resWeb = await buscarNoticiasVialesRealesAI(baseParaBusqueda)
     noticiasReales = resWeb.eventos
     diagnosticoWeb = resWeb.diagnostico
   }
@@ -1082,16 +1108,15 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
   const faltanLlamadas = Math.max(0, 3 - llamadasVigentes.length)
   if (faltanLlamadas > 0) {
     const cantNecesaria = forzar ? 1 : Math.min(2, faltanLlamadas)
-    const existentesConWeb = [...estado.eventosRadar, ...noticiasReales]
+    const existentesConWeb = [...baseParaBusqueda, ...noticiasReales]
     llamadasNuevas = await generarLlamadasComunitariasIA(existentesConWeb, cantNecesaria)
     if (llamadasNuevas.length === 0) {
       llamadasNuevas = generarLlamadasComunitariasRespaldo(existentesConWeb, cantNecesaria, ahora)
     }
   }
 
-  estado.eventosRadar = filtrarEventosRadarVigentes(
-    [...noticiasReales, ...llamadasNuevas, ...estado.eventosRadar],
-    ahora
+  estado.eventosRadar = deduplicarEventosRadar(
+    filtrarEventosRadarVigentes([...noticiasReales, ...llamadasNuevas, ...baseParaBusqueda], ahora)
   ).slice(0, 12)
   estado.ultimoEscaneoRadarEn = ahora
   estado.ultimoDiagnosticoRadar = diagnosticoWeb

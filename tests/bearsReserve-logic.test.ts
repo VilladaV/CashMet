@@ -19,6 +19,7 @@ import {
 } from '@/features/bearsReserve/preciosCombustible'
 import {
   conductorDeRutaEnCuadrante,
+  deduplicarEventosRadar,
   empleadosEnTurnoAhora,
   esEventoRedundante,
   esFechaNoticiaReciente,
@@ -341,6 +342,47 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
         existentes
       )
     ).toBe(false)
+  })
+
+  it('deduplica noticias web duplicadas (misma URL o mismo suceso) y ubica departamentos nacionales', () => {
+    const choco = resolverCoordenadasLugar('Quibdó', 'Chocó')
+    expect(choco.lat).toBeCloseTo(5.69, 1)
+    const cordoba = resolverCoordenadasLugar('Montería', 'Córdoba')
+    expect(cordoba.lat).toBeCloseTo(8.75, 1)
+
+    const dup: EventoRadarLocal[] = [
+      {
+        id: 'w1',
+        titulo: 'Inundaciones en Quibdó dejan 400 familias damnificadas tras creciente del Atrato',
+        lugar: 'Quibdó',
+        departamento: 'Chocó',
+        fuenteNoticia: 'El Tiempo',
+        urlFuente: 'https://ejemplo.co/noticia-1',
+        resumen: 'Creciente del río Atrato',
+        fecha: '2026-11-21',
+        esEmergenciaGrave: true,
+        atencionOficialPresente: true,
+        esNoticiaWebReal: true,
+        recomendacionGema: 'apoyo_logistico',
+        justificacionGema: 'Envío de ayudas',
+      },
+      {
+        id: 'w2',
+        titulo: 'Inundaciones en Quibdó dejan 400 familias damnificadas tras creciente del Atrato',
+        lugar: 'Quibdó',
+        departamento: 'Chocó',
+        fuenteNoticia: 'El Tiempo',
+        urlFuente: 'https://ejemplo.co/noticia-1',
+        resumen: 'Creciente del río Atrato',
+        fecha: '2026-11-21',
+        esEmergenciaGrave: true,
+        atencionOficialPresente: true,
+        esNoticiaWebReal: true,
+        recomendacionGema: 'apoyo_logistico',
+        justificacionGema: 'Envío de ayudas',
+      },
+    ]
+    expect(deduplicarEventosRadar(dup)).toHaveLength(1)
   })
 
   it('los chips de Gema rotan turnos y consultan alertas viales correctamente', () => {

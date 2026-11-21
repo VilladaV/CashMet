@@ -77,159 +77,299 @@ interface RssNewsItem {
   description?: string
 }
 
-/**
- * Fuente web real de respaldo (gratis, sin cuota de Google Search Grounding):
- * Consulta Google News Colombia RSS (`when:2d`) vía rss2json.com (CORS abierto)
- * para Manizales, Caldas y Eje Cafetero, validando estrictamente fecha <= 2 días.
- */
-async function buscarNoticiasGoogleNewsRSS(
-  eventosExistentes: EventoRadarLocal[]
-): Promise<{ eventos: EventoRadarLocal[]; consultado: boolean }> {
+interface CandidatoNoticiaRaw {
+  titulo: string
+  fuente: string
+  link: string
+  fechaPub: string
+  resumenRaw: string
+  alcance: 'regional' | 'nacional'
+}
+
+async function fetchGoogleNewsQuery(
+  queryStr: string,
+  alcance: 'regional' | 'nacional'
+): Promise<{ items: CandidatoNoticiaRaw[]; ok: boolean }> {
   const hoy = hoyISO()
-  const query = encodeURIComponent(
-    '(Manizales OR Caldas OR Chinchiná OR Villamaría OR "Alto de Letras") (vía OR derrumbe OR cierre OR lluvias OR emergencia OR accidente) when:2d'
-  )
-  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=es-419&gl=CO&ceid=CO:es-419`
+  const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(queryStr)}&hl=es-419&gl=CO&ceid=CO:es-419`
   const apiUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`
 
   try {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 7000)
+    const timer = setTimeout(() => controller.abort(), 7500)
     const r = await fetch(apiUrl, { signal: controller.signal })
     clearTimeout(timer)
-    if (!r.ok) return { eventos: [], consultado: false }
+    if (!r.ok) return { items: [], ok: false }
 
     const json = (await r.json()) as { status?: string; items?: RssNewsItem[] }
     if (json.status !== 'ok' || !Array.isArray(json.items)) {
-      return { eventos: [], consultado: false }
+      return { items: [], ok: false }
     }
 
-    const ahora = Date.now()
-    const acumulados = [...eventosExistentes]
-    const candidatosValidos: Array<{
-      titulo: string
-      fuente: string
-      link: string
-      fechaPub: string
-      resumenRaw: string
-    }> = []
-
+    const items: CandidatoNoticiaRaw[] = []
     for (const item of json.items) {
-      if (candidatosValidos.length >= 3) break
       const tituloRaw = String(item.title || '').trim()
       if (!tituloRaw) continue
 
-      // Google News suele formatear "Titular - Nombre del Medio"
       const partes = tituloRaw.split(' - ')
-      const fuente = partes.length > 1 ? partes.pop()!.trim() : String(item.author || 'Prensa Regional').trim()
+      const fuente =
+        partes.length > 1 ? partes.pop()!.trim() : String(item.author || 'Prensa Colombia').trim()
       const titulo = partes.join(' - ').trim() || tituloRaw
 
       let fechaPub = ''
       if (item.pubDate) {
-        const dt = new Date(item.pubDate.replace(' ', 'T') + (item.pubDate.includes('Z') ? '' : 'Z'))
+        const dt = new Date(
+          item.pubDate.replace(' ', 'T') + (item.pubDate.includes('Z') ? '' : 'Z')
+        )
         if (!Number.isNaN(dt.getTime())) {
           fechaPub = isoLocal(dt)
         }
       }
+      // Candado estricto: solo noticias publicadas en los últimos 2 días
       if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
 
       const resumenRaw = String(item.description || '')
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
         .trim()
+        .slice(0, 240)
 
-      if (esEventoRedundante({ titulo, lugar: 'Manizales · Caldas', resumen: resumenRaw, esNoticiaWebReal: true }, acumulados)) {
-        continue
-      }
-
-      candidatosValidos.push({
+      items.push({
         titulo,
         fuente,
         link: String(item.link || '').trim(),
         fechaPub,
-        resumenRaw: resumenRaw.slice(0, 220),
+        resumenRaw,
+        alcance,
       })
     }
 
-    if (candidatosValidos.length === 0) {
-      return { eventos: [], consultado: true }
+    return { items, ok: true }
+  } catch {
+    return { items: [], ok: false }
+  }
+}
+
+/**
+ * Fuente web real de todo Colombia (gratis, sin cuota de Google Search Grounding):
+ * 1. Consulta 2 feeds reales de Google News Colombia (`when:2d`):
+ *    - Regional: Caldas & Eje Cafetero (derrumbes, cierres viales, lluvias, damnificados).
+ *    - Nacional: Todo Colombia (Chocó, Costa Caribe, Antioquia, Pacífico, Llanos, Cauca, Tolima, etc.).
+ * 2. Pasa TODAS las candidatas por Gemini IA como CURADOR OPERATIVO ESTRICTO:
+ *    - Evalúa una por una si Bear's Reserve puede ayudar aunque sea en lo más mínimo
+ *      (transporte humanitario, víveres/agua a damnificados, rescate 4x4/camión, despeje vial, evacuación).
+ *    - RECHAZA política, presupuestos, accidentes urbanos de moto/carro, crímenes y duplicados.
+ *    - Sin importar el departamento (Chocó, Costa, Manizales, Cauca...), si Bear's Reserve puede ayudar, se muestra
+ *      y el usuario decide si despachar o no.
+ */
+async function buscarNoticiasGoogleNewsRSS(
+  eventosExistentes: EventoRadarLocal[]
+): Promise<{
+  eventos: EventoRadarLocal[]
+  consultado: boolean
+  candidatasEvaluadas: number
+  descartadasIrrelevantes: number
+}> {
+  const queryRegional =
+    '(Manizales OR Caldas OR Chinchiná OR Villamaría OR Risaralda OR Quindío OR "Alto de Letras") (derrumbe OR deslizamiento OR inundación OR "cierre vial" OR "paso restringido" OR damnificados OR creciente OR avalancha OR "emergencia invernal" OR "vía bloqueada") when:2d'
+
+  const queryNacional =
+    'Colombia (derrumbe OR deslizamiento OR inundaciones OR damnificados OR "emergencia invernal" OR "cierre total" OR "comunidades incomunicadas" OR avalancha OR "creciente súbita" OR "ayuda humanitaria") (Chocó OR Antioquia OR Cauca OR Nariño OR Caribe OR Córdoba OR Bolívar OR Santander OR Tolima OR Huila OR Meta OR Valle OR Guajira OR Invías OR carreteras) when:2d'
+
+  const [resReg, resNac] = await Promise.all([
+    fetchGoogleNewsQuery(queryRegional, 'regional'),
+    fetchGoogleNewsQuery(queryNacional, 'nacional'),
+  ])
+
+  if (!resReg.ok && !resNac.ok) {
+    return { eventos: [], consultado: false, candidatasEvaluadas: 0, descartadasIrrelevantes: 0 }
+  }
+
+  // Combinar y pre-deduplicar candidatas por título/url contra las existentes
+  const combinadas: CandidatoNoticiaRaw[] = []
+  const yaVistas: EventoRadarLocal[] = [...eventosExistentes]
+  for (const item of [...resReg.items.slice(0, 8), ...resNac.items.slice(0, 10)]) {
+    const temp: EventoRadarLocal = {
+      id: 'tmp',
+      titulo: item.titulo,
+      lugar: 'Colombia',
+      departamento: 'Colombia',
+      fuenteNoticia: item.fuente,
+      urlFuente: item.link,
+      resumen: item.resumenRaw,
+      fecha: item.fechaPub,
+      esEmergenciaGrave: false,
+      atencionOficialPresente: true,
+      esNoticiaWebReal: true,
+      recomendacionGema: 'apoyo_logistico',
+      justificacionGema: '',
     }
+    if (esEventoRedundante(temp, yaVistas)) continue
+    combinadas.push(item)
+    yaVistas.push(temp)
+  }
 
-    // Si Gemini normal (sin grounding) está disponible, le pedimos enriquecer lugar, criterio y recomendación
-    let enriquecidos: Array<{
-      lugar?: string
-      departamento?: string
-      resumen?: string
-      esEmergenciaGrave?: boolean
-      recomendacionGema?: EventoRadarLocal['recomendacionGema']
-      justificacionGema?: string
-    }> = []
+  if (combinadas.length === 0) {
+    return { eventos: [], consultado: true, candidatasEvaluadas: 0, descartadasIrrelevantes: 0 }
+  }
 
-    if (geminiDisponible) {
-      try {
-        const prompt = `Analiza estas noticias REALES recientes de Manizales/Caldas para Bear's Reserve (base Finca El Guadual, San Peregrino, Manizales):
-${candidatosValidos.map((c, i) => `[${i}] (${c.fechaPub} · ${c.fuente}) ${c.titulo} — ${c.resumenRaw}`).join('\n')}
+  // Sin Gemini disponible, no mostramos noticias sin curar para no meter basura irrelevante
+  if (!geminiDisponible) {
+    return {
+      eventos: [],
+      consultado: true,
+      candidatasEvaluadas: combinadas.length,
+      descartadasIrrelevantes: combinadas.length,
+    }
+  }
 
-Devuelve ÚNICAMENTE un JSON válido con un array "items" del mismo tamaño y orden:
-{"items":[{"lugar":"Sector/Municipio","departamento":"Caldas","resumen":"Resumen claro en 1-2 frases","esEmergenciaGrave":false,"recomendacionGema":"apoyo_logistico","justificacionGema":"Criterio breve de Bear's Reserve"}]}`
+  try {
+    const promptCurador = `Eres Gema, curadora operativa de Bear's Reserve 🐻 (organización comunitaria sin ánimo de lucro con base en Manizales, Caldas, equipada con camiones pesados, 4x4, winches, motosierras, capacidad de transporte de víveres, agua, ayudas humanitarias, evacuación de familias/enseres, despeje de vías rurales y rescate vehicular).
 
-        const { res } = await llamarGemini({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
-        })
-        if (res) {
-          const data = (await res.json()) as GeminiCandidateResponse
-          const { texto } = extraerTextoYFuentes(data)
-          const parsed = JSON.parse(limpiarJson(texto)) as { items?: typeof enriquecidos }
-          if (Array.isArray(parsed.items)) enriquecidos = parsed.items
-        }
-      } catch {
-        /* continuamos con los datos directos del RSS */
+TAREA: Revisa CADA UNA de estas ${combinadas.length} noticias REALES recientes de Colombia (<48h) y decide cuáles son RELEVANTES para Bear's Reserve.
+
+REGLAS DE FILTRADO ESTRICTO:
+1. ACEPTA (puedeAyudar: true) ÚNICAMENTE si existe una situación REAL donde Bear's Reserve podría aportar aunque sea en lo más mínimo:
+   - Inundaciones, derrumbes, avalanchas, crecientes o emergencias invernales con familias damnificadas o incomunicadas (EN CUALQUIER PARTE DE COLOMBIA: Chocó, Costa Caribe, Córdoba, Guajira, Antioquia, Cauca, Nariño, Tolima, Caldas, etc. — el usuario decide si envía ayuda o no).
+   - Cierres viales prolongados, pérdida de banca, carreteras bloqueadas con viajeros/transportadores varados o pueblos sin suministros.
+   - Comunidades rurales necesitando transporte humanitario, víveres, agua potable, evacuación de enseres o remoción de árboles/escombros.
+2. RECHAZA (puedeAyudar: false) TAJANTEMENTE:
+   - Accidentes de tránsito urbanos puntuales (moto vs carro/buseta, identificación de víctimas, choques ya atendidos por tránsito).
+   - Noticias políticas, asignación de fondos/presupuestos, leyes, economía, aniversarios históricos (ej. "Fondo destina X millones a reconstrucción...").
+   - Orden público armado, capturas, crímenes, deportes, farándula o notas que solo informan un hecho pasado donde ya no hay forma de ayudar.
+3. Si dos noticias hablan del MISMO suceso, acepta solo UNA (la más completa) y rechaza la repetida.
+4. Selecciona máximo 4 noticias verdaderamente accionables (si ninguna sirve, devuelve "aprobadas": []).
+
+NOTICIAS CANDIDATAS:
+${combinadas.map((c, i) => `[${i}] (${c.fechaPub} · ${c.fuente}) ${c.titulo} — ${c.resumenRaw}`).join('\n')}
+
+Responde ÚNICAMENTE con un JSON válido:
+{
+  "aprobadas": [
+    {
+      "indice": 0,
+      "lugar": "Municipio / Sector específico real de la noticia",
+      "departamento": "Departamento real (ej: Chocó, Caldas, Antioquia, Córdoba, Cauca, Tolima...)",
+      "resumen": "Resumen real y claro de la emergencia en 1-2 frases",
+      "esEmergenciaGrave": true,
+      "recomendacionGema": "apoyo_logistico",
+      "justificacionGema": "Cómo exactamente podría apoyar Bear's Reserve (ej: envío de camión con agua/víveres, despeje con 4x4/winche, evacuación, etc.)"
+    }
+  ]
+}`
+
+    const { res } = await llamarGemini({
+      contents: [{ role: 'user', parts: [{ text: promptCurador }] }],
+      generationConfig: { temperature: 0.15, responseMimeType: 'application/json' },
+    })
+    if (!res) {
+      return {
+        eventos: [],
+        consultado: true,
+        candidatasEvaluadas: combinadas.length,
+        descartadasIrrelevantes: combinadas.length,
       }
     }
 
-    const eventos: EventoRadarLocal[] = candidatosValidos.map((c, idx) => {
-      const enr = enriquecidos[idx] || {}
-      const lugar = String(enr.lugar || 'Manizales · Caldas').trim()
-      const departamento = String(enr.departamento || 'Caldas').trim()
+    const data = (await res.json()) as GeminiCandidateResponse
+    const { texto } = extraerTextoYFuentes(data)
+    const parsed = JSON.parse(limpiarJson(texto)) as {
+      aprobadas?: Array<{
+        indice?: number
+        lugar?: string
+        departamento?: string
+        resumen?: string
+        esEmergenciaGrave?: boolean
+        recomendacionGema?: EventoRadarLocal['recomendacionGema']
+        justificacionGema?: string
+      }>
+    }
+
+    const aprobadas = Array.isArray(parsed.aprobadas) ? parsed.aprobadas : []
+    const ahora = Date.now()
+    const eventos: EventoRadarLocal[] = []
+    const usados = new Set<number>()
+    const acumulados = [...eventosExistentes]
+
+    for (const ap of aprobadas) {
+      if (eventos.length >= 4) break
+      const idx = Number(ap.indice)
+      if (!Number.isInteger(idx) || idx < 0 || idx >= combinadas.length || usados.has(idx)) continue
+      usados.add(idx)
+
+      const orig = combinadas[idx]
+      const lugar = String(ap.lugar || 'Colombia').trim()
+      const departamento = String(ap.departamento || 'Colombia').trim()
+      const resumen = String(ap.resumen || orig.resumenRaw || orig.titulo).trim()
+      const justificacion = String(ap.justificacionGema || '').trim()
+
+      // Doble filtro de seguridad por si la IA igualmente coló algo "sin impacto operativo"
+      if (/sin impacto operativo|ya ocurrido|sin relaci[oó]n/i.test(justificacion)) continue
+
+      const candidatoEv = {
+        titulo: orig.titulo,
+        lugar,
+        resumen,
+        urlFuente: orig.link,
+        esNoticiaWebReal: true,
+      }
+      if (esEventoRedundante(candidatoEv, acumulados)) continue
+
       const coords = resolverCoordenadasLugar(lugar, departamento)
-      const [yP, mP, dP] = c.fechaPub.split('-').map(Number)
+      const [yP, mP, dP] = orig.fechaPub.split('-').map(Number)
       const expiraDesdePub = new Date(yP, mP - 1, dP, 23, 59, 0).getTime() + 24 * 60 * 60 * 1000
-      const expiraEn = Math.max(ahora + 12 * 60 * 60 * 1000, Math.min(ahora + TTL_NOTICIA_WEB_MS, expiraDesdePub))
+      const expiraEn = Math.max(
+        ahora + 12 * 60 * 60 * 1000,
+        Math.min(ahora + TTL_NOTICIA_WEB_MS, expiraDesdePub)
+      )
 
       const rec =
-        enr.recomendacionGema === 'intervenir_urgente' ||
-        enr.recomendacionGema === 'apoyo_logistico' ||
-        enr.recomendacionGema === 'monitorear_sin_intervenir'
-          ? enr.recomendacionGema
+        ap.recomendacionGema === 'intervenir_urgente' ||
+        ap.recomendacionGema === 'apoyo_logistico' ||
+        ap.recomendacionGema === 'monitorear_sin_intervenir'
+          ? ap.recomendacionGema
           : 'apoyo_logistico'
 
-      return {
+      const evFinal: EventoRadarLocal = {
         id: `rad-rss-${ahora}-${idx}`,
-        titulo: c.titulo,
+        titulo: orig.titulo,
         lugar,
         departamento,
         lat: coords.lat,
         lng: coords.lng,
-        fuenteNoticia: c.fuente,
-        urlFuente: c.link || undefined,
-        resumen: String(enr.resumen || c.resumenRaw || c.titulo).trim(),
-        fecha: c.fechaPub,
+        fuenteNoticia: orig.fuente,
+        urlFuente: orig.link || undefined,
+        resumen,
+        fecha: orig.fechaPub,
         creadoEn: ahora,
         expiraEn,
-        esEmergenciaGrave: Boolean(enr.esEmergenciaGrave),
+        esEmergenciaGrave: Boolean(ap.esEmergenciaGrave),
         atencionOficialPresente: true,
         esNoticiaWebReal: true,
         recomendacionGema: rec,
         justificacionGema:
-          String(enr.justificacionGema || '').trim() ||
-          'Noticia reciente publicada en prensa regional. Evaluar cercanía a Finca El Guadual.',
+          justificacion ||
+          'Emergencia real donde Bear\'s Reserve puede aportar apoyo logístico, transporte humanitario o rescate.',
       }
-    })
 
-    return { eventos, consultado: true }
-  } catch {
-    return { eventos: [], consultado: false }
+      eventos.push(evFinal)
+      acumulados.push(evFinal)
+    }
+
+    return {
+      eventos,
+      consultado: true,
+      candidatasEvaluadas: combinadas.length,
+      descartadasIrrelevantes: Math.max(0, combinadas.length - eventos.length),
+    }
+  } catch (err) {
+    console.warn('Error curando noticias de Google News con Gemini:', err)
+    return {
+      eventos: [],
+      consultado: true,
+      candidatasEvaluadas: combinadas.length,
+      descartadasIrrelevantes: combinadas.length,
+    }
   }
 }
 
@@ -367,31 +507,25 @@ export async function buscarNoticiasVialesRealesAI(
   const titulosExistentes = eventosExistentes.map((e) => e.titulo)
 
   try {
-    // PASO 1: Búsqueda real en Google Search (texto natural, SIN responseMimeType JSON)
-    const promptBusqueda = `Hoy es ${hoy}. Necesito un boletín de noticias REALES publicadas únicamente entre ${desdeISO} y ${hoy} (últimas 48 horas) sobre:
-- Derrumbes, cierres viales, paso restringido, pérdida de banca, accidentes de tránsito relevantes, fuertes lluvias, inundaciones o emergencias comunitarias.
-- Zonas prioritarias: Manizales, Caldas (Villamaría, Chinchiná, Neira, Palestina, Salamina, Aranzazu, Vía Manizales - Alto de Letras - Fresno, Autopista del Café, Pacífico 3, vía antigua a Chinchiná) y Eje Cafetero cercano (Santa Rosa de Cabal, Pereira, Risaralda).
-- Consulta medios reales como La Patria (Manizales), Invías, Gestión del Riesgo de Caldas, Caracol Radio Manizales, RCN, El Tiempo o prensa regional.
+    // PASO 1: Búsqueda real en Google Search para TODA Colombia (priorizando Caldas + emergencias nacionales donde Bear's Reserve pueda ayudar)
+    const promptBusqueda = `Hoy es ${hoy}. Necesito noticias REALES publicadas únicamente entre ${desdeISO} y ${hoy} (últimas 48 horas) en CUALQUIER REGIÓN DE COLOMBIA (Caldas/Manizales, Chocó, Costa Caribe, Antioquia, Cauca, Nariño, Valle, Tolima, Santander, Llanos, etc.) donde una flota comunitaria con camiones, 4x4, winches y ayuda humanitaria (Bear's Reserve) PUEDA AYUDAR aunque sea en lo más mínimo:
+- Inundaciones, derrumbes, avalanchas, crecientes o emergencias invernales con damnificados o pueblos incomunicados.
+- Cierres viales prolongados, pérdida de banca o vías bloqueadas con viajeros/transportadores varados.
+- Comunidades que necesiten víveres, agua, evacuación de enseres o remoción de árboles/escombros.
 
-Para cada noticia REAL encontrada dentro de estas últimas 48 horas, escribe:
-1. Título exacto de la noticia
-2. Fecha exacta de publicación (formato YYYY-MM-DD)
-3. Municipio/sector y departamento
-4. Medio o fuente oficial
-5. Resumen real en 1-2 frases
-
-REGLA ESTRICTA: Si no encuentras ninguna novedad vial o emergencia publicada entre ${desdeISO} y ${hoy}, responde explícitamente "SIN_NOVEDADES_RECIENTES" y NO incluyas noticias de semanas o meses anteriores.`
+RECHAZA Y NO INCLUYAS: accidentes urbanos de moto/carro, identificación de víctimas, política, presupuestos, asignación de fondos, orden público armado ni noticias de hace más de 2 días.
+Si no hay ninguna emergencia accionable entre ${desdeISO} y ${hoy}, responde "SIN_NOVEDADES_RECIENTES".`
 
     const { res: resPaso1, usoBusqueda, errorBusqueda } = await llamarGeminiConBusqueda(
       {
         contents: [{ role: 'user', parts: [{ text: promptBusqueda }] }],
         generationConfig: { temperature: 0.1 },
       },
-      false // Jamás usar memoria sin Google Search para noticias web reales
+      false
     )
 
     if (!resPaso1 || !usoBusqueda) {
-      // Respaldo web real vía Google News Colombia RSS (when:2d) si Google Search Grounding devolvió 429/error
+      // Respaldo web real (todo Colombia) vía Google News Colombia RSS (`when:2d`) + Curador Gemini IA
       const rss = await buscarNoticiasGoogleNewsRSS(eventosExistentes)
       if (rss.consultado) {
         const horaTxt = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
@@ -401,8 +535,8 @@ REGLA ESTRICTA: Si no encuentras ninguna novedad vial o emergencia publicada ent
           descartadasPorViejas: 0,
           diagnostico:
             rss.eventos.length > 0
-              ? `🌐 Prensa regional en vivo (${horaTxt} · Google News CO): ${rss.eventos.length} noticia(s) real(es) <48h.`
-              : `🌐 Prensa regional consultada (${horaTxt} · Google News CO): sin cierres ni emergencias viales publicadas en las últimas 48h.`,
+              ? `🌐 Prensa nacional en vivo (${horaTxt}): ${rss.eventos.length} emergencia(s) relevante(s) aprobada(s) por Gema IA de ${rss.candidatasEvaluadas} revisadas (<48h).`
+              : `🌐 Prensa nacional revisada (${horaTxt}): se evaluaron ${rss.candidatasEvaluadas} noticia(s) <48h en Colombia; ninguna requiere apoyo operativo de Bear's Reserve ahora.`,
         }
       }
 

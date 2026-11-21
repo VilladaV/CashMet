@@ -746,7 +746,7 @@ export default function MisionesTab({
                     Radar de Eventos, Noticias Reales y Llamadas Veredales
                   </h2>
                   <p className="text-[11px] text-mist-400">
-                    Zonas: Manizales, Caldas (vías veredales, Letras, Autopista del Café, Pacífico 3) y Eje Cafetero · Caducidad máx. 48h.
+                    Cobertura: Manizales, Caldas y todo Colombia · Curado por Gema IA según capacidad real de apoyo · Caducidad máx. 48h.
                   </p>
                   {diagnosticoRadar && (
                     <p className="mt-0.5 text-[10px] font-semibold text-sky-300/90">
@@ -782,7 +782,7 @@ export default function MisionesTab({
                     filtroRadar === 'otros' ? 'bg-amber-400/20 text-amber-200' : 'bg-white/[0.04] text-mist-400'
                   }`}
                 >
-                  Vecinos
+                  Resto del País
                 </button>
 
                 <button

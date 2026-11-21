@@ -1005,27 +1005,68 @@ export function extraerClaveVereda(lugar: string): string {
   return norm.split(' ').slice(0, 2).join(' ')
 }
 
+function tokensSignificativos(texto: string): Set<string> {
+  const stop = new Set([
+    'para', 'como', 'tras', 'sobre', 'entre', 'desde', 'hasta', 'contra', 'hacia',
+    'este', 'esta', 'estos', 'estas', 'unos', 'unas', 'pero', 'porque', 'cuando',
+    'donde', 'quien', 'todo', 'toda', 'todos', 'todas', 'paso', 'zona', 'sector',
+    'municipio', 'vereda', 'colombia', 'caldas', 'manizales', 'autoridades',
+  ])
+  return new Set(
+    normalizarTextoSimple(texto)
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !stop.has(w))
+  )
+}
+
+function similitudTitulos(a: string, b: string): number {
+  const ta = tokensSignificativos(a)
+  const tb = tokensSignificativos(b)
+  if (ta.size === 0 || tb.size === 0) return 0
+  let inter = 0
+  for (const w of ta) {
+    if (tb.has(w)) inter++
+  }
+  return inter / Math.min(ta.size, tb.size)
+}
+
 /**
  * Detecta si un nuevo evento del radar es semánticamente redundante con alguno ya activo:
- * - Mismo título exacto, O
+ * - Mismo título exacto o misma URL de fuente.
+ * - En noticias web: mismo hecho cubierto por dos medios (alta similitud de palabras clave >= 55%).
  * - En llamadas comunitarias (no web): misma vereda/sector principal O misma temática ya activa.
  */
 export function esEventoRedundante(
-  candidato: Pick<EventoRadarLocal, 'titulo' | 'lugar' | 'resumen' | 'esNoticiaWebReal'>,
+  candidato: Pick<EventoRadarLocal, 'titulo' | 'lugar' | 'resumen' | 'esNoticiaWebReal' | 'urlFuente'>,
   existentes: EventoRadarLocal[]
 ): boolean {
   const tituloNorm = normalizarTextoSimple(candidato.titulo)
+  const urlCand = String(candidato.urlFuente || '').trim()
   const veredaCand = extraerClaveVereda(candidato.lugar)
   const temaCand = detectarTemaEvento(candidato)
 
   for (const ex of existentes) {
     if (normalizarTextoSimple(ex.titulo) === tituloNorm) return true
+    if (urlCand && ex.urlFuente && urlCand === ex.urlFuente.trim()) return true
     if (ex.despachado) continue
+
+    // Noticias web sobre el mismo acontecimiento
+    if (candidato.esNoticiaWebReal && ex.esNoticiaWebReal) {
+      if (similitudTitulos(candidato.titulo, ex.titulo) >= 0.55) {
+        return true
+      }
+      continue
+    }
 
     // Para llamadas comunitarias evitamos repetir vereda o temática al mismo tiempo
     if (!candidato.esNoticiaWebReal && !ex.esNoticiaWebReal) {
       const veredaEx = extraerClaveVereda(ex.lugar)
-      if (veredaCand && veredaEx && (veredaCand === veredaEx || veredaCand.includes(veredaEx) || veredaEx.includes(veredaCand))) {
+      if (
+        veredaCand &&
+        veredaEx &&
+        (veredaCand === veredaEx || veredaCand.includes(veredaEx) || veredaEx.includes(veredaCand))
+      ) {
         return true
       }
       const temaEx = detectarTemaEvento(ex)
@@ -1035,6 +1076,19 @@ export function esEventoRedundante(
     }
   }
   return false
+}
+
+/**
+ * Elimina duplicados dentro de una lista de eventos manteniendo el más reciente.
+ */
+export function deduplicarEventosRadar(eventos: EventoRadarLocal[]): EventoRadarLocal[] {
+  const unicos: EventoRadarLocal[] = []
+  for (const ev of eventos) {
+    if (!ev || !ev.id) continue
+    if (esEventoRedundante(ev, unicos)) continue
+    unicos.push(ev)
+  }
+  return unicos
 }
 
 /**
