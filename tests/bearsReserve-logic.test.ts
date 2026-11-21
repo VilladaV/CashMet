@@ -1,19 +1,54 @@
 import { describe, expect, it } from 'vitest'
 import {
   CONSUMO_RALENTI_GALONES_POR_HORA,
+  PARADAS_RUTA_MERCADO_CAMPESINO,
   calcularCombustibleRalenti,
   calcularDistanciaHaversineKm,
   calcularDistanciaRealDesdeBase,
+  calcularDistanciaRutaParadas,
+  escapeHtml,
   factorSinuosidadMontaña,
+  resolverCoordenadasLugar,
 } from '@/features/bearsReserve/geo'
 import {
   FACTOR_TERRENO_CONSUMO,
   calcularConsumoMision,
+  esPrecioDesactualizado,
   obtenerPrecioGalon,
   obtenerPreciosCombustibleActuales,
 } from '@/features/bearsReserve/preciosCombustible'
+import {
+  conductorDeRutaEnCuadrante,
+  empleadosEnTurnoAhora,
+  filtrarEventosRadarVigentes,
+  generarTurnosSemanalesIA,
+  investigarFichaVehiculoIA,
+  responderGema,
+  seleccionarTripulacionMision,
+} from '@/features/bearsReserve/gemaEngine'
+import { RUTAS_HABITUALES_INICIALES } from '@/features/bearsReserve/repo'
+import type { EmpleadoOperativo, EventoRadarLocal } from '@/features/bearsReserve/types'
 
-describe('Bear\'s Reserve · geografía', () => {
+function emp(id: string, nombre: string, cargo: string, extra?: Partial<EmpleadoOperativo>): EmpleadoOperativo {
+  return {
+    id,
+    nombreCompleto: nombre,
+    cargo,
+    habilidades: cargo.toLowerCase().includes('conduc')
+      ? ['Conducción en alta montaña']
+      : cargo.toLowerCase().includes('mec')
+        ? ['Mecánica de emergencia']
+        : ['Logística comunitaria'],
+    horasSemanalesAsignadas: 0,
+    maxHorasSemanales: 42,
+    activo: true,
+    horariosNoDisponibles: [],
+    enTurnoActivo: false,
+    ...extra,
+  }
+}
+
+describe("Bear's Reserve · geografía", () => {
   it('calcula una distancia Haversine conocida (Manizales - Bogotá ~ 150-180 km)', () => {
     const km = calcularDistanciaHaversineKm(5.07, -75.52, 4.71, -74.07)
     expect(km).toBeGreaterThan(140)
@@ -33,22 +68,39 @@ describe('Bear\'s Reserve · geografía', () => {
 
   it('el ralentí no genera galones negativos', () => {
     expect(calcularCombustibleRalenti('carro', -30)).toBe(0)
-    expect(calcularCombustibleRalenti('camion', 60)).toBe(
-      CONSUMO_RALENTI_GALONES_POR_HORA.camion
-    )
+    expect(calcularCombustibleRalenti('camion', 60)).toBe(CONSUMO_RALENTI_GALONES_POR_HORA.camion)
+  })
+
+  it('resuelve coordenadas reales de municipios y calcula distancia de paradas de mercado', () => {
+    const neira = resolverCoordenadasLugar('Municipio de Neira', 'Caldas')
+    expect(neira.lat).toBeCloseTo(5.1667, 2)
+    const calc = calcularDistanciaRutaParadas(PARADAS_RUTA_MERCADO_CAMPESINO, true)
+    expect(calc.distanciaKm).toBeGreaterThan(15)
+    expect(calc.minutosRodamiento).toBeGreaterThan(15)
+  })
+
+  it('escapa HTML malicioso para popups de Leaflet', () => {
+    expect(escapeHtml('<img src=x onerror="alert(1)">')).toBe('&lt;img src=x onerror=&quot;alert(1)&quot;&gt;')
   })
 })
 
-describe('Bear\'s Reserve · combustible', () => {
-  it('convierte distancia y terreno en galones y desgaste', () => {
-    const r = calcularConsumoMision('carro', 100, 'trocha_extrema_barrizal', 25)
+describe("Bear's Reserve · combustible", () => {
+  it('convierte distancia y terreno en galones y desgaste y respeta tipoCombustible real', () => {
+    const r = calcularConsumoMision('carro', 100, 'trocha_extrema_barrizal', 25, 'diesel')
     const esperado = 100 / (25 / FACTOR_TERRENO_CONSUMO.trocha_extrema_barrizal)
     expect(r.galones).toBeCloseTo(esperado, 1)
     expect(r.desgasteLlantasPorc).toBeCloseTo(4.5, 2)
-    expect(r.costoEstimadoCOP).toBeGreaterThan(0)
+    expect(r.costoEstimadoCOP).toBe(Math.round(r.galones * obtenerPrecioGalon('diesel')))
   })
 
-  it('usa diésel para camión y corriente para carro', () => {
+  it('no acepta distancias negativas', () => {
+    const r = calcularConsumoMision('carro', -50, 'pavimento', 30)
+    expect(r.galones).toBe(0)
+    expect(r.costoEstimadoCOP).toBe(0)
+    expect(r.desgasteLlantasPorc).toBe(0)
+  })
+
+  it('usa diésel, corriente y extra según el tipo', () => {
     const precios = obtenerPreciosCombustibleActuales()
     expect(obtenerPrecioGalon('diesel')).toBe(precios.dieselPorGalon)
     expect(obtenerPrecioGalon('corriente')).toBe(precios.corrientePorGalon)
@@ -60,10 +112,197 @@ describe('Bear\'s Reserve · combustible', () => {
     expect(r.galones).toBeLessThanOrEqual(100 / 3)
   })
 
-  it('devuelve precios positivos y una fuente declarada', () => {
-    const p = obtenerPreciosCombustibleActuales()
-    expect(p.corrientePorGalon).toBeGreaterThan(0)
-    expect(p.dieselPorGalon).toBeGreaterThan(0)
-    expect(p.fuente.length).toBeGreaterThan(0)
+  it('detecta cuándo un precio está vencido (>24h)', () => {
+    const ahora = Date.now()
+    expect(
+      esPrecioDesactualizado(
+        { ...obtenerPreciosCombustibleActuales(), consultadoEn: ahora - 25 * 3600_000, editadoManualmente: false },
+        ahora
+      )
+    ).toBe(true)
+    expect(
+      esPrecioDesactualizado(
+        { ...obtenerPreciosCombustibleActuales(), consultadoEn: ahora - 2 * 3600_000, editadoManualmente: false },
+        ahora
+      )
+    ).toBe(false)
+  })
+})
+
+describe("Bear's Reserve · motor de turnos, rutas escolares y tripulación", () => {
+  it('vincula los IDs reales de rutas escolares y encuentra el conductor del cuadrante (sin caer en hueco)', () => {
+    const emps = [
+      emp('e1', 'Carlos', 'Conductor'),
+      emp('e2', 'Marta', 'Conductora'),
+      emp('e3', 'Luis', 'Mecánico'),
+      emp('e4', 'Sofía', 'Editor Audiovisual'),
+    ]
+    const turnos = generarTurnosSemanalesIA(emps, '2026-11-16', RUTAS_HABITUALES_INICIALES, 0)
+
+    const condManana = conductorDeRutaEnCuadrante(turnos, 'rut-escolar-manana', '2026-11-16', 'manana')
+    const condTarde = conductorDeRutaEnCuadrante(turnos, 'rut-escolar-tarde', '2026-11-16', 'tarde')
+    const condMercado = conductorDeRutaEnCuadrante(turnos, 'rut-mercado-campesino', '2026-11-21', 'mercado_sabado')
+
+    expect(condManana).not.toBeNull()
+    expect(condTarde).not.toBeNull()
+    expect(condMercado).not.toBeNull()
+    expect(condManana?.id).not.toBe('coord-user')
+
+    // Todos los empleados activos (incluida Sofía con cargo Editor) reciben horas <= 42h
+    for (const e of emps) {
+      const h = turnos.filter((t) => t.empleadoId === e.id).reduce((s, t) => s + t.horas, 0)
+      expect(h).toBeGreaterThan(0)
+      expect(h).toBeLessThanOrEqual(42)
+    }
+
+    // Todos los IDs de turno son únicos
+    const ids = new Set(turnos.map((t) => t.id))
+    expect(ids.size).toBe(turnos.length)
+  })
+
+  it('rota realmente los turnos incluso con 3 empleados (múltiplo de 3)', () => {
+    const emps = [emp('e1', 'Ana', 'Conductora'), emp('e2', 'Beto', 'Conductor'), emp('e3', 'Ciro', 'Mecánico')]
+    const t0 = generarTurnosSemanalesIA(emps, '2026-11-16', RUTAS_HABITUALES_INICIALES, 0)
+    const t1 = generarTurnosSemanalesIA(emps, '2026-11-16', RUTAS_HABITUALES_INICIALES, 1)
+    expect(t0[0].empleadoId).not.toBe(t1[0].empleadoId)
+  })
+
+  it('empleadosEnTurnoAhora detecta correctamente a quien entró anoche durante la madrugada', () => {
+    const emps = [emp('e1', 'LunesNoche', 'Conductor'), emp('e2', 'MartesNoche', 'Conductor')]
+    const turnos = [
+      {
+        id: 't-lun',
+        semanaISO: '2026-11-16',
+        empleadoId: 'e1',
+        empleadoNombre: 'LunesNoche',
+        fecha: '2026-11-16',
+        franja: 'noche' as const,
+        horaInicio: '22:00',
+        horaFin: '06:00',
+        horas: 8,
+        rolGuardia: 'Nocturno',
+      },
+      {
+        id: 't-mar',
+        semanaISO: '2026-11-16',
+        empleadoId: 'e2',
+        empleadoNombre: 'MartesNoche',
+        fecha: '2026-11-17',
+        franja: 'noche' as const,
+        horaInicio: '22:00',
+        horaFin: '06:00',
+        horas: 8,
+        rolGuardia: 'Nocturno',
+      },
+    ]
+
+    const enMadrugadaMartes = empleadosEnTurnoAhora(turnos, emps, '2026-11-17', '02:30')
+    expect(enMadrugadaMartes.map((e) => e.id)).toEqual(['e1'])
+  })
+
+  it('respeta restricciones de domingo (diaSemana = 0) en seleccionarTripulacionMision', () => {
+    const bloqueadoDom = emp('e1', 'OcupadoDomingo', 'Conductor', {
+      horariosNoDisponibles: [{ diaSemana: 0, horaInicio: '08:00', horaFin: '14:00', motivo: 'Familia' }],
+    })
+    const libreDom = emp('e2', 'LibreDomingo', 'Conductor')
+    // 2026-11-22 es domingo
+    const res = seleccionarTripulacionMision(
+      { titulo: 'Auxilio rural', tipo: 'auxilio_comunitario' },
+      [],
+      [bloqueadoDom, libreDom],
+      [],
+      '2026-11-22',
+      '10:00'
+    )
+    expect(res.tripulacion.map((t) => t.id)).toEqual(['e2'])
+  })
+})
+
+describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local", () => {
+  it('no confunde BMW M2, BMW 130i ni Ford F-250 con camiones pesados', () => {
+    const bmwM2 = investigarFichaVehiculoIA('BMW', 'M2', 'carro')
+    expect(bmwM2.capacidadTanqueGalones).toBeLessThan(20)
+    expect(bmwM2.fichaInvestigadaNota).not.toMatch(/Freightliner/i)
+
+    const bmw130 = investigarFichaVehiculoIA('BMW', '130i', 'carro')
+    expect(bmw130.fichaInvestigadaNota).not.toMatch(/ZIL/i)
+
+    const fordF250 = investigarFichaVehiculoIA('Ford', 'F-250', 'carro')
+    expect(fordF250.fichaInvestigadaNota).not.toMatch(/KrAZ/i)
+    expect(fordF250.capacidadTanqueGalones).toBeLessThan(45)
+  })
+
+  it('filtra automáticamente eventos de radar caducados (>1–2 días)', () => {
+    const ahora = Date.now()
+    const eventos: EventoRadarLocal[] = [
+      {
+        id: 'viejo',
+        titulo: 'Noticia de hace un mes',
+        lugar: 'Caldas',
+        departamento: 'Caldas',
+        fuenteNoticia: 'Prensa',
+        resumen: 'Vieja',
+        fecha: '2026-10-01',
+        creadoEn: ahora - 30 * 24 * 3600_000,
+        expiraEn: ahora - 28 * 24 * 3600_000,
+        esEmergenciaGrave: false,
+        atencionOficialPresente: false,
+        esNoticiaWebReal: true,
+        recomendacionGema: 'monitorear_sin_intervenir',
+        justificacionGema: 'Vieja',
+      },
+      {
+        id: 'vigente',
+        titulo: 'Alerta reciente',
+        lugar: 'Manizales',
+        departamento: 'Caldas',
+        fuenteNoticia: 'Prensa',
+        resumen: 'Reciente',
+        fecha: '2026-11-21',
+        creadoEn: ahora - 2 * 3600_000,
+        expiraEn: ahora + 30 * 3600_000,
+        esEmergenciaGrave: false,
+        atencionOficialPresente: false,
+        esNoticiaWebReal: true,
+        recomendacionGema: 'apoyo_logistico',
+        justificacionGema: 'Hoy',
+      },
+    ]
+
+    const vigentes = filtrarEventosRadarVigentes(eventos, ahora)
+    expect(vigentes.map((e) => e.id)).toEqual(['vigente'])
+  })
+
+  it('los chips de Gema rotan turnos y consultan alertas viales correctamente', () => {
+    const ctx = {
+      empleados: [emp('e1', 'Andrés', 'Conductor')],
+      vehiculos: [],
+      turnos: [],
+      misiones: [],
+      eventosRadar: [
+        {
+          id: 'ev1',
+          titulo: 'Paso restringido vía Letras',
+          lugar: 'Mesones',
+          departamento: 'Caldas',
+          fuenteNoticia: 'Invías',
+          resumen: 'Paso a un carril',
+          fecha: '2026-11-21',
+          creadoEn: Date.now(),
+          expiraEn: Date.now() + 24 * 3600_000,
+          esEmergenciaGrave: true,
+          atencionOficialPresente: true,
+          esNoticiaWebReal: true,
+          recomendacionGema: 'apoyo_logistico' as const,
+          justificacionGema: 'Apoyo',
+        },
+      ],
+    }
+
+    const rRotar = responderGema('Rotar turnos semanales (máx 42h) 💎', ctx)
+    expect(rRotar.accion?.tipo).toBe('rotar_turnos')
+
+    const rAlertas = responderGema('¿Hay alertas viales en Caldas? 🚨', ctx)
+    expect(rAlertas.respuesta).toContain('Paso restringido vía Letras')
   })
 })

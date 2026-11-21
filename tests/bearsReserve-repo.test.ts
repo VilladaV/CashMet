@@ -1,0 +1,176 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+vi.mock('@/lib/firebase/config', () => ({ db: { fake: true } }))
+vi.mock('firebase/firestore', async () => await import('./helpers/fakeFirestore'))
+
+import {
+  __resetCacheBearsParaTests,
+  crearMisionOperativa,
+  guardarExtraEmpleado,
+  guardarExtraVehiculo,
+  hidratarEstadoBears,
+  liquidarTarjetaEnCashmet,
+  listarEmpleadosBears,
+  listarMisiones,
+  listarVehiculosBears,
+  saldoPendienteTarjeta,
+  tanquearVehiculoCompleto,
+  verificarYCompletarMisionesVencidas,
+} from '@/features/bearsReserve/repo'
+import { exportarBackup } from '@/lib/firebase/backup'
+import { __get, __reset, __seed } from './helpers/fakeFirestore'
+
+beforeEach(() => {
+  __reset()
+  __resetCacheBearsParaTests()
+  localStorage.clear()
+})
+
+describe("Bear's Reserve · persistencia Firestore, liquidación y auto-cierre", () => {
+  it('persiste estado en Firestore (configuracion_sistema) e ingresa automáticamente al backup', async () => {
+    __seed('nomina', 'n1', {
+      nombreCompleto: 'Camila Editor',
+      cargo: 'Editor Audiovisual',
+      activo: true,
+      tipoContrato: 'indefinido',
+      salarioBaseMensual: 2000000,
+    })
+
+    // No se excluye por código aunque su cargo sea Editor
+    const emps1 = await listarEmpleadosBears()
+    expect(emps1.find((e) => e.id === 'n1')?.activo).toBe(true)
+
+    // El usuario la desactiva explícitamente y se guarda en Firestore
+    await guardarExtraEmpleado('n1', { activo: false })
+
+    // Limpiamos la caché en memoria para verificar que realmente viene de Firestore
+    __resetCacheBearsParaTests()
+    const emps2 = await listarEmpleadosBears()
+    expect(emps2.find((e) => e.id === 'n1')?.activo).toBe(false)
+
+    // El backup de CashMet incluye los documentos de Bear's Reserve
+    const { contenido } = await exportarBackup()
+    const parsed = JSON.parse(contenido)
+    const idsConfig = (parsed.copia.configuracion_sistema as Array<{ id: string }>).map((d) => d.id)
+    expect(idsConfig).toContain('bears_reserve_config')
+  })
+
+  it('permite liquidar múltiples veces en el mismo mes cuando hay nuevos tanqueos', async () => {
+    __seed('cuentas_banco', 'cta-1', { nombre: 'Bancolombia', tipo: 'ahorros', saldoActual: 5000000, activa: true })
+    __seed('vehiculos', 'v1', {
+      marca: 'Toyota',
+      linea: 'Hilux',
+      tipo: 'carro',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 50000, tareas: [] },
+    })
+
+    await guardarExtraVehiculo('v1', {
+      disponibleParaTrabajo: true,
+      nivelCombustiblePorc: 50,
+      capacidadTanqueGalones: 20,
+      tipoCombustible: 'diesel',
+    })
+
+    // 1er tanqueo (10 gal diésel) y 1ra liquidación
+    const tq1 = await tanquearVehiculoCompleto('v1', 'manual')
+    expect(tq1.tanqueo.galones).toBe(10)
+    const monto1 = tq1.tanqueo.totalCOP
+
+    const liq1 = await liquidarTarjetaEnCashmet('cta-1')
+    expect(saldoPendienteTarjeta(liq1)).toBe(0)
+    expect(__get('cuentas_banco', 'cta-1')?.saldoActual).toBe(5000000 - monto1)
+
+    // 2do tanqueo en el mismo mes (5 gal) → vuelve a tener saldo pendiente liquidable
+    await guardarExtraVehiculo('v1', { nivelCombustiblePorc: 75 })
+    const tq2 = await tanquearVehiculoCompleto('v1', 'manual')
+    expect(saldoPendienteTarjeta(tq2.tarjeta)).toBe(tq2.tanqueo.totalCOP)
+
+    const liq2 = await liquidarTarjetaEnCashmet('cta-1')
+    expect(saldoPendienteTarjeta(liq2)).toBe(0)
+    expect(liq2.liquidaciones).toHaveLength(2)
+    expect(__get('cuentas_banco', 'cta-1')?.saldoActual).toBe(5000000 - monto1 - tq2.tanqueo.totalCOP)
+  })
+
+  it('finaliza automáticamente misiones vencidas, actualiza odómetro en Firestore y evita doble conteo de galones', async () => {
+    __seed('vehiculos', 'v1', {
+      marca: 'Toyota',
+      linea: 'Land Cruiser',
+      tipo: 'carro',
+      activo: true,
+      estado: 'Disponible',
+      notas: '4x4 con winche',
+      mantenimiento: { kilometrajeActual: 100000, tareas: [] },
+    })
+
+    await guardarExtraVehiculo('v1', {
+      disponibleParaTrabajo: true,
+      nivelCombustiblePorc: 20,
+      capacidadTanqueGalones: 20,
+      consumoKmPorGalon: 20,
+      tipoCombustible: 'diesel',
+      totalGalonesConsumidos: 0,
+    })
+
+    const haceDosHoras = Date.now() - 2 * 3600_000
+    await crearMisionOperativa({
+      id: 'mis-auto-1',
+      titulo: 'Rescate en vereda',
+      tipo: 'auxilio_comunitario',
+      prioridad: 'alta',
+      origen: 'Base Finca El Guadual',
+      destino: 'Vereda La Cabaña',
+      departamento: 'Caldas',
+      prioridadGeografica: 'local_manizales',
+      terreno: 'pavimento',
+      distanciaKmIdaYVuelta: 40,
+      duracionMinutos: 60,
+      iniciadaEn: haceDosHoras,
+      finalizaEstimadaEn: haceDosHoras + 60 * 60_000, // ya venció hace 1 hora
+      vehiculosAsignados: [{ id: 'v1', nombre: 'Toyota Land Cruiser' }],
+      tripulantesAsignados: [{ id: 'e1', nombre: 'Andrés' }],
+      galonesConsumidosEstimados: 0,
+      costoCombustibleEstimadoCOP: 0,
+      desgasteLlantasIncrementoPorc: 0,
+      fecha: '2026-11-21',
+      estado: 'en_curso',
+      impactoSocial: 'Apoyo veredal',
+    })
+
+    const res = await verificarYCompletarMisionesVencidas()
+    expect(res.misionesFinalizadas).toHaveLength(1)
+    expect(res.misionesFinalizadas[0].cronicaHistoria?.length).toBeGreaterThan(20)
+    expect(['completada', 'inconclusa_repliegue']).toContain(res.misionesFinalizadas[0].estado)
+
+    // Odómetro en Firestore aumentó
+    const vehFirestore = __get('vehiculos', 'v1') as { mantenimiento?: { kilometrajeActual?: number } }
+    expect(vehFirestore?.mantenimiento?.kilometrajeActual).toBeGreaterThan(100000)
+
+    // Si bajó a <= 15% y auto-tanqueó, totalGalonesConsumidos NO se duplicó con los 18 galones del tanqueo
+    const vehs = await listarVehiculosBears()
+    const v1 = vehs.find((v) => v.id === 'v1')!
+    expect(v1.estado).toBe('disponible')
+    expect(v1.totalGalonesConsumidos).toBeLessThan(10)
+
+    // Idempotencia: segunda llamada no vuelve a completar la misión
+    const res2 = await verificarYCompletarMisionesVencidas()
+    expect(res2.misionesFinalizadas).toHaveLength(0)
+    expect(listarMisiones()).toHaveLength(1)
+  })
+
+  it('persiste cambios en modo demo (cuando CashMet no tiene vehículos registrados)', async () => {
+    await hidratarEstadoBears()
+    const demo1 = await listarVehiculosBears()
+    expect(demo1.length).toBeGreaterThan(0)
+    const id = demo1[0].id
+
+    await guardarExtraVehiculo(id, { nivelCombustiblePorc: 42, desgasteLlantasPorc: 0 })
+    __resetCacheBearsParaTests()
+
+    const demo2 = await listarVehiculosBears()
+    const encontrado = demo2.find((v) => v.id === id)
+    expect(encontrado?.nivelCombustiblePorc).toBe(42)
+    expect(encontrado?.desgasteLlantasPorc).toBe(0)
+  })
+})
