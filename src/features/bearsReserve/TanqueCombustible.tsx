@@ -80,12 +80,12 @@ export default function TanqueCombustible({ vehiculo, onTanquear, busy }: Props)
         </span>
         <button
           type="button"
-          disabled={busy || nivel >= 98}
+          disabled={busy || nivel >= 98 || vehiculo.estado === 'en_mision'}
           onClick={() => onTanquear(vehiculo.id)}
-          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-bold text-amber-200 transition hover:bg-amber-400/20 disabled:opacity-40"
+          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-bold text-amber-200 transition hover:bg-amber-400/20 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
-          <span>Tanquear 100%</span>
+          <span>{vehiculo.estado === 'en_mision' ? 'En misión' : 'Tanquear 100%'}</span>
         </button>
       </div>
     </div>

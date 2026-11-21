@@ -1,15 +1,19 @@
 import { useState } from 'react'
-import type { VehiculoOperativo } from './types'
+import type { TipoCombustible, VehiculoOperativo } from './types'
 import TanqueCombustible from './TanqueCombustible'
-import { Truck, Sparkles, CheckCircle2, RotateCcw } from 'lucide-react'
+import { Truck, Sparkles, CheckCircle2, RotateCcw, AlertTriangle, Pencil, Check } from 'lucide-react'
 
 interface Props {
   vehiculos: VehiculoOperativo[]
-  onActualizarVehiculo: (id: string, parcial: Partial<VehiculoOperativo>) => void
+  onActualizarVehiculo: (id: string, parcial: Partial<VehiculoOperativo>) => Promise<void> | void
   onTanquearVehiculo: (id: string) => Promise<void>
-  onInvestigarFichasPendientesIA: (forzarTodos?: boolean) => Promise<{ procesados: number; nombres: string[] }>
-  onInvestigarVehiculoIndividualIA?: (id: string) => Promise<void>
-  onReemplazarLlantas: (id: string) => void
+  onInvestigarFichasPendientesIA: (
+    forzarTodos?: boolean
+  ) => Promise<{ procesados: number; conGemini: number; conCatalogoLocal: number; nombres: string[] }>
+  onInvestigarVehiculoIndividualIA?: (
+    id: string
+  ) => Promise<{ vehiculo: VehiculoOperativo | null; usoGemini: boolean }>
+  onReemplazarLlantas: (id: string) => Promise<void> | void
 }
 
 export default function FlotaTab({
@@ -23,8 +27,14 @@ export default function FlotaTab({
   const [busyId, setBusyId] = useState<string | null>(null)
   const [investigandoIndividualId, setInvestigandoIndividualId] = useState<string | null>(null)
   const [investigando, setInvestigando] = useState(false)
-  const [feedback, setFeedback] = useState<string>('')
+  const [feedback, setFeedback] = useState<{ tipo: 'ok' | 'aviso'; texto: string } | null>(null)
   const [filtro, setFiltro] = useState<'todos' | 'habilitados' | 'reserva'>('todos')
+
+  // Editor manual de ficha técnica (tanque, combustible y rendimiento)
+  const [editandoId, setEditandoId] = useState<string | null>(null)
+  const [editGalones, setEditGalones] = useState('')
+  const [editConsumo, setEditConsumo] = useState('')
+  const [editCombustible, setEditCombustible] = useState<TipoCombustible>('corriente')
 
   const pendientesInvestigacion = vehiculos.filter(
     (v) => v.disponibleParaTrabajo && !v.investigadoIA
@@ -36,12 +46,18 @@ export default function FlotaTab({
     return true
   })
 
+  const mostrarFeedback = (tipo: 'ok' | 'aviso', texto: string) => {
+    setFeedback({ tipo, texto })
+    window.setTimeout(() => setFeedback(null), 4500)
+  }
+
   const ejecutarTanqueo = async (id: string) => {
     setBusyId(id)
     try {
       await onTanquearVehiculo(id)
-      setFeedback('⛽ Tanqueo al 100% registrado con éxito en la Tarjeta de Combustible.')
-      window.setTimeout(() => setFeedback(''), 3500)
+      mostrarFeedback('ok', '⛽ Tanqueo al 100% registrado con éxito en la Tarjeta de Combustible.')
+    } catch (e: unknown) {
+      mostrarFeedback('aviso', e instanceof Error ? e.message : 'No se pudo completar el tanqueo.')
     } finally {
       setBusyId(null)
     }
@@ -51,9 +67,18 @@ export default function FlotaTab({
     if (!onInvestigarVehiculoIndividualIA) return
     setInvestigandoIndividualId(id)
     try {
-      await onInvestigarVehiculoIndividualIA(id)
-      setFeedback(`✨ Gemini IA investigó y actualizó la ficha técnica de ${marca} ${linea}.`)
-      window.setTimeout(() => setFeedback(''), 4500)
+      const res = await onInvestigarVehiculoIndividualIA(id)
+      if (res.usoGemini) {
+        mostrarFeedback(
+          'ok',
+          `✨ Gemini IA investigó y actualizó la ficha oficial de ${marca} ${linea}.`
+        )
+      } else {
+        mostrarFeedback(
+          'aviso',
+          `📋 Gemini no respondió (verifica VITE_GEMINI_API_KEY); se aplicó catálogo técnico local a ${marca} ${linea}.`
+        )
+      }
     } finally {
       setInvestigandoIndividualId(null)
     }
@@ -64,37 +89,93 @@ export default function FlotaTab({
     try {
       const res = await onInvestigarFichasPendientesIA(forzarTodos)
       if (res.procesados > 0) {
-        setFeedback(
-          `🔍 Gemini IA investigó y configuró ${res.procesados} vehículos: ${res.nombres.join(', ')}.`
-        )
+        if (res.conGemini > 0 && res.conCatalogoLocal === 0) {
+          mostrarFeedback(
+            'ok',
+            `✨ Gemini IA investigó y configuró ${res.conGemini} vehículo(s): ${res.nombres.join(', ')}.`
+          )
+        } else if (res.conGemini > 0) {
+          mostrarFeedback(
+            'aviso',
+            `🔍 Procesados ${res.procesados}: ${res.conGemini} con Gemini IA y ${res.conCatalogoLocal} con catálogo local.`
+          )
+        } else {
+          mostrarFeedback(
+            'aviso',
+            `📋 Sin respuesta de Gemini IA; se configuraron ${res.conCatalogoLocal} vehículo(s) con el catálogo técnico local.`
+          )
+        }
       } else {
-        setFeedback('✅ Todos los vehículos habilitados ya tienen su ficha técnica oficial validada por IA.')
+        mostrarFeedback(
+          'ok',
+          '✅ Todos los vehículos habilitados ya tienen su ficha técnica configurada.'
+        )
       }
-      window.setTimeout(() => setFeedback(''), 4500)
     } finally {
       setInvestigando(false)
     }
   }
 
-  const cambiarLlantasDiscreto = (v: VehiculoOperativo) => {
-    onReemplazarLlantas(v.id)
-    setFeedback(`🛞 Se instaló juego nuevo de llantas en ${v.marca} ${v.linea} (desgaste restablecido a 0%).`)
-    window.setTimeout(() => setFeedback(''), 3500)
+  const cambiarLlantasDiscreto = async (v: VehiculoOperativo) => {
+    await onReemplazarLlantas(v.id)
+    mostrarFeedback(
+      'ok',
+      `🛞 Se instaló juego nuevo de llantas en ${v.marca} ${v.linea} (desgaste restablecido a 0%).`
+    )
   }
 
-  const handleToggleHabilitado = (v: VehiculoOperativo, habilitado: boolean) => {
-    onActualizarVehiculo(v.id, { disponibleParaTrabajo: habilitado })
+  const handleToggleHabilitado = async (v: VehiculoOperativo, habilitado: boolean) => {
+    if (v.disponibleEnCashmet === false) return
+    await onActualizarVehiculo(v.id, { disponibleParaTrabajo: habilitado })
     if (habilitado && !v.investigadoIA && onInvestigarVehiculoIndividualIA) {
       void ejecutarInvestigacionIndividual(v.id, v.marca, v.linea)
     }
   }
 
+  const abrirEditorFicha = (v: VehiculoOperativo) => {
+    setEditandoId(v.id)
+    setEditGalones(String(v.capacidadTanqueGalones))
+    setEditConsumo(String(v.consumoKmPorGalon))
+    setEditCombustible(v.tipoCombustible)
+  }
+
+  const guardarFichaManual = async (v: VehiculoOperativo) => {
+    const gal = Number(editGalones)
+    const kmGal = Number(editConsumo)
+    if (!Number.isFinite(gal) || gal < 1 || gal > 600 || !Number.isFinite(kmGal) || kmGal < 2 || kmGal > 250) {
+      mostrarFeedback('aviso', 'Ingresa valores válidos de tanque (1–600 gal) y rendimiento (2–250 km/gal).')
+      return
+    }
+    const lit = Number((gal * 3.78541).toFixed(1))
+    await onActualizarVehiculo(v.id, {
+      capacidadTanqueGalones: Number(gal.toFixed(1)),
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: Number(kmGal.toFixed(1)),
+      tipoCombustible: editCombustible,
+      investigadoIA: true,
+      fuenteFicha: 'manual',
+      fichaInvestigadaNota: `✏️ Ficha ajustada manualmente: Tanque ${gal.toFixed(1)} gal (${lit} L) · ${kmGal.toFixed(1)} km/gal · ${editCombustible.toUpperCase()}.`,
+    })
+    setEditandoId(null)
+    mostrarFeedback('ok', `✅ Ficha técnica de ${v.marca} ${v.linea} guardada en Firestore.`)
+  }
+
   return (
     <div className="space-y-4">
       {feedback && (
-        <div className="flex items-center gap-2 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-3 font-bold text-emerald-200 shadow-lg text-xs">
-          <CheckCircle2 className="h-4 w-4 shrink-0" />
-          <span>{feedback}</span>
+        <div
+          className={`flex items-center gap-2 rounded-2xl border p-3 font-bold shadow-lg text-xs ${
+            feedback.tipo === 'aviso'
+              ? 'border-amber-400/35 bg-amber-500/10 text-amber-200'
+              : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+          }`}
+        >
+          {feedback.tipo === 'aviso' ? (
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          )}
+          <span>{feedback.texto}</span>
         </div>
       )}
 
@@ -103,7 +184,7 @@ export default function FlotaTab({
         <div>
           <h2 className="text-sm font-extrabold text-white">Flota de la Reserva Bear&apos;s Reserve</h2>
           <p className="text-[11px] text-mist-500">
-            Vehículos conectados con CashMet. Odómetro, telemetría y desgaste se actualizan en tiempo real tras cada salida.
+            Vehículos conectados con CashMet. Odómetro, telemetría y desgaste se sincronizan con Firestore tras cada misión.
           </p>
         </div>
 
@@ -112,13 +193,13 @@ export default function FlotaTab({
             <button
               type="button"
               disabled={investigando}
-              onClick={() => ejecutarInvestigacionMasiva(false)}
+              onClick={() => void ejecutarInvestigacionMasiva(false)}
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-sky-400/40 bg-sky-400/10 px-3 py-1.5 text-xs font-bold text-sky-200 transition hover:bg-sky-400/20 disabled:opacity-40"
             >
               <Sparkles className={`h-3.5 w-3.5 ${investigando ? 'animate-spin' : ''}`} />
               <span>
                 {investigando
-                  ? 'Investigando especificaciones con Gemini...'
+                  ? 'Investigando con Gemini...'
                   : `🔍 Investigar Fichas con IA (${pendientesInvestigacion} pendientes)`}
               </span>
             </button>
@@ -126,15 +207,13 @@ export default function FlotaTab({
             <button
               type="button"
               disabled={investigando}
-              onClick={() => ejecutarInvestigacionMasiva(true)}
-              title="Volver a consultar a Gemini IA para verificar o afinar especificaciones oficiales de toda la flota"
+              onClick={() => void ejecutarInvestigacionMasiva(true)}
+              title="Volver a consultar a Gemini IA (con búsqueda web) para verificar especificaciones oficiales de la flota"
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/[0.06] px-3 py-1.5 text-xs font-bold text-sky-300 transition hover:bg-sky-500/15 disabled:opacity-40"
             >
               <Sparkles className={`h-3.5 w-3.5 ${investigando ? 'animate-spin' : ''}`} />
               <span>
-                {investigando
-                  ? 'Actualizando flota con Gemini...'
-                  : '✨ Reinvestigar Flota con IA'}
+                {investigando ? 'Actualizando flota con Gemini...' : '✨ Reinvestigar Flota con IA'}
               </span>
             </button>
           )}
@@ -153,7 +232,9 @@ export default function FlotaTab({
               type="button"
               onClick={() => setFiltro('habilitados')}
               className={`cursor-pointer rounded-lg px-2.5 py-1 text-[11px] font-bold transition ${
-                filtro === 'habilitados' ? 'bg-emerald-400/20 text-emerald-200' : 'bg-white/[0.04] text-mist-400 hover:text-white'
+                filtro === 'habilitados'
+                  ? 'bg-emerald-400/20 text-emerald-200'
+                  : 'bg-white/[0.04] text-mist-400 hover:text-white'
               }`}
             >
               Habilitados ({vehiculos.filter((v) => v.disponibleParaTrabajo).length})
@@ -174,13 +255,23 @@ export default function FlotaTab({
       {/* Grid de vehículos */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {filtrar.map((v) => {
+          const bloqueadoPorCashmet = v.disponibleEnCashmet === false
+          const badgeEstado =
+            v.estado === 'en_mision'
+              ? { txt: '🚨 En misión', cls: 'border-emerald-400/40 bg-emerald-500/20 text-emerald-200 animate-pulse' }
+              : v.estado === 'mantenimiento'
+                ? { txt: `🔧 ${v.estadoCashmet || 'Mantenimiento'}`, cls: 'border-red-400/30 bg-red-500/15 text-red-300' }
+                : v.estado === 'reserva'
+                  ? { txt: '⚠️ Reserva', cls: 'border-amber-400/35 bg-amber-500/15 text-amber-200' }
+                  : { txt: 'En base', cls: 'border-white/10 bg-white/[0.04] text-mist-400' }
+
           return (
             <div
               key={v.id}
               className={`space-y-3 rounded-3xl border p-4 text-xs shadow-xl backdrop-blur-md transition ${
                 v.disponibleParaTrabajo
                   ? 'border-white/10 bg-white/[0.02] hover:border-white/20'
-                  : 'border-white/[0.05] bg-black/40 opacity-70'
+                  : 'border-white/[0.05] bg-black/40 opacity-75'
               }`}
             >
               <div className="flex items-start justify-between gap-3 border-b border-white/[0.06] pb-3">
@@ -189,17 +280,24 @@ export default function FlotaTab({
                     <Truck className="h-5 w-5" />
                   </span>
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-sm font-black text-white">
                         {v.marca} {v.linea} {v.modelo ? `(${v.modelo})` : ''}
                       </span>
+                      <span className={`rounded-full border px-2 py-0.2 text-[9px] font-bold ${badgeEstado.cls}`}>
+                        {badgeEstado.txt}
+                      </span>
                       {v.investigadoIA ? (
                         <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.2 text-[9px] font-bold text-sky-300">
-                          {v.fichaInvestigadaNota?.includes('Gemini') ? '✨ Gemini IA' : '✓ Ficha IA'}
+                          {v.fuenteFicha === 'gemini' || v.fichaInvestigadaNota?.includes('Gemini')
+                            ? '✨ Gemini IA'
+                            : v.fuenteFicha === 'manual'
+                              ? '✏️ Manual'
+                              : '📋 Catálogo local'}
                         </span>
                       ) : (
                         <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.2 text-[9px] font-bold text-amber-300">
-                          ⚠️ Ficha preliminar
+                          ⚠️ Preliminar
                         </span>
                       )}
                     </div>
@@ -211,18 +309,36 @@ export default function FlotaTab({
                   </div>
                 </div>
 
-                <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 bg-black/40 px-2.5 py-1 text-[10px] font-bold text-mist-300">
+                <label
+                  title={
+                    bloqueadoPorCashmet
+                      ? `No disponible en CashMet (estado actual: ${v.estadoCashmet}). Cámbialo a "Disponible" en el módulo de Vehículos de CashMet.`
+                      : 'Habilitar o deshabilitar este vehículo para Bear\'s Reserve'
+                  }
+                  className={`flex items-center gap-1.5 rounded-full border border-white/10 bg-black/40 px-2.5 py-1 text-[10px] font-bold ${
+                    bloqueadoPorCashmet
+                      ? 'cursor-not-allowed text-red-300/80 opacity-75'
+                      : 'cursor-pointer text-mist-300'
+                  }`}
+                >
                   <input
                     type="checkbox"
+                    disabled={bloqueadoPorCashmet}
                     checked={v.disponibleParaTrabajo}
-                    onChange={(e) => handleToggleHabilitado(v, e.target.checked)}
-                    className="h-3.5 w-3.5 accent-amber-400"
+                    onChange={(e) => void handleToggleHabilitado(v, e.target.checked)}
+                    className="h-3.5 w-3.5 accent-amber-400 disabled:cursor-not-allowed"
                   />
-                  <span>{v.disponibleParaTrabajo ? 'Habilitado Reserva' : 'Solo CashMet'}</span>
+                  <span>
+                    {bloqueadoPorCashmet
+                      ? v.estadoCashmet || 'No disponible'
+                      : v.disponibleParaTrabajo
+                        ? 'Habilitado Reserva'
+                        : 'Solo CashMet'}
+                  </span>
                 </label>
               </div>
 
-              {/* Ficha técnica investigada + Botón de investigación individual con Gemini */}
+              {/* Ficha técnica investigada + Botón Gemini + Edición manual */}
               <div className="flex flex-col gap-2">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1">
@@ -236,28 +352,99 @@ export default function FlotaTab({
                       </div>
                     )}
                   </div>
-                  {onInvestigarVehiculoIndividualIA && (
+                  <div className="flex shrink-0 flex-col gap-1">
+                    {onInvestigarVehiculoIndividualIA && (
+                      <button
+                        type="button"
+                        disabled={investigandoIndividualId === v.id || investigando}
+                        onClick={() => void ejecutarInvestigacionIndividual(v.id, v.marca, v.linea)}
+                        title="Investigar o verificar especificaciones oficiales con Gemini IA (búsqueda web)"
+                        className="inline-flex cursor-pointer items-center gap-1 rounded-xl border border-sky-400/30 bg-sky-400/10 px-2 py-1 text-[10px] font-bold text-sky-200 transition hover:bg-sky-400/20 disabled:opacity-40"
+                      >
+                        <Sparkles
+                          className={`h-3 w-3 ${investigandoIndividualId === v.id ? 'animate-spin' : ''}`}
+                        />
+                        <span>
+                          {investigandoIndividualId === v.id
+                            ? 'Consultando...'
+                            : v.investigadoIA
+                              ? 'Reinvestigar IA'
+                              : 'Investigar IA'}
+                        </span>
+                      </button>
+                    )}
                     <button
                       type="button"
-                      disabled={investigandoIndividualId === v.id || investigando}
-                      onClick={() => ejecutarInvestigacionIndividual(v.id, v.marca, v.linea)}
-                      title="Investigar o verificar especificaciones oficiales de fábrica con la IA de Gemini"
-                      className="shrink-0 inline-flex items-center gap-1 rounded-xl border border-sky-400/30 bg-sky-400/10 px-2 py-1.5 text-[10px] font-bold text-sky-200 transition hover:bg-sky-400/20 disabled:opacity-40 cursor-pointer"
+                      onClick={() => (editandoId === v.id ? setEditandoId(null) : abrirEditorFicha(v))}
+                      title="Ajustar manualmente tanque, combustible o rendimiento"
+                      className="inline-flex cursor-pointer items-center justify-center gap-1 rounded-xl border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-bold text-mist-300 transition hover:bg-white/10 hover:text-white"
                     >
-                      <Sparkles className={`h-3 w-3 ${investigandoIndividualId === v.id ? 'animate-spin' : ''}`} />
-                      <span>
-                        {investigandoIndividualId === v.id
-                          ? 'Consultando IA...'
-                          : v.investigadoIA
-                          ? 'Reinvestigar IA'
-                          : 'Investigar con IA'}
-                      </span>
+                      <Pencil className="h-2.5 w-2.5" />
+                      <span>Ajustar</span>
                     </button>
-                  )}
+                  </div>
                 </div>
+
+                {/* Editor inline de ficha */}
+                {editandoId === v.id && (
+                  <div className="grid grid-cols-3 gap-2 rounded-xl border border-sky-400/25 bg-black/50 p-2.5">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-mist-400">Tanque (gal)</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min={1}
+                        max={600}
+                        value={editGalones}
+                        onChange={(e) => setEditGalones(e.target.value)}
+                        className="field-dark h-7 rounded-lg px-2 font-mono text-xs"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-mist-400">Rendimiento (km/gal)</span>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min={2}
+                        max={250}
+                        value={editConsumo}
+                        onChange={(e) => setEditConsumo(e.target.value)}
+                        className="field-dark h-7 rounded-lg px-2 font-mono text-xs"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="text-[10px] text-mist-400">Combustible</span>
+                      <select
+                        value={editCombustible}
+                        onChange={(e) => setEditCombustible(e.target.value as TipoCombustible)}
+                        className="field-dark h-7 rounded-lg px-1.5 text-xs"
+                      >
+                        <option value="corriente">Corriente</option>
+                        <option value="diesel">Diésel / ACPM</option>
+                        <option value="extra">Extra</option>
+                      </select>
+                    </label>
+                    <div className="col-span-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void guardarFichaManual(v)}
+                        className="flex-1 cursor-pointer inline-flex items-center justify-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 py-1 text-[10px] font-bold text-emerald-200 hover:bg-emerald-500/30"
+                      >
+                        <Check className="h-3 w-3" /> Guardar ficha
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditandoId(null)}
+                        className="cursor-pointer rounded-lg bg-white/10 px-3 py-1 text-[10px] text-mist-300"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Notas y configuración heredadas de CashMet */}
+              {/* Notas heredadas de CashMet */}
               {v.notasCashmet && (
                 <div className="rounded-xl border border-amber-400/20 bg-amber-500/[0.05] p-2 text-[10px] text-amber-200/90 leading-relaxed">
                   <span className="font-bold text-amber-300">📝 </span>
@@ -265,14 +452,14 @@ export default function FlotaTab({
                 </div>
               )}
 
-              {/* Indicador gráfico de tanque de combustible */}
+              {/* Indicador gráfico de tanque */}
               <TanqueCombustible
                 vehiculo={v}
                 busy={busyId === v.id}
-                onTanquear={() => ejecutarTanqueo(v.id)}
+                onTanquear={() => void ejecutarTanqueo(v.id)}
               />
 
-              {/* Métricas de Odómetro y Desgaste de Llantas con acción discreta */}
+              {/* Métricas de Odómetro y Desgaste de Llantas */}
               <div className="grid grid-cols-2 gap-2 text-[11px]">
                 <div className="rounded-xl border border-white/[0.06] bg-black/30 p-2.5">
                   <div className="text-[9px] font-bold uppercase tracking-wider text-mist-500">
@@ -286,11 +473,10 @@ export default function FlotaTab({
                 <div className="rounded-xl border border-white/[0.06] bg-black/30 p-2.5">
                   <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider text-mist-500">
                     <span>Desgaste de llantas</span>
-                    {/* Botón discreto de cambio de llantas */}
                     <button
                       type="button"
                       title="Instalar llantas nuevas (restablecer desgaste al 0%)"
-                      onClick={() => cambiarLlantasDiscreto(v)}
+                      onClick={() => void cambiarLlantasDiscreto(v)}
                       className="cursor-pointer text-mist-500 hover:text-amber-300 transition"
                     >
                       <RotateCcw className="h-3 w-3" />

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
@@ -27,19 +27,25 @@ import {
   ArrowDown,
   Plus,
   RefreshCw,
+  ExternalLink,
+  Play,
+  XCircle,
+  AlertTriangle,
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
 import {
   calcularDistanciaRealDesdeBase,
+  calcularDistanciaRutaParadas,
   BASE_BEARS_RESERVE,
   PUNTOS_REFERENCIA_CALDAS,
+  resolverCoordenadasLugar,
 } from './geo'
 import {
   seleccionarVehiculosOptimosMision,
   seleccionarTripulacionMision,
-  escanearNuevosEventosRadarIA,
 } from './gemaEngine'
 import { obtenerConductorRuta } from './repo'
+import { hoyISO } from '@/lib/fechas'
 
 let counterMision = 1
 function crearMisionId(): string {
@@ -51,9 +57,15 @@ function horaActualHHMM(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-function hoyFechaISO(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+function textoVigenciaRestante(expiraEn?: number, ahora = Date.now()): string {
+  if (!expiraEn) return 'Vigente hoy'
+  const horas = Math.max(1, Math.ceil((expiraEn - ahora) / (60 * 60 * 1000)))
+  if (horas >= 24) {
+    const dias = Math.floor(horas / 24)
+    const rem = horas % 24
+    return rem > 0 ? `Caduca en ${dias}d ${rem}h` : `Caduca en ${dias}d`
+  }
+  return `Caduca en ${horas}h`
 }
 
 interface Props {
@@ -63,16 +75,19 @@ interface Props {
   turnos?: TurnoSemanal[]
   rutasHabituales: RutaHabitual[]
   eventosRadar: EventoRadarLocal[]
-  onCrearMision: (mision: MisionComunitaria) => void
-  onCompletarMision: (
-    misionId: string,
-    resultado?: 'exito' | 'parcial' | 'fallida_dificultad'
-  ) => Promise<{ cronica: string; tanqueosAutomaticos: any[] }>
-  onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId?: string) => void
-  onActualizarRuta?: (ruta: RutaHabitual) => void
-  onDescartarEventoRadar?: (id: string) => void
-  onActualizarEventosRadar?: (eventos: EventoRadarLocal[]) => void
-  onAgregarEventoRadar?: (ev: EventoRadarLocal) => void
+  onCrearMision: (mision: MisionComunitaria) => Promise<void> | void
+  onIniciarMisionProgramada?: (id: string) => Promise<void>
+  onCancelarMisionProgramada?: (id: string) => Promise<void>
+  onCumplirRutaHabitual: (ruta: RutaHabitual, vehiculoId?: string) => Promise<void>
+  onActualizarRuta?: (ruta: RutaHabitual) => Promise<void> | void
+  onDescartarEventoRadar?: (id: string) => Promise<void> | void
+  onEscanearRadarReal?: () => Promise<{
+    eventos: EventoRadarLocal[]
+    noticiasRealesAgregadas: number
+    llamadasAgregadas: number
+  }>
+  onActualizarEventosRadar?: (eventos: EventoRadarLocal[]) => Promise<void> | void
+  onAgregarEventoRadar?: (ev: EventoRadarLocal) => Promise<void> | void
 }
 
 type SubVistaMisiones = 'radar' | 'mapa' | 'cronicas' | 'rutas_habituales'
@@ -85,17 +100,32 @@ export default function MisionesTab({
   rutasHabituales,
   eventosRadar,
   onCrearMision,
-  onCompletarMision,
+  onIniciarMisionProgramada,
+  onCancelarMisionProgramada,
   onCumplirRutaHabitual,
   onActualizarRuta,
   onDescartarEventoRadar,
-  onActualizarEventosRadar,
+  onEscanearRadarReal,
   onAgregarEventoRadar,
 }: Props) {
   const [subVista, setSubVista] = useState<SubVistaMisiones>('radar')
   const [filtroRadar, setFiltroRadar] = useState<'todos' | 'caldas' | 'otros'>('todos')
-  const [busyId, setBusyId] = useState<string | null>(null)
-  const [feedback, setFeedback] = useState<string>('')
+  const [busyRutaId, setBusyRutaId] = useState<string | null>(null)
+  const [feedback, setFeedback] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null)
+  const [ahoraMs, setAhoraMs] = useState(() => Date.now())
+
+  // Actualizar reloj cada 15s para barras de progreso en vivo
+  useEffect(() => {
+    const id = window.setInterval(() => setAhoraMs(Date.now()), 15_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const mostrarFeedback = (tipo: 'ok' | 'error', texto: string, ms = 5500) => {
+    setFeedback({ tipo, texto })
+    window.setTimeout(() => {
+      setFeedback((prev) => (prev?.texto === texto ? null : prev))
+    }, ms)
+  }
 
   // Estados para radar dinámico
   const [escaneandoRadar, setEscaneandoRadar] = useState(false)
@@ -106,47 +136,66 @@ export default function MisionesTab({
   const [reporteResumen, setReporteResumen] = useState('')
   const [reporteGrave, setReporteGrave] = useState(false)
 
-  const ejecutarEscaneoRadar = () => {
+  const ejecutarEscaneoRadar = async () => {
+    if (!onEscanearRadarReal) return
     setEscaneandoRadar(true)
-    setTimeout(() => {
-      const res = escanearNuevosEventosRadarIA(eventosRadar)
-      if (res.eventoAgregado && onActualizarEventosRadar) {
-        onActualizarEventosRadar(res.nuevosEventos)
-        setFeedback(`📡 ¡Frecuencias escaneadas! Se captó reporte: "${res.eventoAgregado.titulo}".`)
-      } else {
-        setFeedback(`📡 Frecuencias escaneadas. No hay alertas adicionales reportadas en la cordillera por ahora.`)
+    try {
+      const res = await onEscanearRadarReal()
+      const partes: string[] = []
+      if (res.noticiasRealesAgregadas > 0) {
+        partes.push(`${res.noticiasRealesAgregadas} noticia(s) web real(es)`)
       }
+      if (res.llamadasAgregadas > 0) {
+        partes.push(`${res.llamadasAgregadas} llamada(s) comunitaria(s) fresca(s)`)
+      }
+      if (partes.length > 0) {
+        mostrarFeedback(
+          'ok',
+          `📡 Radar actualizado: ${partes.join(' y ')} (vigencia automática de 1–2 días).`
+        )
+      } else {
+        mostrarFeedback(
+          'ok',
+          '📡 Frecuencias escaneadas. Se purgaron eventos vencidos; no hay alertas nuevas adicionales por ahora.'
+        )
+      }
+    } catch {
+      mostrarFeedback('error', 'No se pudo completar el escaneo del radar en este momento.')
+    } finally {
       setEscaneandoRadar(false)
-      setTimeout(() => setFeedback(''), 5000)
-    }, 700)
+    }
   }
 
-  const guardarNuevoReporte = () => {
+  const guardarNuevoReporte = async () => {
     if (!reporteTitulo.trim()) return
+    const coords = resolverCoordenadasLugar(reporteLugar, reporteDepartamento)
+    const ahora = Date.now()
     const nuevo: EventoRadarLocal = {
-      id: `rad-man-${Date.now()}`,
+      id: `rad-man-${ahora}`,
       titulo: reporteTitulo.trim(),
-      lugar: reporteLugar.trim(),
-      departamento: reporteDepartamento.trim(),
-      lat: BASE_BEARS_RESERVE.lat + (Math.random() - 0.5) * 0.03,
-      lng: BASE_BEARS_RESERVE.lng + (Math.random() - 0.5) * 0.03,
-      fuenteNoticia: 'Llamada telefónica a Guardia Bear\'s Reserve',
+      lugar: reporteLugar.trim() || 'Manizales · Caldas',
+      departamento: reporteDepartamento.trim() || 'Caldas',
+      lat: coords.lat,
+      lng: coords.lng,
+      fuenteNoticia: 'Llamada directa a Guardia Bear\'s Reserve',
       resumen: reporteResumen.trim() || 'Llamada comunitaria solicitando apoyo.',
-      fecha: hoyFechaISO(),
+      fecha: hoyISO(),
+      creadoEn: ahora,
+      expiraEn: ahora + 36 * 60 * 60 * 1000,
       esEmergenciaGrave: reporteGrave,
       atencionOficialPresente: false,
       esNoticiaWebReal: false,
       recomendacionGema: reporteGrave ? 'intervenir_urgente' : 'apoyo_logistico',
-      justificacionGema: 'Situación reportada directamente por la comunidad veredal. Se requiere evaluar disponibilidad y alistar dotación.',
+      justificacionGema:
+        'Situación reportada directamente por la comunidad veredal. Evaluar disponibilidad y alistar dotación.',
     }
     if (onAgregarEventoRadar) {
-      onAgregarEventoRadar(nuevo)
+      await onAgregarEventoRadar(nuevo)
     }
     setModalReportarAbierto(false)
     setReporteTitulo('')
     setReporteResumen('')
-    setFeedback(`📻 ¡Llamada veredal "${nuevo.titulo}" registrada en el Radar!`)
-    setTimeout(() => setFeedback(''), 5000)
+    mostrarFeedback('ok', `📻 ¡Llamada veredal "${nuevo.titulo}" registrada en el Radar!`)
   }
 
   // Formulario de nueva misión manual o programada
@@ -154,18 +203,26 @@ export default function MisionesTab({
   const [titulo, setTitulo] = useState('Apoyo Comunitario y Traslado de Víveres')
   const [destino, setDestino] = useState('Vereda La Cabaña · Manizales')
   const [distanciaKm, setDistanciaKm] = useState('28')
-  const [duracionMinutos, setDuracionMinutos] = useState('180') // 3 horas
+  const [duracionMinutos, setDuracionMinutos] = useState('90')
   const [terreno, setTerreno] = useState<MisionComunitaria['terreno']>('trocha_moderada')
-  const [vehiculosSeleccionados, setVehiculosSeleccionados] = useState<string[]>([
-    vehiculos.find((v) => v.disponibleParaTrabajo)?.id || vehiculos[0]?.id || '',
-  ])
-  const [tripulantesSeleccionados, setTripulantesSeleccionados] = useState<string[]>([
-    empleados.find((e) => e.activo)?.id || empleados[0]?.id || '',
-  ])
+  const [vehiculosSeleccionados, setVehiculosSeleccionados] = useState<string[]>([])
+  const [tripulantesSeleccionados, setTripulantesSeleccionados] = useState<string[]>([])
   const [esProgramada, setEsProgramada] = useState(false)
-  const [fechaMision, setFechaMision] = useState(hoyFechaISO)
+  const [fechaMision, setFechaMision] = useState(hoyISO)
+  const [errorModal, setErrorModal] = useState('')
 
-  // Estado para el editor de trazado de rutas habituales
+  const abrirModalNuevaMision = () => {
+    setErrorModal('')
+    const libre = vehiculos.find((v) => v.disponibleParaTrabajo && v.estado !== 'en_mision')
+    const empActivo = empleados.find((e) => e.activo)
+    setVehiculosSeleccionados(libre ? [libre.id] : [])
+    setTripulantesSeleccionados(empActivo ? [empActivo.id] : [])
+    setFechaMision(hoyISO())
+    setEsProgramada(false)
+    setModalAbierto(true)
+  }
+
+  // Editor de trazado de rutas habituales
   const [modalEditarRutaAbierto, setModalEditarRutaAbierto] = useState(false)
   const [rutaEditando, setRutaEditando] = useState<RutaHabitual | null>(null)
   const [paradasEditando, setParadasEditando] = useState<
@@ -198,7 +255,7 @@ export default function MisionesTab({
 
   const eliminarParada = (index: number) => {
     if (paradasEditando.length <= 2) {
-      alert('Una ruta debe tener al menos 2 puntos (origen y destino).')
+      mostrarFeedback('error', 'Una ruta debe tener al menos 2 puntos (origen y destino).')
       return
     }
     setParadasEditando(paradasEditando.filter((_, i) => i !== index))
@@ -212,52 +269,60 @@ export default function MisionesTab({
     setNuevoPuntoNombreManual('')
   }
 
-  const guardarCambiosRuta = () => {
+  const guardarCambiosRuta = async () => {
     if (!rutaEditando) return
-    const minutosRalentiNum = Number(minutosRalentiEditando) || 30
+    const minutosRalentiNum = Math.max(0, Number(minutosRalentiEditando) || 30)
+    const calc = calcularDistanciaRutaParadas(paradasEditando, true)
+    const kmFinal = calc.distanciaKm > 0 ? calc.distanciaKm : rutaEditando.distanciaKm
+    const minRodamiento =
+      calc.minutosRodamiento > 0 ? calc.minutosRodamiento : rutaEditando.minutosRodamiento || 55
+
     const rutaActualizada: RutaHabitual = {
       ...rutaEditando,
       coordenadasParadas: paradasEditando,
+      distanciaKm: kmFinal,
+      minutosRodamiento: minRodamiento,
       minutosRalenti: minutosRalentiNum,
+      duracionMinutos: minRodamiento + minutosRalentiNum,
     }
     if (onActualizarRuta) {
-      onActualizarRuta(rutaActualizada)
+      await onActualizarRuta(rutaActualizada)
     }
     setModalEditarRutaAbierto(false)
-    setFeedback(
-      `✅ Trazado y paradas de "${rutaActualizada.nombre}" guardados. La ruta GPS en el mapa se actualizó.`
+    mostrarFeedback(
+      'ok',
+      `✅ Trazado de "${rutaActualizada.nombre}" guardado en Firestore (${kmFinal} km · ~${minRodamiento + minutosRalentiNum} min).`
     )
-    window.setTimeout(() => setFeedback(''), 4500)
   }
 
-  // Despacho desde evento del Radar con Selección Inteligente de Gema
-  const despacharDesdeEvento = (ev: EventoRadarLocal) => {
+  // Despacho desde evento del Radar (con resolución automática por IA al vencer duración)
+  const despacharDesdeEvento = async (ev: EventoRadarLocal) => {
     const tipoDeducido =
-      ev.titulo.toLowerCase().includes('camión') || ev.titulo.toLowerCase().includes('barrizal')
+      ev.titulo.toLowerCase().includes('camión') ||
+      ev.titulo.toLowerCase().includes('barrizal') ||
+      ev.titulo.toLowerCase().includes('barro')
         ? 'rescate_barrizal'
         : ev.titulo.toLowerCase().includes('trasteo')
           ? 'transporte_humanitario'
           : 'auxilio_comunitario'
 
-    // Gema analiza el evento cruzándolo con las notas de CashMet (4x4, winche, 5ta rueda, pasajeros)
     const seleccionGema = seleccionarVehiculosOptimosMision(
       {
         titulo: ev.titulo,
         tipo: tipoDeducido,
         impactoSocial: ev.resumen,
-        terreno: 'trocha_moderada',
+        terreno: tipoDeducido === 'rescate_barrizal' ? 'trocha_extrema_barrizal' : 'trocha_moderada',
       },
       vehiculos
     )
     const vehiculoElegido = seleccionGema.vehiculoElegido
 
-    // Gema arma la tripulación por rol entre quienes están de guardia en este momento
     const seleccionTripulacion = seleccionarTripulacionMision(
       { titulo: ev.titulo, tipo: tipoDeducido, impactoSocial: ev.resumen },
       vehiculoElegido ? [vehiculoElegido] : [],
       empleados,
       turnos,
-      hoyFechaISO(),
+      hoyISO(),
       horaActualHHMM()
     )
 
@@ -266,6 +331,8 @@ export default function MisionesTab({
         ? calcularDistanciaRealDesdeBase(ev.lat, ev.lng, true)
         : { distanciaKmTotalIdaYVuelta: 32, tiempoMinutosRodamientoIdaYVuelta: 60 }
 
+    const duracionTotal = Math.max(25, geo.tiempoMinutosRodamientoIdaYVuelta + 60)
+
     const nueva: MisionComunitaria = {
       id: crearMisionId(),
       titulo: ev.titulo,
@@ -273,38 +340,74 @@ export default function MisionesTab({
       prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
       origen: BASE_BEARS_RESERVE.nombre,
       destino: ev.lugar,
-      departamento: (ev.departamento as any) || 'Caldas',
+      departamento: (ev.departamento as MisionComunitaria['departamento']) || 'Caldas',
       prioridadGeografica: ev.departamento === 'Caldas' ? 'local_manizales' : 'eje_cercano',
-      terreno: 'trocha_moderada',
-      distanciaKmIdaYVuelta: geo.distanciaKmTotalIdaYVuelta,
-      duracionMinutos: geo.tiempoMinutosRodamientoIdaYVuelta + 90, // Desplazamiento + maniobra
+      terreno: tipoDeducido === 'rescate_barrizal' ? 'trocha_extrema_barrizal' : 'trocha_moderada',
+      distanciaKmIdaYVuelta: Math.max(4, geo.distanciaKmTotalIdaYVuelta),
+      duracionMinutos: duracionTotal,
       minutosRodamientoEstimados: geo.tiempoMinutosRodamientoIdaYVuelta,
-      minutosRalentiEstimados: 35, // Maniobra con motor encendido
+      minutosRalentiEstimados: 30,
       latDestino: ev.lat,
       lngDestino: ev.lng,
       vehiculosAsignados: vehiculoElegido
-        ? [{ id: vehiculoElegido.id, nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`, placa: vehiculoElegido.placa }]
+        ? [
+            {
+              id: vehiculoElegido.id,
+              nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`,
+              placa: vehiculoElegido.placa,
+            },
+          ]
         : [],
-      tripulantesAsignados: seleccionTripulacion.tripulacion.map((t) => ({ id: t.id, nombre: t.nombre })),
-      galonesConsumidosEstimados: Number((geo.distanciaKmTotalIdaYVuelta / 20).toFixed(1)),
-      costoCombustibleEstimadoCOP: Math.round((geo.distanciaKmTotalIdaYVuelta / 20) * 15850),
-      desgasteLlantasIncrementoPorc: 0.6,
-      fecha: hoyFechaISO(),
+      tripulantesAsignados: seleccionTripulacion.tripulacion.map((t) => ({
+        id: t.id,
+        nombre: t.nombre,
+      })),
+      galonesConsumidosEstimados: 0,
+      costoCombustibleEstimadoCOP: 0,
+      desgasteLlantasIncrementoPorc: 0,
+      fecha: hoyISO(),
       estado: 'en_curso',
+      eventoRadarId: ev.id,
       impactoSocial: ev.resumen,
       esNoticiaWebReal: ev.esNoticiaWebReal,
     }
 
-    onCrearMision(nueva)
-    setFeedback(`🚨 ¡Misión activada! ${seleccionGema.motivoGema} ${seleccionTripulacion.motivo} (${geo.distanciaKmTotalIdaYVuelta} km reales desde Finca El Guadual).`)
-    window.setTimeout(() => setFeedback(''), 5500)
+    await onCrearMision(nueva)
+    mostrarFeedback(
+      'ok',
+      `🚨 ¡Misión despachada! ${seleccionGema.motivoGema} ${seleccionTripulacion.motivo} Gema IA la cerrará automáticamente en ~${duracionTotal} min.`
+    )
   }
 
-  // Despachar misión manual
-  const crearMisionManual = () => {
-    const kmNum = Number(distanciaKm) || 25
-    const minNum = Number(duracionMinutos) || 120
+  // Despachar misión manual o programada con validación estricta
+  const crearMisionManual = async () => {
+    const tituloLimpio = titulo.trim()
+    const destinoLimpio = destino.trim()
+    const kmNum = Number(distanciaKm)
+    const minNum = Number(duracionMinutos)
 
+    if (!tituloLimpio || !destinoLimpio) {
+      setErrorModal('Completa el título y el destino de la misión.')
+      return
+    }
+    if (!Number.isFinite(kmNum) || kmNum <= 0) {
+      setErrorModal('La distancia ida y vuelta debe ser mayor a 0 km.')
+      return
+    }
+    if (!Number.isFinite(minNum) || minNum < 10) {
+      setErrorModal('La duración estimada debe ser de al menos 10 minutos.')
+      return
+    }
+    if (vehiculosSeleccionados.length === 0) {
+      setErrorModal('Selecciona al menos un vehículo disponible.')
+      return
+    }
+    if (tripulantesSeleccionados.length === 0) {
+      setErrorModal('Selecciona al menos un tripulante activo.')
+      return
+    }
+
+    setErrorModal('')
     const vehsObj = vehiculos
       .filter((v) => vehiculosSeleccionados.includes(v.id))
       .map((v) => ({ id: v.id, nombre: `${v.marca} ${v.linea}`, placa: v.placa }))
@@ -313,50 +416,54 @@ export default function MisionesTab({
       .filter((e) => tripulantesSeleccionados.includes(e.id))
       .map((e) => ({ id: e.id, nombre: e.nombreCompleto }))
 
+    const coords = resolverCoordenadasLugar(destinoLimpio, 'Caldas')
+    const hoy = hoyISO()
+    const quedaProgramada = esProgramada && fechaMision > hoy
+
     const nueva: MisionComunitaria = {
       id: crearMisionId(),
-      titulo: titulo.trim(),
-      tipo: esProgramada ? 'transporte_humanitario' : 'auxilio_comunitario',
+      titulo: tituloLimpio,
+      tipo: quedaProgramada ? 'transporte_humanitario' : 'auxilio_comunitario',
       prioridad: 'alta',
-      origen: 'Base Central Bear\'s Reserve',
-      destino: destino.trim(),
+      origen: BASE_BEARS_RESERVE.nombre,
+      destino: destinoLimpio,
       departamento: 'Caldas',
       prioridadGeografica: 'local_manizales',
       terreno,
-      distanciaKmIdaYVuelta: kmNum,
-      duracionMinutos: minNum,
+      distanciaKmIdaYVuelta: Number(kmNum.toFixed(1)),
+      duracionMinutos: Math.round(minNum),
+      latDestino: coords.lat,
+      lngDestino: coords.lng,
       vehiculosAsignados: vehsObj,
       tripulantesAsignados: empsObj,
-      galonesConsumidosEstimados: Number((kmNum / 20).toFixed(1)),
-      costoCombustibleEstimadoCOP: Math.round((kmNum / 20) * 15850),
-      desgasteLlantasIncrementoPorc: 0.5,
-      fecha: fechaMision,
-      estado: esProgramada ? 'programada' : 'en_curso',
+      galonesConsumidosEstimados: 0,
+      costoCombustibleEstimadoCOP: 0,
+      desgasteLlantasIncrementoPorc: 0,
+      fecha: quedaProgramada ? fechaMision : hoy,
+      estado: quedaProgramada ? 'programada' : 'en_curso',
       impactoSocial: 'Asistencia y apoyo directo a familias campesinas sin ánimo de lucro.',
       esNoticiaWebReal: false,
     }
 
-    onCrearMision(nueva)
+    await onCrearMision(nueva)
     setModalAbierto(false)
-    setFeedback(`✅ Misión ${esProgramada ? 'agendada en el calendario' : 'despachada'}: "${nueva.titulo}"`)
-    window.setTimeout(() => setFeedback(''), 4000)
+    mostrarFeedback(
+      'ok',
+      quedaProgramada
+        ? `📅 Misión agendada para el ${fechaMision} y sincronizada en el Calendario de CashMet.`
+        : `🚨 Misión despachada: "${nueva.titulo}". Se cerrará automáticamente por Gema IA en ~${nueva.duracionMinutos} min.`
+    )
   }
 
-  // Completar misión con desenlace realista
-  const finalizarMision = async (
-    id: string,
-    resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
-  ) => {
-    setBusyId(id)
+  const ejecutarCumplimientoRuta = async (r: RutaHabitual) => {
+    if (busyRutaId) return
+    setBusyRutaId(r.id)
     try {
-      const res = await onCompletarMision(id, resultado)
-      let msg = `🏁 Misión finalizada (${resultado.toUpperCase()}). Se actualizó el odómetro en CashMet y se archivó la crónica de campo.`
-      if (res.tanqueosAutomaticos && res.tanqueosAutomaticos.length > 0) {
-        msg += ` ⛽ Se activó auto-tanqueo al 100% por entrar en reserva y se cargó a la tarjeta de combustible.`
-      }
-      setFeedback(msg)
+      await onCumplirRutaHabitual(r, r.vehiculoIdDefault)
+    } catch (e: unknown) {
+      mostrarFeedback('error', e instanceof Error ? e.message : 'No se pudo ejecutar la ruta.')
     } finally {
-      setBusyId(null)
+      setBusyRutaId(null)
     }
   }
 
@@ -368,19 +475,34 @@ export default function MisionesTab({
       return true
     })
 
-  const misionesCompletadas = misiones.filter((m) => m.estado === 'completada')
-  const misionesActivas = misiones.filter((m) => m.estado !== 'completada')
+  const misionesEnCurso = misiones.filter((m) => m.estado === 'en_curso')
+  const misionesProgramadas = misiones.filter((m) => m.estado === 'programada')
+  const misionesCerradas = misiones.filter(
+    (m) => m.estado === 'completada' || m.estado === 'inconclusa_repliegue'
+  )
+
+  const hoy = hoyISO()
 
   return (
     <div className="space-y-4 text-xs">
       {feedback && (
-        <div className="flex items-center gap-2 rounded-2xl border border-emerald-400/30 bg-emerald-400/10 p-3 font-bold text-emerald-200 shadow-lg">
-          <CheckCircle2 className="h-4 w-4 shrink-0" />
-          <span>{feedback}</span>
+        <div
+          className={`flex items-center gap-2 rounded-2xl border p-3 font-bold shadow-lg ${
+            feedback.tipo === 'error'
+              ? 'border-red-400/35 bg-red-500/15 text-red-200'
+              : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+          }`}
+        >
+          {feedback.tipo === 'error' ? (
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          )}
+          <span>{feedback.texto}</span>
         </div>
       )}
 
-      {/* Sub-navegación: Radar vs Crónicas vs Rutas Habituales */}
+      {/* Sub-navegación */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.08] pb-3">
         <div className="flex flex-wrap gap-1.5">
           <button
@@ -407,9 +529,9 @@ export default function MisionesTab({
           >
             <Radio className="h-4 w-4" />
             <span>Radar & Contingencias</span>
-            {misionesActivas.length > 0 && (
+            {misionesEnCurso.length > 0 && (
               <span className="rounded-full bg-red-500 px-1.5 text-[9px] font-black text-white">
-                {misionesActivas.length}
+                {misionesEnCurso.length}
               </span>
             )}
           </button>
@@ -424,7 +546,7 @@ export default function MisionesTab({
             }`}
           >
             <BookOpen className="h-4 w-4" />
-            <span>Bitácora de Crónicas ({misionesCompletadas.length})</span>
+            <span>Bitácora de Crónicas ({misionesCerradas.length})</span>
           </button>
 
           <button
@@ -437,13 +559,13 @@ export default function MisionesTab({
             }`}
           >
             <Route className="h-4 w-4" />
-            <span>Rutas Habituales Fijas ({rutasHabituales.length})</span>
+            <span>Rutas Habituales ({rutasHabituales.length})</span>
           </button>
         </div>
 
         <button
           type="button"
-          onClick={() => setModalAbierto(true)}
+          onClick={abrirModalNuevaMision}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-amber-400/40 bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1.5 font-black text-[#2a1702] transition hover:brightness-110"
         >
           <Calendar className="h-3.5 w-3.5" />
@@ -455,76 +577,152 @@ export default function MisionesTab({
       {subVista === 'mapa' && (
         <MapaOperaciones
           eventosRadar={eventosRadar}
-          misiones={misiones}
+          misiones={misionesEnCurso}
           rutasHabituales={rutasHabituales}
-          misionSeleccionada={misionesActivas[0] || null}
           onActualizarRuta={onActualizarRuta}
         />
       )}
 
-      {/* ----------------- VISTA 1: RADAR DE EVENTOS ----------------- */}
+      {/* ----------------- VISTA 1: RADAR Y MISIONES EN CURSO ----------------- */}
       {subVista === 'radar' && (
         <div className="space-y-4">
-          {/* Misiones en curso si las hay */}
-          {misionesActivas.length > 0 && (
+          {/* Misiones en curso con temporizador automático y resolución IA (SIN botones manuales) */}
+          {misionesEnCurso.length > 0 && (
             <div className="rounded-3xl border border-emerald-400/30 bg-emerald-500/[0.06] p-4 shadow-xl">
-              <div className="flex items-center gap-2 border-b border-white/10 pb-2">
-                <Compass className="h-4 w-4 text-emerald-300 animate-spin" />
-                <h3 className="font-extrabold text-white">Misiones en Desarrollo ({misionesActivas.length})</h3>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
+                <div className="flex items-center gap-2">
+                  <Compass className="h-4 w-4 text-emerald-300 animate-spin" />
+                  <h3 className="font-extrabold text-white">
+                    Misiones en Desarrollo ({misionesEnCurso.length})
+                  </h3>
+                </div>
+                <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[10px] font-bold text-sky-200">
+                  🤖 Resolución y crónica automáticas por Gema IA al cumplir tiempo estimado
+                </span>
               </div>
 
               <div className="mt-3 space-y-3">
-                {misionesActivas.map((m) => (
+                {misionesEnCurso.map((m) => {
+                  const totalMs = Math.max(60_000, (m.duracionMinutos || 60) * 60_000)
+                  const inicio = m.iniciadaEn ?? ahoraMs
+                  const fin = m.finalizaEstimadaEn ?? inicio + totalMs
+                  const transcurrido = Math.max(0, ahoraMs - inicio)
+                  const progreso = Math.min(99, Math.round((transcurrido / totalMs) * 100))
+                  const minRestantes = Math.max(0, Math.ceil((fin - ahoraMs) / 60_000))
+
+                  return (
+                    <div
+                      key={m.id}
+                      className="space-y-2.5 rounded-2xl border border-emerald-400/25 bg-black/40 p-3.5"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-extrabold text-white text-sm">{m.titulo}</span>
+                            <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[9px] font-black text-emerald-300 uppercase animate-pulse">
+                              En curso
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-2 text-[11px] text-mist-400">
+                            <span>
+                              Destino: <b className="text-white">{m.destino}</b>
+                            </span>
+                            <span>
+                              · Distancia: <b className="text-white">{m.distanciaKmIdaYVuelta} km</b>
+                            </span>
+                            <span>
+                              · Flota:{' '}
+                              <b className="text-amber-300">
+                                {m.vehiculosAsignados?.map((v) => v.nombre).join(', ') || 'Flota general'}
+                              </b>
+                            </span>
+                            <span>
+                              · Tripulación:{' '}
+                              <b className="text-sky-200">
+                                {m.tripulantesAsignados?.map((t) => t.nombre).join(', ') || 'Guardia'}
+                              </b>
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <div className="font-mono text-xs font-black text-emerald-300">
+                            {minRestantes > 0 ? `~${minRestantes} min restantes` : 'Cerrando con Gema IA...'}
+                          </div>
+                          <div className="text-[10px] text-mist-500">
+                            {m.horaInicio ? `Salida ${m.horaInicio}` : ''}
+                            {m.horaFin ? ` · ETA ${m.horaFin}` : ''}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.08]">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-400 transition-all duration-700"
+                            style={{ width: `${Math.max(4, progreso)}%` }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-mist-400">
+                          <span>{m.impactoSocial}</span>
+                          <span className="font-mono font-bold text-mist-300 shrink-0 ml-2">
+                            {progreso}%
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Misiones Programadas (separadas de las que están en curso) */}
+          {misionesProgramadas.length > 0 && (
+            <div className="rounded-3xl border border-sky-400/25 bg-sky-500/[0.05] p-4 shadow-xl">
+              <div className="flex items-center gap-2 border-b border-white/10 pb-2">
+                <Calendar className="h-4 w-4 text-sky-300" />
+                <h3 className="font-extrabold text-white">
+                  Misiones Programadas ({misionesProgramadas.length})
+                </h3>
+              </div>
+              <div className="mt-3 space-y-2">
+                {misionesProgramadas.map((m) => (
                   <div
                     key={m.id}
-                    className="flex flex-col justify-between gap-3 rounded-2xl border border-emerald-400/25 bg-black/40 p-3 sm:flex-row sm:items-center"
+                    className="flex flex-col justify-between gap-2 rounded-2xl border border-white/10 bg-black/40 p-3 sm:flex-row sm:items-center"
                   >
-                    <div className="space-y-1">
+                    <div>
                       <div className="flex items-center gap-2">
-                        <span className="font-extrabold text-white text-sm">{m.titulo}</span>
-                        <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[9px] font-black text-emerald-300 uppercase animate-pulse">
-                          {m.estado}
+                        <span className="font-bold text-white">{m.titulo}</span>
+                        <span className="rounded-full border border-sky-400/30 bg-sky-400/15 px-2 py-0.5 text-[9px] font-black text-sky-200">
+                          📅 {m.fecha}
                         </span>
                       </div>
-                      <div className="flex flex-wrap gap-2 text-[11px] text-mist-400">
-                        <span>Destino: <b className="text-white">{m.destino}</b></span>
-                        <span>· Distancia: <b className="text-white">{m.distanciaKmIdaYVuelta} km</b></span>
-                        <span>
-                          · Flota:{' '}
-                          <b className="text-amber-300">
-                            {m.vehiculosAsignados?.map((v) => v.nombre).join(', ') || 'Flota general'}
-                          </b>
-                        </span>
+                      <div className="text-[11px] text-mist-400">
+                        {m.destino} · {m.distanciaKmIdaYVuelta} km · ~{m.duracionMinutos} min ·{' '}
+                        {m.vehiculosAsignados.map((v) => v.nombre).join(', ')}
                       </div>
-                      <p className="text-mist-300 text-[11px]">{m.impactoSocial}</p>
                     </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        disabled={busyId === m.id}
-                        onClick={() => finalizarMision(m.id, 'exito')}
-                        className="cursor-pointer rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1.5 font-black text-[#04241a] transition hover:brightness-110 disabled:opacity-40"
-                      >
-                        <Check className="h-3.5 w-3.5 inline mr-1" />
-                        <span>Éxito</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === m.id}
-                        onClick={() => finalizarMision(m.id, 'parcial')}
-                        className="cursor-pointer rounded-xl border border-amber-400/30 bg-amber-400/10 px-2.5 py-1.5 font-bold text-amber-200 transition hover:bg-amber-400/20 disabled:opacity-40"
-                      >
-                        <span>Parcial (Barro)</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === m.id}
-                        onClick={() => finalizarMision(m.id, 'fallida_dificultad')}
-                        className="cursor-pointer rounded-xl border border-red-400/30 bg-red-400/10 px-2.5 py-1.5 font-bold text-red-300 transition hover:bg-red-400/20 disabled:opacity-40"
-                      >
-                        <span>Repliegue</span>
-                      </button>
+                    <div className="flex items-center gap-1.5">
+                      {onIniciarMisionProgramada && (
+                        <button
+                          type="button"
+                          onClick={() => void onIniciarMisionProgramada(m.id)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-emerald-500/20 border border-emerald-400/30 px-2.5 py-1 text-[11px] font-bold text-emerald-200 hover:bg-emerald-500/30"
+                        >
+                          <Play className="h-3 w-3" /> Iniciar ahora
+                        </button>
+                      )}
+                      {onCancelarMisionProgramada && (
+                        <button
+                          type="button"
+                          onClick={() => void onCancelarMisionProgramada(m.id)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-red-500/15 border border-red-400/30 px-2.5 py-1 text-[11px] font-bold text-red-300 hover:bg-red-500/25"
+                        >
+                          <XCircle className="h-3 w-3" /> Cancelar
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -532,7 +730,7 @@ export default function MisionesTab({
             </div>
           )}
 
-          {/* Radar principal */}
+          {/* Radar principal con noticias web reales + llamadas veredales con vigencia 1–2 días */}
           <div className="rounded-3xl border border-amber-400/25 bg-gradient-to-br from-amber-500/[0.08] via-black/30 to-night-900 p-4 shadow-xl">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
@@ -540,9 +738,11 @@ export default function MisionesTab({
                   <Radio className="h-4 w-4" />
                 </span>
                 <div>
-                  <h2 className="text-sm font-black text-white">Radar de Eventos, Llamadas y Contingencias</h2>
+                  <h2 className="text-sm font-black text-white">
+                    Radar de Eventos, Noticias Reales y Llamadas Veredales
+                  </h2>
                   <p className="text-[11px] text-mist-400">
-                    Monitoreo en vivo de Manizales y municipios vecinos.
+                    Actualización automática con caducidad de 1–2 días (nunca se quedan alertas viejas).
                   </p>
                 </div>
               </div>
@@ -578,20 +778,19 @@ export default function MisionesTab({
 
                 <button
                   type="button"
-                  onClick={ejecutarEscaneoRadar}
+                  onClick={() => void ejecutarEscaneoRadar()}
                   disabled={escaneandoRadar}
                   className="cursor-pointer inline-flex items-center gap-1 rounded-lg border border-sky-400/30 bg-sky-500/15 px-2.5 py-1 text-[11px] font-bold text-sky-200 hover:bg-sky-500/25 transition disabled:opacity-50"
-                  title="Escanear frecuencias de radio y boletines viales para captar nuevas emergencias con Gema"
+                  title="Buscar noticias viales reales en internet y refrescar llamadas comunitarias con Gema IA"
                 >
                   <RefreshCw className={`h-3 w-3 ${escaneandoRadar ? 'animate-spin' : ''}`} />
-                  <span>{escaneandoRadar ? 'Escaneando...' : 'Escanear con Gema'}</span>
+                  <span>{escaneandoRadar ? 'Escaneando web...' : 'Escanear con Gema'}</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setModalReportarAbierto(true)}
                   className="cursor-pointer inline-flex items-center gap-1 rounded-lg border border-amber-400/30 bg-amber-500/15 px-2.5 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-500/25 transition"
-                  title="Registrar llamada veredal recibida"
                 >
                   <Plus className="h-3 w-3" />
                   <span>+ Llamada Veredal</span>
@@ -603,17 +802,20 @@ export default function MisionesTab({
               <div className="rounded-2xl border border-white/10 bg-black/30 p-8 text-center text-mist-400 my-4 space-y-2">
                 <span className="text-3xl">📻</span>
                 <div className="font-extrabold text-white text-xs">
-                  Sin contingencias activas en este filtro
+                  Sin contingencias vigentes en este filtro
                 </div>
                 <p className="text-[11px] text-mist-400 max-w-sm mx-auto">
-                  La guardia comunitaria está tranquila en base. Usa "Escanear con Gema" para sintonizar nuevas frecuencias o pulsa "+ Llamada Veredal" para reportar un auxilio.
+                  Las alertas caducan automáticamente después de 1–2 días. Pulsa &ldquo;Escanear con Gema&rdquo; para
+                  buscar noticias reales recientes o registra una llamada veredal.
                 </p>
               </div>
             ) : (
               <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                 {eventosFiltrados.map((ev) => {
                   const esCaldas = ev.departamento === 'Caldas'
-                  const estaEnCurso = misionesActivas.some((m) => m.titulo === ev.titulo)
+                  const yaDespachado =
+                    Boolean(ev.despachado) ||
+                    misiones.some((m) => m.eventoRadarId === ev.id || m.titulo === ev.titulo)
 
                   return (
                     <div
@@ -628,7 +830,7 @@ export default function MisionesTab({
                         <div className="font-extrabold text-white sm:text-sm flex items-start gap-1.5">
                           {ev.esNoticiaWebReal ? (
                             <span
-                              title="Acontecimiento real extraído de internet / prensa"
+                              title="Noticia web real consultada en internet"
                               className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-sky-400/20 text-sky-300 text-[10px] font-black shrink-0 mt-0.5 border border-sky-400/30"
                             >
                               ✓
@@ -655,10 +857,21 @@ export default function MisionesTab({
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-1.5 text-[11px] text-mist-400">
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-mist-400">
                         <MapPin className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                         <span>{ev.lugar}</span>
-                        <span className="text-mist-600">· {ev.fuenteNoticia}</span>
+                        <span className="text-mist-500">· {ev.fuenteNoticia}</span>
+                        {ev.urlFuente && (
+                          <a
+                            href={ev.urlFuente}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-0.5 text-sky-300 hover:underline"
+                          >
+                            <span>Fuente</span>
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
+                        )}
                       </div>
 
                       <p className="text-[11px] leading-relaxed text-mist-300">{ev.resumen}</p>
@@ -672,34 +885,31 @@ export default function MisionesTab({
                       </div>
 
                       <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
-                        <div className="flex items-center gap-2 text-[10px] text-mist-500">
+                        <div className="flex flex-wrap items-center gap-2 text-[10px] text-mist-500">
                           <span>{ev.fecha}</span>
+                          <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[9px] text-mist-300">
+                            ⏱️ {textoVigenciaRestante(ev.expiraEn, ahoraMs)}
+                          </span>
                           {onDescartarEventoRadar && (
                             <button
                               type="button"
-                              onClick={() => onDescartarEventoRadar(ev.id)}
-                              className="cursor-pointer text-mist-500 hover:text-rose-400 transition ml-1"
-                              title="Descartar este evento del radar"
+                              onClick={() => void onDescartarEventoRadar(ev.id)}
+                              className="cursor-pointer text-mist-500 hover:text-rose-400 transition"
                             >
                               <Trash2 className="h-3 w-3 inline mr-0.5" /> Descartar
                             </button>
                           )}
                         </div>
 
-                        {estaEnCurso ? (
+                        {yaDespachado ? (
                           <span className="inline-flex items-center gap-1 rounded-xl bg-emerald-400/15 border border-emerald-400/30 px-2.5 py-1 text-[10px] font-black text-emerald-300">
-                            <Check className="h-3 w-3" /> Misión en desarrollo
+                            <Check className="h-3 w-3" /> Atendida / Despachada
                           </span>
                         ) : (
                           <button
                             type="button"
-                            onClick={() => despacharDesdeEvento(ev)}
+                            onClick={() => void despacharDesdeEvento(ev)}
                             className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95"
-                            title={
-                              ev.departamento !== 'Caldas'
-                                ? 'Misión fuera de Caldas: Es decisión tuya despachar el auxilio.'
-                                : 'Despachar auxilio comunitario'
-                            }
                           >
                             <Truck className="h-3.5 w-3.5" />
                             <span>Despachar Misión</span>
@@ -715,7 +925,7 @@ export default function MisionesTab({
         </div>
       )}
 
-      {/* ----------------- VISTA 2: BITÁCORA DE CRÓNICAS (HISTORIAL HUMANO) ----------------- */}
+      {/* ----------------- VISTA 2: BITÁCORA DE CRÓNICAS ----------------- */}
       {subVista === 'cronicas' && (
         <div className="space-y-4">
           <div className="rounded-3xl border border-sky-400/20 bg-gradient-to-br from-sky-500/[0.06] via-black/40 to-night-900 p-4 shadow-xl">
@@ -725,22 +935,24 @@ export default function MisionesTab({
               </span>
               <div>
                 <h3 className="text-sm font-extrabold text-white">
-                  Bitácora de Crónicas y Relatos de Campo ({misionesCompletadas.length})
+                  Bitácora de Crónicas y Relatos de Campo ({misionesCerradas.length})
                 </h3>
                 <p className="text-[11px] text-mist-400">
-                  Historial narrado de forma humana: duración, kilómetros, flota participante y desenlace real de cada servicio comunitario.
+                  Cada misión se cierra automáticamente al cumplir su duración estimada y Gema IA evalúa el resultado y redacta la crónica.
                 </p>
               </div>
             </div>
 
-            {misionesCompletadas.length === 0 ? (
+            {misionesCerradas.length === 0 ? (
               <div className="p-8 text-center text-mist-500">
                 <p className="font-bold text-mist-300">Aún no hay crónicas archivadas.</p>
-                <p className="text-[11px]">Cuando completes una misión, se redactará aquí su relato operativo.</p>
+                <p className="text-[11px]">
+                  Cuando una misión cumpla su tiempo estimado o se complete una ruta habitual, aparecerá aquí automáticamente.
+                </p>
               </div>
             ) : (
               <div className="mt-3 space-y-3">
-                {misionesCompletadas.map((m) => {
+                {misionesCerradas.map((m) => {
                   const horasMin =
                     m.duracionMinutos < 60
                       ? `${m.duracionMinutos} min`
@@ -752,7 +964,7 @@ export default function MisionesTab({
                       className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.02] p-4 text-xs shadow-md"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-2">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-extrabold text-white">{m.titulo}</span>
                           <span
                             className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${
@@ -763,8 +975,17 @@ export default function MisionesTab({
                                   : 'bg-red-400/20 text-red-300'
                             }`}
                           >
-                            {m.resultado === 'exito' ? 'Éxito' : m.resultado === 'parcial' ? 'Parcial' : 'Repliegue'}
+                            {m.resultado === 'exito'
+                              ? 'Éxito'
+                              : m.resultado === 'parcial'
+                                ? 'Parcial'
+                                : 'Repliegue'}
                           </span>
+                          {m.resueltaPorIA && (
+                            <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[9px] font-bold text-sky-300">
+                              ✨ Evaluada por Gema IA
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex items-center gap-3 text-[11px] text-mist-400">
@@ -780,7 +1001,6 @@ export default function MisionesTab({
                         </div>
                       </div>
 
-                      {/* Crónica narrativa humana */}
                       <p className="leading-relaxed text-slate-200 text-[11.5px] italic bg-black/30 rounded-xl p-3 border border-white/[0.04]">
                         &ldquo;{m.cronicaHistoria || m.impactoSocial}&rdquo;
                       </p>
@@ -799,9 +1019,12 @@ export default function MisionesTab({
                           </span>
                         </div>
                         <div>
-                          Consumo estimado:{' '}
+                          Consumo real:{' '}
                           <span className="text-emerald-300 font-medium">
-                            ~{m.galonesConsumidosEstimados} galones
+                            {m.galonesConsumidosEstimados} gal
+                            {m.costoCombustibleEstimadoCOP > 0
+                              ? ` ($${m.costoCombustibleEstimadoCOP.toLocaleString('es-CO')})`
+                              : ''}
                           </span>
                         </div>
                       </div>
@@ -823,15 +1046,22 @@ export default function MisionesTab({
                 <Route className="h-4 w-4" />
               </span>
               <div>
-                <h3 className="text-sm font-extrabold text-white">Rutas Habituales y Servicios Recurrentes</h3>
+                <h3 className="text-sm font-extrabold text-white">
+                  Rutas Habituales y Servicios Recurrentes
+                </h3>
                 <p className="text-[11px] text-mist-400">
-                  Separadas del radar para no saturarlo. Incluye transporte de niños veredales a escuelas rurales y apoyo fijo a campesinos.
+                  El conductor sale automáticamente del cuadrante semanal de Bear&apos;s Reserve.
                 </p>
               </div>
             </div>
 
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {rutasHabituales.map((r) => {
+                const idEsperadoHoy = r.tipoHorario ? `${hoy}-${r.tipoHorario}` : hoy
+                const yaCumplidaHoy = r.ultimoCumplimientoFecha === idEsperadoHoy
+                const conductor = obtenerConductorRuta(r.id, hoy, r.tipoHorario)
+                const esHueco = conductor.id === 'coord-user'
+
                 return (
                   <div
                     key={r.id}
@@ -842,7 +1072,7 @@ export default function MisionesTab({
                         <div className="text-sm font-extrabold text-white">{r.nombre}</div>
                         {r.esAutomatica && (
                           <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-300">
-                            ⚡ Autoejecutable a las {r.horaSalida || '06:00'} (Lunes a Viernes)
+                            ⚡ Autoejecutable a las {r.horaSalida || '06:00'}
                           </span>
                         )}
                       </div>
@@ -854,9 +1084,16 @@ export default function MisionesTab({
                     <p className="text-mist-300 text-[11px] leading-relaxed">{r.descripcion}</p>
 
                     <div className="flex flex-wrap gap-2 text-[10px] text-mist-400">
-                      <span>Rodamiento: <b className="text-white">{r.minutosRodamiento || 55} min</b></span>
-                      <span>· Ralentí en paradas: <b className="text-amber-300">{r.minutosRalenti || 35} min</b></span>
-                      <span>· Total tiempo: <b className="text-sky-300">~{r.duracionMinutos || 90} min</b></span>
+                      <span>
+                        Rodamiento: <b className="text-white">{r.minutosRodamiento || 55} min</b>
+                      </span>
+                      <span>
+                        · Ralentí en paradas:{' '}
+                        <b className="text-amber-300">{r.minutosRalenti || 35} min</b>
+                      </span>
+                      <span>
+                        · Total: <b className="text-sky-300">~{r.duracionMinutos || 90} min</b>
+                      </span>
                     </div>
 
                     <div className="flex items-center gap-1.5 text-[11px] text-mist-400">
@@ -866,22 +1103,25 @@ export default function MisionesTab({
                       </span>
                     </div>
 
-                    {/* Selector y cambio de vehículo asignado para la ruta habitual */}
+                    {/* Selector de vehículo */}
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
-                      <span className="text-[10px] font-bold text-mist-400">Vehículo asignado a esta ruta:</span>
+                      <span className="text-[10px] font-bold text-mist-400">
+                        Vehículo asignado:
+                      </span>
                       <select
                         value={r.vehiculoIdDefault || ''}
                         onChange={(e) => {
                           const nuevoId = e.target.value
-                          const rutaActualizada: RutaHabitual = {
-                            ...r,
-                            vehiculoIdDefault: nuevoId || undefined,
+                          if (onActualizarRuta) {
+                            void onActualizarRuta({
+                              ...r,
+                              vehiculoIdDefault: nuevoId || undefined,
+                            })
                           }
-                          if (onActualizarRuta) onActualizarRuta(rutaActualizada)
                         }}
                         className="field-dark h-7 rounded-lg px-2 text-[10px] font-semibold text-amber-200"
                       >
-                        <option value="">Auto-asignar por IA (Gema según capacidad)</option>
+                        <option value="">Auto-asignar por Gema IA</option>
                         {vehiculos
                           .filter((v) => v.disponibleParaTrabajo)
                           .map((v) => (
@@ -892,26 +1132,24 @@ export default function MisionesTab({
                       </select>
                     </div>
 
-                    {/* Conductor: lo fija el cuadrante semanal que arma Gema */}
-                    {(() => {
-                      const conductor = obtenerConductorRuta(r.id, hoyFechaISO())
-                      const esHueco = conductor.id === 'coord-user'
-                      return (
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
-                          <span className="text-[10px] font-bold text-mist-400">👤 Conductor hoy (cuadrante):</span>
-                          <span className={`text-[10px] font-bold ${esHueco ? 'text-rose-300' : 'text-sky-200'}`}>
-                            {conductor.nombre}
-                            {esHueco && ' · hueco en el cuadrante'}
-                          </span>
-                        </div>
-                      )
-                    })()}
+                    {/* Conductor real del cuadrante */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                      <span className="text-[10px] font-bold text-mist-400">
+                        👤 Conductor hoy (cuadrante):
+                      </span>
+                      <span
+                        className={`text-[10px] font-bold ${esHueco ? 'text-amber-300' : 'text-sky-200'}`}
+                      >
+                        {conductor.nombre}
+                        {esHueco && ' (sin guardia en esa franja hoy)'}
+                      </span>
+                    </div>
 
                     <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
                       <span className="text-[10px] text-mist-500">
                         {r.ultimoCumplimientoFecha
                           ? `Último registro: ${r.ultimoCumplimientoFecha}`
-                          : 'Ruta activa diaria'}
+                          : 'Sin registros aún'}
                       </span>
 
                       <div className="flex flex-wrap items-center gap-1.5">
@@ -921,16 +1159,25 @@ export default function MisionesTab({
                           className="inline-flex cursor-pointer items-center gap-1 rounded-xl border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-bold text-mist-300 hover:bg-white/10 hover:text-white transition"
                         >
                           <Pencil className="h-3 w-3 text-amber-300" />
-                          <span>Definir / Editar Paradas</span>
+                          <span>Editar Paradas</span>
                         </button>
 
                         <button
                           type="button"
-                          onClick={() => onCumplirRutaHabitual(r, r.vehiculoIdDefault)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110"
+                          disabled={busyRutaId === r.id || yaCumplidaHoy}
+                          onClick={() => void ejecutarCumplimientoRuta(r)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 px-3 py-1 font-black text-[#04241a] transition hover:brightness-110 disabled:opacity-45"
                         >
                           <Check className="h-3.5 w-3.5" />
-                          <span>{r.esAutomatica ? 'Despacho Manual Anticipado' : 'Cumplir Ruta'}</span>
+                          <span>
+                            {busyRutaId === r.id
+                              ? 'Registrando...'
+                              : yaCumplidaHoy
+                                ? 'Cumplida hoy'
+                                : r.esAutomatica
+                                  ? 'Despacho Manual Anticipado'
+                                  : 'Cumplir Ruta'}
+                          </span>
                         </button>
                       </div>
                     </div>
@@ -942,12 +1189,14 @@ export default function MisionesTab({
         </div>
       )}
 
-      {/* Modal para agendar misión programada o manual */}
+      {/* Modal para nueva misión manual o programada */}
       {modalAbierto && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
           <div className="surface-glow w-full max-w-lg rounded-3xl border border-white/15 bg-night-900 p-5 text-xs shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
-              <h3 className="text-sm font-extrabold text-white">Despachar o Programar Misión Comunitaria</h3>
+              <h3 className="text-sm font-extrabold text-white">
+                Despachar o Programar Misión Comunitaria
+              </h3>
               <button
                 type="button"
                 onClick={() => setModalAbierto(false)}
@@ -983,6 +1232,8 @@ export default function MisionesTab({
                   <span className="text-mist-400 font-bold">Distancia ida y vuelta (km)</span>
                   <input
                     type="number"
+                    min={1}
+                    step="0.5"
                     value={distanciaKm}
                     onChange={(e) => setDistanciaKm(e.target.value)}
                     className="field-dark h-9 rounded-xl px-2.5 text-xs"
@@ -993,6 +1244,8 @@ export default function MisionesTab({
                   <span className="text-mist-400 font-bold">Duración estimada (minutos)</span>
                   <input
                     type="number"
+                    min={10}
+                    max={720}
                     value={duracionMinutos}
                     onChange={(e) => setDuracionMinutos(e.target.value)}
                     className="field-dark h-9 rounded-xl px-2.5 text-xs"
@@ -1004,47 +1257,56 @@ export default function MisionesTab({
                 <span className="text-mist-400 font-bold">Terreno de montaña</span>
                 <select
                   value={terreno}
-                  onChange={(e) => setTerreno(e.target.value as any)}
+                  onChange={(e) => setTerreno(e.target.value as MisionComunitaria['terreno'])}
                   className="field-dark h-9 rounded-xl px-2 text-xs"
                 >
                   <option value="trocha_moderada">Trocha moderada (Vereda destapada)</option>
-                  <option value="trocha_extrema_barrizal">Barrizal extremo / Trocha pesada con winche</option>
+                  <option value="trocha_extrema_barrizal">
+                    Barrizal extremo / Trocha pesada con winche
+                  </option>
                   <option value="mixto_montaña">Mixto montaña / Curvas pavimentadas</option>
                   <option value="pavimento">Pavimento troncal</option>
                 </select>
               </label>
 
-              {/* Selección de vehículos habilitados */}
+              {/* Vehículos disponibles */}
               <div className="flex flex-col gap-1">
-                <span className="text-mist-400 font-bold">Vehículo(s) participante(s)</span>
+                <span className="text-mist-400 font-bold">Vehículo(s) disponible(s)</span>
                 <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto rounded-xl border border-white/10 bg-black/40 p-2">
                   {vehiculos
                     .filter((v) => v.disponibleParaTrabajo)
                     .map((v) => {
+                      const ocupado = v.estado === 'en_mision'
                       const sel = vehiculosSeleccionados.includes(v.id)
                       return (
                         <button
                           key={v.id}
                           type="button"
+                          disabled={ocupado}
                           onClick={() => {
                             if (sel) {
-                              setVehiculosSeleccionados(vehiculosSeleccionados.filter((x) => x !== v.id))
+                              setVehiculosSeleccionados(
+                                vehiculosSeleccionados.filter((x) => x !== v.id)
+                              )
                             } else {
                               setVehiculosSeleccionados([...vehiculosSeleccionados, v.id])
                             }
                           }}
-                          className={`cursor-pointer rounded-lg px-2 py-1 text-[11px] font-bold transition ${
-                            sel ? 'bg-amber-400/20 text-amber-200 border border-amber-400/30' : 'bg-white/[0.04] text-mist-400'
+                          className={`cursor-pointer rounded-lg px-2 py-1 text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                            sel
+                              ? 'bg-amber-400/20 text-amber-200 border border-amber-400/30'
+                              : 'bg-white/[0.04] text-mist-400'
                           }`}
                         >
-                          {sel ? '✓ ' : ''}{v.marca} {v.linea}
+                          {sel ? '✓ ' : ''}
+                          {v.marca} {v.linea} {ocupado ? '(En misión)' : ''}
                         </button>
                       )
                     })}
                 </div>
               </div>
 
-              {/* Selección de personal asignado */}
+              {/* Personal activo */}
               <div className="flex flex-col gap-1">
                 <span className="text-mist-400 font-bold">Tripulante(s) asignado(s)</span>
                 <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto rounded-xl border border-white/10 bg-black/40 p-2">
@@ -1058,23 +1320,28 @@ export default function MisionesTab({
                           type="button"
                           onClick={() => {
                             if (sel) {
-                              setTripulantesSeleccionados(tripulantesSeleccionados.filter((x) => x !== e.id))
+                              setTripulantesSeleccionados(
+                                tripulantesSeleccionados.filter((x) => x !== e.id)
+                              )
                             } else {
                               setTripulantesSeleccionados([...tripulantesSeleccionados, e.id])
                             }
                           }}
                           className={`cursor-pointer rounded-lg px-2 py-1 text-[11px] font-bold transition ${
-                            sel ? 'bg-emerald-400/20 text-emerald-200 border border-emerald-400/30' : 'bg-white/[0.04] text-mist-400'
+                            sel
+                              ? 'bg-emerald-400/20 text-emerald-200 border border-emerald-400/30'
+                              : 'bg-white/[0.04] text-mist-400'
                           }`}
                         >
-                          {sel ? '✓ ' : ''}{e.nombreCompleto}
+                          {sel ? '✓ ' : ''}
+                          {e.nombreCompleto}
                         </button>
                       )
                     })}
                 </div>
               </div>
 
-              <div className="flex items-center gap-3 border-t border-white/[0.08] pt-2">
+              <div className="flex flex-wrap items-center gap-3 border-t border-white/[0.08] pt-2">
                 <label className="flex cursor-pointer items-center gap-1.5 font-bold text-mist-300">
                   <input
                     type="checkbox"
@@ -1082,27 +1349,30 @@ export default function MisionesTab({
                     onChange={(e) => setEsProgramada(e.target.checked)}
                     className="h-4 w-4 accent-emerald-400"
                   />
-                  <span>Es un trabajo programado en el calendario</span>
+                  <span>Programar para fecha futura (se guarda en Calendario CashMet)</span>
                 </label>
 
                 {esProgramada && (
                   <input
                     type="date"
+                    min={hoy}
                     value={fechaMision}
                     onChange={(e) => setFechaMision(e.target.value)}
                     className="field-dark h-8 rounded-lg px-2 text-xs"
                   />
                 )}
               </div>
+
+              {errorModal && <p className="text-[11px] font-bold text-red-400">{errorModal}</p>}
             </div>
 
             <div className="flex gap-2 border-t border-white/10 pt-3">
               <button
                 type="button"
-                onClick={crearMisionManual}
+                onClick={() => void crearMisionManual()}
                 className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702]"
               >
-                {esProgramada ? 'Agendar Misión' : 'Despachar Inmediatamente'}
+                {esProgramada && fechaMision > hoy ? 'Agendar Misión' : 'Despachar Inmediatamente'}
               </button>
               <button
                 type="button"
@@ -1126,7 +1396,7 @@ export default function MisionesTab({
                   Definir Trazado y Paradas: {rutaEditando.nombre}
                 </h3>
                 <p className="text-[11px] text-mist-400">
-                  Organiza el orden de paradas por donde debe pasar el vehículo. El mapa calculará el recorrido exacto por carretera.
+                  Al guardar se recalcula automáticamente la distancia y duración de la ruta.
                 </p>
               </div>
               <button
@@ -1139,11 +1409,10 @@ export default function MisionesTab({
             </div>
 
             <div className="my-3 space-y-3">
-              {/* Lista de paradas actuales */}
               <div>
                 <div className="text-[11px] font-bold text-mist-300 mb-1.5 flex items-center justify-between">
                   <span>Secuencia de Paradas ({paradasEditando.length} puntos)</span>
-                  <span className="text-[10px] text-mist-500">Usa ▲ y ▼ para cambiar el orden</span>
+                  <span className="text-[10px] text-mist-500">Usa ▲ y ▼ para ordenar</span>
                 </div>
 
                 <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
@@ -1165,7 +1434,6 @@ export default function MisionesTab({
                           disabled={idx === 0}
                           onClick={() => moverParada(idx, -1)}
                           className="cursor-pointer rounded-lg bg-white/[0.06] p-1 text-mist-300 hover:text-white disabled:opacity-20"
-                          title="Subir parada"
                         >
                           <ArrowUp className="h-3 w-3" />
                         </button>
@@ -1174,7 +1442,6 @@ export default function MisionesTab({
                           disabled={idx === paradasEditando.length - 1}
                           onClick={() => moverParada(idx, 1)}
                           className="cursor-pointer rounded-lg bg-white/[0.06] p-1 text-mist-300 hover:text-white disabled:opacity-20"
-                          title="Bajar parada"
                         >
                           <ArrowDown className="h-3 w-3" />
                         </button>
@@ -1182,7 +1449,6 @@ export default function MisionesTab({
                           type="button"
                           onClick={() => eliminarParada(idx)}
                           className="cursor-pointer rounded-lg bg-red-400/10 p-1 text-red-300 hover:bg-red-400/20"
-                          title="Eliminar parada"
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
@@ -1192,10 +1458,9 @@ export default function MisionesTab({
                 </div>
               </div>
 
-              {/* Agregar nueva parada a la secuencia */}
               <div className="rounded-2xl border border-white/10 bg-black/30 p-3 space-y-2">
                 <span className="text-[10px] font-bold text-amber-300 uppercase">
-                  + Agregar Parada o Vereda a la Ruta:
+                  + Agregar Parada o Vereda:
                 </span>
 
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1213,7 +1478,7 @@ export default function MisionesTab({
 
                   <input
                     type="text"
-                    placeholder="Nombre o indicación personalizada..."
+                    placeholder="Nombre personalizado..."
                     value={nuevoPuntoNombreManual}
                     onChange={(e) => setNuevoPuntoNombreManual(e.target.value)}
                     className="field-dark h-8 rounded-xl px-2.5 text-[11px]"
@@ -1226,15 +1491,15 @@ export default function MisionesTab({
                   className="w-full cursor-pointer rounded-xl border border-sky-400/40 bg-sky-400/10 py-1.5 font-bold text-sky-200 hover:bg-sky-400/20 transition flex items-center justify-center gap-1"
                 >
                   <Plus className="h-3.5 w-3.5" />
-                  <span>Insertar Parada al Final de la Secuencia</span>
+                  <span>Insertar Parada al Final</span>
                 </button>
               </div>
 
-              {/* Ajuste de tiempo al ralentí */}
               <div className="flex items-center justify-between gap-3 border-t border-white/[0.08] pt-2">
-                <span className="text-mist-400 font-bold">Minutos de espera / ralentí en paradas:</span>
+                <span className="text-mist-400 font-bold">Minutos de espera / ralentí:</span>
                 <input
                   type="number"
+                  min={0}
                   value={minutosRalentiEditando}
                   onChange={(e) => setMinutosRalentiEditando(e.target.value)}
                   className="field-dark h-8 w-20 rounded-lg px-2 text-center text-xs font-mono font-bold"
@@ -1245,7 +1510,7 @@ export default function MisionesTab({
             <div className="flex gap-2 border-t border-white/10 pt-3">
               <button
                 type="button"
-                onClick={guardarCambiosRuta}
+                onClick={() => void guardarCambiosRuta()}
                 className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-sky-400 to-teal-400 py-2 font-black text-[#04241a] hover:brightness-110"
               >
                 Guardar Trazado de Ruta
@@ -1262,7 +1527,7 @@ export default function MisionesTab({
         </div>
       )}
 
-      {/* Modal para reportar nueva llamada o contingencia al Radar */}
+      {/* Modal para reportar nueva llamada veredal */}
       {modalReportarAbierto && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
           <div className="surface-glow w-full max-w-lg rounded-3xl border border-amber-400/25 bg-night-900 p-5 text-xs shadow-2xl">
@@ -1272,7 +1537,7 @@ export default function MisionesTab({
                   Registrar Nueva Contingencia o Llamada Veredal
                 </h3>
                 <p className="text-[11px] text-mist-400">
-                  Agrega una situación reportada por radio, teléfono o vecinos al Radar activo.
+                  Las coordenadas en el mapa se ubican según el municipio/vereda indicado (vigencia 36h).
                 </p>
               </div>
               <button
@@ -1303,7 +1568,7 @@ export default function MisionesTab({
                     type="text"
                     value={reporteLugar}
                     onChange={(e) => setReporteLugar(e.target.value)}
-                    placeholder="Vereda o sector específico"
+                    placeholder="Ej: Vereda La Cabaña, Neira, Chinchiná..."
                     className="field-dark h-8 rounded-xl px-2.5 text-xs text-white"
                   />
                 </label>
@@ -1314,18 +1579,18 @@ export default function MisionesTab({
                     type="text"
                     value={reporteDepartamento}
                     onChange={(e) => setReporteDepartamento(e.target.value)}
-                    placeholder="Caldas, Antioquia, Tolima..."
+                    placeholder="Caldas, Risaralda, Tolima..."
                     className="field-dark h-8 rounded-xl px-2.5 text-xs text-white"
                   />
                 </label>
               </div>
 
               <label className="flex flex-col gap-1">
-                <span className="font-bold text-mist-400">Detalles de la situación / llamada</span>
+                <span className="font-bold text-mist-400">Detalles de la llamada</span>
                 <textarea
                   value={reporteResumen}
                   onChange={(e) => setReporteResumen(e.target.value)}
-                  placeholder="Describe lo que reportan los campesinos o conductores (daños, personas, necesidad de winche o carga)..."
+                  placeholder="Describe lo que reportan los campesinos o conductores..."
                   rows={3}
                   className="field-dark rounded-xl p-2 text-xs text-white"
                 />
@@ -1347,7 +1612,7 @@ export default function MisionesTab({
             <div className="flex gap-2 border-t border-white/10 pt-3">
               <button
                 type="button"
-                onClick={guardarNuevoReporte}
+                onClick={() => void guardarNuevoReporte()}
                 disabled={!reporteTitulo.trim()}
                 className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702] hover:brightness-110 disabled:opacity-40"
               >
