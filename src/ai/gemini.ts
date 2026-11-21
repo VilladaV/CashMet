@@ -2,8 +2,8 @@ import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 import { normalizarMoneda } from '@/lib/fx'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
-const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.1-flash-lite'
-const MODELOS_FALLBACK = ['gemini-3.5-flash-lite']
+const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-2.5-flash-lite'
+const MODELOS_FALLBACK = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash', 'gemini-3.1-flash-lite']
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
 
 export const geminiDisponible = Boolean(API_KEY)
@@ -81,7 +81,7 @@ Reglas:
 - Interpreta fechas relativas (hoy, mañana, ayer, "el 15") usando la fecha actual entregada.
 - Solo JSON.`
 
-function limpiarJson(texto: string): string {
+export function limpiarJson(texto: string): string {
   const sinFences = texto.replace(/```json/gi, '').replace(/```/g, '').trim()
   const ini = sinFences.indexOf('{')
   const fin = sinFences.lastIndexOf('}')
@@ -110,19 +110,73 @@ interface Contexto {
   snapshot?: string
 }
 
-async function llamarGemini(body: unknown): Promise<{ res: Response | null; cuotaAgotada: boolean }> {
+export async function llamarGemini(body: unknown): Promise<{ res: Response | null; cuotaAgotada: boolean }> {
+  if (!API_KEY) return { res: null, cuotaAgotada: false }
   const candidatos = [MODELO, ...MODELOS_FALLBACK].filter((m, i, a) => m && a.indexOf(m) === i)
   let cuotaAgotada = false
   for (const modelo of candidatos) {
-    const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (r.ok) return { res: r, cuotaAgotada: false }
-    if (r.status === 429) cuotaAgotada = true
+    try {
+      const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (r.ok) return { res: r, cuotaAgotada: false }
+      if (r.status === 429) cuotaAgotada = true
+    } catch {
+      /* intenta siguiente modelo */
+    }
   }
   return { res: null, cuotaAgotada }
+}
+
+/**
+ * Llama a Gemini activando Google Search Grounding (datos en vivo de internet).
+ * Prioriza modelos que soportan la herramienta `google_search`.
+ */
+export async function llamarGeminiConBusqueda(
+  bodySinTools: Record<string, unknown>
+): Promise<{ res: Response | null; cuotaAgotada: boolean; usoBusqueda: boolean }> {
+  if (!API_KEY) return { res: null, cuotaAgotada: false, usoBusqueda: false }
+  const candidatosBusqueda = [MODELO, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'].filter(
+    (m, i, a) => m && a.indexOf(m) === i
+  )
+  let cuotaAgotada = false
+
+  // Nota: responseMimeType: 'application/json' no siempre es compatible con google_search; lo omitimos al buscar.
+  const genCfg =
+    bodySinTools.generationConfig && typeof bodySinTools.generationConfig === 'object'
+      ? { ...(bodySinTools.generationConfig as Record<string, unknown>) }
+      : {}
+  delete genCfg.responseMimeType
+
+  const bodyBusqueda = {
+    ...bodySinTools,
+    generationConfig: genCfg,
+    tools: [{ google_search: {} }],
+  }
+
+  for (const modelo of candidatosBusqueda) {
+    try {
+      const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyBusqueda),
+      })
+      if (r.ok) return { res: r, cuotaAgotada: false, usoBusqueda: true }
+      if (r.status === 429) cuotaAgotada = true
+    } catch {
+      /* intenta siguiente modelo */
+    }
+  }
+
+  // Fallback sin google_search si ningún modelo aceptó la tool
+  const sinBusq = await llamarGemini(bodySinTools)
+  return {
+    res: sinBusq.res,
+    cuotaAgotada: sinBusq.cuotaAgotada || cuotaAgotada,
+    usoBusqueda: false,
+  }
 }
 
 export interface FichaInvestigadaVehiculo {
@@ -145,31 +199,31 @@ export async function investigarVehiculoConGeminiAI(vehiculo: {
 }): Promise<FichaInvestigadaVehiculo | null> {
   if (!API_KEY) return null
 
-  const prompt = `Actúa como perito técnico automotriz e ingeniero mecánico experto en transporte de carga, camionetas 4x4, camiones y maquinaria en Colombia.
-Investiga y determina las especificaciones oficiales originales de fábrica para este vehículo:
+  const prompt = `Actúa como perito técnico automotriz e ingeniero mecánico experto en transporte de carga, camionetas 4x4, camperos, motocicletas, automóviles y maquinaria en Colombia.
+Busca y verifica las especificaciones oficiales reales de fábrica para este vehículo exacto:
 - Marca: ${vehiculo.marca}
 - Línea / Referencia: ${vehiculo.linea}
 - Año modelo: ${vehiculo.modelo ?? 'No especificado'}
 - Tipo / Carrocería: ${vehiculo.tipo ?? ''} ${vehiculo.carroceria ?? ''}
 - Cilindraje: ${vehiculo.cilindraje ? `${vehiculo.cilindraje} cc` : 'No especificado'}
 - Capacidad reportada: ${vehiculo.capacidadTexto ?? 'No especificada'}
-- Notas registradas: ${vehiculo.notas ?? 'Ninguna'}
+- Notas registradas por el dueño: ${vehiculo.notas ?? 'Ninguna'}
 
-Necesito saber con precisión de fabricante:
-1. Capacidad real del tanque de combustible en litros (capacidadTanqueLitros: number).
-2. Capacidad en galones estadounidenses (capacidadTanqueGalones: number, redondeado a 1 decimal). 
-   REGLA DE PRECISIÓN: Cada fabricante y modelo tiene un tanque diferente (ej: tractomulas tipo Kenworth/International/Freightliner usan tanques dobles de 150-300 galones; camiones pesados 6x4/6x6/volquetas usan 60-100 galones; camiones medianos tipo NPR/Dutro/Kodiak usan 25-50 galones; troperos/overlanders con tanque auxiliar usan 35-50 galones; camionetas 4x4 usan 18-25 galones; camperos livianos usan 10-15 galones; automóviles 10-14 galones). Investiga el modelo exacto.
-3. Tipo de combustible (tipoCombustible: "diesel" | "corriente" | "extra").
-4. Rendimiento promedio real estimado en kilómetros por galón en geografía colombiana / montaña / trocha (consumoKmPorGalon: number, redondeado a 1 decimal).
-5. Explicación técnica concisa de fábrica de 1 o 2 frases sobre el tanque original, motor y autonomía para operaciones de rescate/trabajo (fichaInvestigadaNota: string).
+REGLAS CRÍTICAS DE PRECISIÓN:
+1. Si las notas del dueño especifican un tanque o combustible modificado (ej: "tanque auxiliar 180 L", "diésel", "gasolina extra"), respétalo con prioridad.
+2. Verifica el modelo EXACTO (no generalices ni confundas carros con camiones ni viceversa):
+   - Capacidad real del tanque en litros (capacidadTanqueLitros: number) y en galones US (capacidadTanqueGalones: number, = litros / 3.78541, redondeado a 1 decimal).
+   - Tipo de combustible real en Colombia: "diesel" (ACPM), "corriente" (gasolina corriente) o "extra" (gasolina extra para motores turbo/alta compresión).
+   - Rendimiento realista en km/galón en topografía de montaña colombiana (Manizales / Caldas).
+   - Nota técnica concisa de 1 a 2 frases con motor, tanque oficial y aptitud operativa (4x4, carga, pasajeros, trocha).
 
-Responde ÚNICAMENTE un JSON válido con esta estructura:
+Responde ÚNICAMENTE un JSON válido sin texto extra ni bloques markdown:
 {
   "capacidadTanqueLitros": 100,
   "capacidadTanqueGalones": 26.4,
   "tipoCombustible": "diesel",
   "consumoKmPorGalon": 24,
-  "fichaInvestigadaNota": "Ficha oficial de fábrica: Tanque de 100 L (26.4 gal). Motor turbodiésel con rendimiento de ~24 km/gal en cordillera."
+  "fichaInvestigadaNota": "Tanque oficial de 100 L (26.4 gal). Motor turbodiésel con rendimiento estimado de ~24 km/gal en montaña."
 }`
 
   const body = {
@@ -178,7 +232,7 @@ Responde ÚNICAMENTE un JSON válido con esta estructura:
   }
 
   try {
-    const { res } = await llamarGemini(body)
+    const { res, usoBusqueda } = await llamarGeminiConBusqueda(body)
     if (!res) return null
 
     const data = (await res.json()) as {
@@ -188,24 +242,37 @@ Responde ÚNICAMENTE un JSON válido con esta estructura:
     if (!texto) return null
 
     const parsed = JSON.parse(limpiarJson(texto)) as Partial<FichaInvestigadaVehiculo>
-    const gal = Number(parsed.capacidadTanqueGalones)
-    const lit = Number(parsed.capacidadTanqueLitros)
+    const galRaw = Number(parsed.capacidadTanqueGalones)
+    const litRaw = Number(parsed.capacidadTanqueLitros)
     const kmGal = Number(parsed.consumoKmPorGalon)
 
-    if (!Number.isFinite(gal) || gal <= 0) return null
+    const litValido = Number.isFinite(litRaw) && litRaw >= 4 && litRaw <= 2500
+    const galValido = Number.isFinite(galRaw) && galRaw >= 1 && galRaw <= 650
 
-    const litrosValidos = Number.isFinite(lit) && lit > 0 ? Number(lit.toFixed(1)) : Number((gal * 3.78541).toFixed(1))
-    const galonesValidos = Number(gal.toFixed(1))
-    const kmValido = Number.isFinite(kmGal) && kmGal > 0 ? Number(kmGal.toFixed(1)) : 20
-    const comb = parsed.tipoCombustible === 'corriente' || parsed.tipoCombustible === 'extra' ? parsed.tipoCombustible : 'diesel'
-    const nota = String(parsed.fichaInvestigadaNota || '').trim() || `Ficha investigada por IA: Tanque oficial de ${galonesValidos} gal (${litrosValidos} L).`
+    if (!galValido && !litValido) return null
+
+    const litrosValidos = litValido ? Number(litRaw.toFixed(1)) : Number((galRaw * 3.78541).toFixed(1))
+    const galonesValidos = galValido ? Number(galRaw.toFixed(1)) : Number((litrosValidos / 3.78541).toFixed(1))
+    const kmValido = Number.isFinite(kmGal) && kmGal >= 2 && kmGal <= 220 ? Number(kmGal.toFixed(1)) : 20
+    const comb =
+      parsed.tipoCombustible === 'corriente' ||
+      parsed.tipoCombustible === 'extra' ||
+      parsed.tipoCombustible === 'diesel'
+        ? parsed.tipoCombustible
+        : vehiculo.tipo === 'camion'
+          ? 'diesel'
+          : 'corriente'
+    const notaBase =
+      String(parsed.fichaInvestigadaNota || '').trim() ||
+      `Tanque oficial de ${galonesValidos} gal (${litrosValidos} L). Rendimiento estimado: ~${kmValido} km/gal.`
+    const prefijo = usoBusqueda ? '✨ Gemini IA (Web): ' : '✨ Gemini IA: '
 
     return {
       capacidadTanqueGalones: galonesValidos,
       capacidadTanqueLitros: litrosValidos,
       consumoKmPorGalon: kmValido,
       tipoCombustible: comb,
-      fichaInvestigadaNota: nota.startsWith('✨') ? nota : `✨ Gemini IA: ${nota}`,
+      fichaInvestigadaNota: notaBase.startsWith('✨') ? notaBase : `${prefijo}${notaBase}`,
     }
   } catch (err) {
     console.warn('Error investigando vehículo con Gemini AI:', err)

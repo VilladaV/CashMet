@@ -1,3 +1,6 @@
+import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { db } from '@/lib/firebase/config'
+import { COLLECTIONS } from '@/lib/firebase/collections'
 import { listarNomina, type Nomina } from '@/lib/firebase/nominaRepo'
 import {
   actualizarKilometraje,
@@ -6,25 +9,44 @@ import {
   type Vehiculo,
 } from '@/lib/firebase/vehiculosRepo'
 import { crearMovimiento } from '@/lib/firebase/movimientosRepo'
+import { crearEvento } from '@/lib/firebase/calendarioRepo'
 import { hoyISO } from '@/lib/fechas'
-import { calcularConsumoMision, obtenerPrecioGalon } from './preciosCombustible'
+import {
+  calcularConsumoMision,
+  esPrecioDesactualizado,
+  establecerPreciosCombustibleCache,
+  obtenerPrecioGalon,
+  obtenerPreciosCombustibleActuales,
+  PRECIOS_COMBUSTIBLE_BASE_COLOMBIA,
+} from './preciosCombustible'
 import {
   calcularCombustibleRalenti,
   PARADAS_RUTA_ESCOLAR_MATUTINA,
   PARADAS_RUTA_ESCOLAR_VESPERTINA,
+  PARADAS_RUTA_MERCADO_CAMPESINO,
 } from './geo'
 import {
   conductorDeRutaEnCuadrante,
-  EVENTOS_RADAR_PREDETERMINADOS,
-  generarCronicaMisionNarrativa,
+  evaluarDesenlaceMisionLocal,
+  filtrarEventosRadarVigentes,
+  generarLlamadasComunitariasRespaldo,
   investigarFichaVehiculoIA,
   seleccionarVehiculosOptimosMision,
 } from './gemaEngine'
+import {
+  buscarNoticiasVialesRealesAI,
+  consultarPreciosCombustibleRealesAI,
+  generarLlamadasComunitariasIA,
+  resolverMisionConIA,
+} from './gemaAI'
 import { investigarVehiculoConGeminiAI } from '@/ai/gemini'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
+  LiquidacionCombustibleRegistro,
+  MensajeGema,
   MisionComunitaria,
+  PreciosCombustible,
   RutaHabitual,
   TanqueoRegistro,
   TarjetaCombustibleReserva,
@@ -32,29 +54,42 @@ import type {
   VehiculoOperativo,
 } from './types'
 
-const CLAVE_STORAGE = 'bears_reserve_data_v2'
+// Documentos dentro de COLLECTIONS.CONFIGURACION_SISTEMA (autorizado por firestore.rules e incluido en Backup)
+const DOC_CONFIG = 'bears_reserve_config'
+const DOC_OPERACIONES = 'bears_reserve_operaciones'
+const DOC_COMBUSTIBLE = 'bears_reserve_combustible'
+const DOC_CHAT = 'bears_reserve_chat'
 
-interface EstadoPersistenteBears {
+const CLAVE_STORAGE_LEGACY = 'bears_reserve_data_v2'
+const INTERVALO_ESCANEO_RADAR_MS = 6 * 60 * 60 * 1000 // Auto-refrescar radar cada 6 horas
+
+export interface EstadoBearsCompleto {
   vehiculosExtra: Record<string, Partial<VehiculoOperativo>>
   empleadosExtra: Record<string, Partial<EmpleadoOperativo>>
+  rutasHabituales: RutaHabitual[]
+  rotacionContador: number
   turnos: TurnoSemanal[]
   misiones: MisionComunitaria[]
-  rutasHabituales: RutaHabitual[]
   eventosRadar: EventoRadarLocal[]
+  ultimoEscaneoRadarEn: number
   tarjetaCombustible: TarjetaCombustibleReserva
+  historialTarjetas: TarjetaCombustibleReserva[]
+  preciosCombustible: PreciosCombustible
+  chatMensajes: MensajeGema[]
 }
 
-const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
+export const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
   {
     id: 'rut-escolar-manana',
     nombre: 'Ruta Escolar Rural Matutina (Veredas ➔ Colegios)',
-    descripcion: 'Salida 06:00 AM desde Base Finca El Guadual. Recorrido por veredas San Peregrino, La Linda y La Cabaña recogiendo 14 niños campesinos (con paradas de espera al ralentí) y dejada en Escuela La Trinidad y colegios urbanos de Manizales.',
+    descripcion:
+      'Salida 06:00 AM desde Base Finca El Guadual. Recorrido por veredas San Peregrino, La Linda y La Cabaña recogiendo 14 niños campesinos (con paradas de espera al ralentí) y dejada en Escuela La Trinidad y colegios urbanos de Manizales.',
     origen: 'Base Finca El Guadual (San Peregrino)',
     destino: 'Escuela La Trinidad & Colegios Manizales',
     distanciaKm: 38.4,
     duracionMinutos: 90,
     minutosRodamiento: 55,
-    minutosRalenti: 35, // 8 paradas x 3-4 min esperando niños con morrales
+    minutosRalenti: 35,
     diasSemana: [1, 2, 3, 4, 5],
     tipoHorario: 'manana',
     horaSalida: '06:00',
@@ -65,7 +100,8 @@ const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
   {
     id: 'rut-escolar-tarde',
     nombre: 'Ruta Escolar Rural Vespertina (Colegios ➔ Veredas)',
-    descripcion: 'Salida 15:00 (3:00 PM) desde Base Finca El Guadual. Recogida de niños en colegios de Manizales y Escuela La Trinidad, dejada puerta a puerta en sus casas en veredas La Cabaña, La Linda y San Peregrino, y retorno a Base.',
+    descripcion:
+      'Salida 15:00 (3:00 PM) desde Base Finca El Guadual. Recogida de niños en colegios de Manizales y Escuela La Trinidad, dejada puerta a puerta en sus casas en veredas La Cabaña, La Linda y San Peregrino, y retorno a Base.',
     origen: 'Base Finca El Guadual (San Peregrino)',
     destino: 'Veredas La Cabaña, La Linda & San Peregrino',
     distanciaKm: 38.4,
@@ -82,7 +118,8 @@ const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
   {
     id: 'rut-mercado-campesino',
     nombre: 'Ruta Solidaria Día de Mercado (Transporte Agrícola)',
-    descripcion: 'Salida sábados 05:30 AM desde Base Finca El Guadual. Auxilio a pequeños productores campesinos de veredas para transportar plátano, café y hortalizas a la Plaza de Mercado de Manizales.',
+    descripcion:
+      'Salida sábados 05:30 AM desde Base Finca El Guadual. Auxilio a pequeños productores campesinos de veredas para transportar plátano, café y hortalizas a la Plaza de Mercado de Manizales.',
     origen: 'Base Finca El Guadual (San Peregrino)',
     destino: 'Plaza de Mercado / Central de Manizales',
     distanciaKm: 42,
@@ -94,117 +131,384 @@ const RUTAS_HABITUALES_INICIALES: RutaHabitual[] = [
     horaSalida: '05:30',
     esAutomatica: false,
     activa: true,
+    coordenadasParadas: PARADAS_RUTA_MERCADO_CAMPESINO,
   },
 ]
 
-const estadoInicial = (): EstadoPersistenteBears => {
+function nuevaTarjetaMes(mes: string): TarjetaCombustibleReserva {
+  return {
+    id: `tarjeta-${mes}`,
+    mes,
+    saldoAcumuladoCOP: 0,
+    saldoLiquidadoCOP: 0,
+    totalGalonesMes: 0,
+    tanqueos: [],
+    liquidaciones: [],
+    liquidadoEnCashmet: false,
+  }
+}
+
+export function saldoPendienteTarjeta(tarjeta: TarjetaCombustibleReserva): number {
+  const liquidado =
+    typeof tarjeta.saldoLiquidadoCOP === 'number'
+      ? tarjeta.saldoLiquidadoCOP
+      : tarjeta.liquidadoEnCashmet
+        ? tarjeta.saldoAcumuladoCOP
+        : 0
+  return Math.max(0, Math.round(tarjeta.saldoAcumuladoCOP - liquidado))
+}
+
+function estadoInicialVacio(): EstadoBearsCompleto {
   const mesActual = hoyISO().slice(0, 7)
   return {
     vehiculosExtra: {},
     empleadosExtra: {},
+    rutasHabituales: structuredClone(RUTAS_HABITUALES_INICIALES),
+    rotacionContador: 0,
     turnos: [],
     misiones: [],
-    rutasHabituales: RUTAS_HABITUALES_INICIALES,
-    eventosRadar: EVENTOS_RADAR_PREDETERMINADOS,
-    tarjetaCombustible: {
-      id: `tarjeta-${mesActual}`,
-      mes: mesActual,
-      saldoAcumuladoCOP: 0,
-      totalGalonesMes: 0,
-      tanqueos: [],
-      liquidadoEnCashmet: false,
-    },
-  }
-}
-
-function leerEstadoLocal(): EstadoPersistenteBears {
-  try {
-    const raw = localStorage.getItem(CLAVE_STORAGE)
-    if (raw) {
-      const parsed = JSON.parse(raw) as EstadoPersistenteBears
-      const mesActual = hoyISO().slice(0, 7)
-      if (parsed.tarjetaCombustible?.mes !== mesActual) {
-        parsed.tarjetaCombustible = {
-          id: `tarjeta-${mesActual}`,
-          mes: mesActual,
-          saldoAcumuladoCOP: 0,
-          totalGalonesMes: 0,
-          tanqueos: [],
-          liquidadoEnCashmet: false,
-        }
-      }
-      if (!parsed.rutasHabituales || parsed.rutasHabituales.length === 0) {
-        parsed.rutasHabituales = RUTAS_HABITUALES_INICIALES
-      }
-      if (parsed.eventosRadar && Array.isArray(parsed.eventosRadar)) {
-        parsed.eventosRadar = parsed.eventosRadar.filter(
-          (e) => e.id !== 'rad-sim-6' && !e.titulo.toLowerCase().includes('standby')
-        )
-      }
-      if (!parsed.eventosRadar || parsed.eventosRadar.length === 0) {
-        parsed.eventosRadar = EVENTOS_RADAR_PREDETERMINADOS
-      }
-      return parsed
-    }
-  } catch {
-    /* fallback */
-  }
-  return estadoInicial()
-}
-
-function guardarEstadoLocal(estado: EstadoPersistenteBears) {
-  try {
-    localStorage.setItem(CLAVE_STORAGE, JSON.stringify(estado))
-  } catch {
-    /* error storage */
-  }
-}
-
-function obtenerHabilitadoGuardado(vehiculoId: string): boolean | undefined {
-  try {
-    const raw = localStorage.getItem('bears_reserve_habilitados_map_v1')
-    if (raw) {
-      const map = JSON.parse(raw) as Record<string, boolean>
-      if (typeof map[vehiculoId] === 'boolean') {
-        return map[vehiculoId]
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return undefined
-}
-
-export function obtenerEmpleadoHabilitadoGuardado(empId: string): boolean | undefined {
-  try {
-    const raw = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
-    if (raw) {
-      const map = JSON.parse(raw) as Record<string, boolean>
-      if (typeof map[empId] === 'boolean') {
-        return map[empId]
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return undefined
-}
-
-export function guardarEmpleadoHabilitado(empId: string, habilitado: boolean) {
-  try {
-    const raw = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
-    const map: Record<string, boolean> = raw ? JSON.parse(raw) : {}
-    map[empId] = habilitado
-    localStorage.setItem('bears_reserve_empleados_habilitados_map_v1', JSON.stringify(map))
-  } catch {
-    /* ignore */
+    eventosRadar: [],
+    ultimoEscaneoRadarEn: 0,
+    tarjetaCombustible: nuevaTarjetaMes(mesActual),
+    historialTarjetas: [],
+    preciosCombustible: { ...PRECIOS_COMBUSTIBLE_BASE_COLOMBIA },
+    chatMensajes: [],
   }
 }
 
 /**
- * Mapea un empleado de la nómina de CashMet a un EmpleadoOperativo de Bear's Reserve.
+ * Sanitiza recursivamente cualquier objeto para Firestore:
+ * elimina `undefined` y `NaN`, pero conserva `false`, `0`, `""`, `[]` y `{}`.
  */
-function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>): EmpleadoOperativo {
+function sanitizarFirestore<T>(valor: T): T {
+  if (valor === null || valor === undefined) return valor
+  if (typeof valor === 'number') {
+    return (Number.isFinite(valor) ? valor : 0) as unknown as T
+  }
+  if (Array.isArray(valor)) {
+    return valor
+      .filter((item) => item !== undefined)
+      .map((item) => sanitizarFirestore(item)) as unknown as T
+  }
+  if (typeof valor === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(valor as Record<string, unknown>)) {
+      if (v === undefined) continue
+      out[k] = sanitizarFirestore(v)
+    }
+    return out as T
+  }
+  return valor
+}
+
+// ---------------------------------------------------------------------------
+// CACHÉ EN MEMORIA SINCRONIZADA CON FIRESTORE + MIGRACIÓN LEGACY
+// ---------------------------------------------------------------------------
+
+let cacheEstado: EstadoBearsCompleto | null = null
+let promesaHidratacion: Promise<EstadoBearsCompleto> | null = null
+
+export function __resetCacheBearsParaTests(): void {
+  cacheEstado = null
+  promesaHidratacion = null
+  establecerPreciosCombustibleCache(null)
+}
+
+function normalizarRutas(rutas?: RutaHabitual[]): RutaHabitual[] {
+  if (!Array.isArray(rutas) || rutas.length === 0) {
+    return structuredClone(RUTAS_HABITUALES_INICIALES)
+  }
+  return rutas.map((r) => {
+    if (
+      r.id === 'rut-mercado-campesino' &&
+      (!r.coordenadasParadas || r.coordenadasParadas.length < 2)
+    ) {
+      return { ...r, coordenadasParadas: PARADAS_RUTA_MERCADO_CAMPESINO }
+    }
+    if (
+      r.id === 'rut-escolar-manana' &&
+      (!r.coordenadasParadas || r.coordenadasParadas.length < 2)
+    ) {
+      return { ...r, coordenadasParadas: PARADAS_RUTA_ESCOLAR_MATUTINA }
+    }
+    if (
+      r.id === 'rut-escolar-tarde' &&
+      (!r.coordenadasParadas || r.coordenadasParadas.length < 2)
+    ) {
+      return { ...r, coordenadasParadas: PARADAS_RUTA_ESCOLAR_VESPERTINA }
+    }
+    return r
+  })
+}
+
+function migrarMesTarjetaSiCambio(estado: EstadoBearsCompleto): boolean {
+  const mesActual = hoyISO().slice(0, 7)
+  if (!estado.tarjetaCombustible) {
+    estado.tarjetaCombustible = nuevaTarjetaMes(mesActual)
+    return true
+  }
+  if (estado.tarjetaCombustible.mes !== mesActual) {
+    const anterior = estado.tarjetaCombustible
+    if (anterior.saldoAcumuladoCOP > 0 || anterior.tanqueos.length > 0) {
+      const yaArchivada = estado.historialTarjetas.some((h) => h.id === anterior.id)
+      if (!yaArchivada) {
+        estado.historialTarjetas = [anterior, ...estado.historialTarjetas].slice(0, 24)
+      }
+    }
+    estado.tarjetaCombustible = nuevaTarjetaMes(mesActual)
+    return true
+  }
+  return false
+}
+
+function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(CLAVE_STORAGE_LEGACY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<EstadoBearsCompleto>
+
+    const vehiculosExtra = { ...(parsed.vehiculosExtra || {}) }
+    const empleadosExtra = { ...(parsed.empleadosExtra || {}) }
+
+    const rawVehHab = localStorage.getItem('bears_reserve_habilitados_map_v1')
+    if (rawVehHab) {
+      const map = JSON.parse(rawVehHab) as Record<string, boolean>
+      for (const [id, val] of Object.entries(map)) {
+        if (typeof val === 'boolean') {
+          vehiculosExtra[id] = { ...(vehiculosExtra[id] || {}), disponibleParaTrabajo: val }
+        }
+      }
+    }
+
+    const rawEmpHab = localStorage.getItem('bears_reserve_empleados_habilitados_map_v1')
+    if (rawEmpHab) {
+      const map = JSON.parse(rawEmpHab) as Record<string, boolean>
+      for (const [id, val] of Object.entries(map)) {
+        if (typeof val === 'boolean') {
+          empleadosExtra[id] = { ...(empleadosExtra[id] || {}), activo: val }
+        }
+      }
+    }
+
+    const rotacionContador = Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
+
+    return {
+      vehiculosExtra,
+      empleadosExtra,
+      rutasHabituales: parsed.rutasHabituales,
+      rotacionContador: Number.isFinite(rotacionContador) ? rotacionContador : 0,
+      turnos: Array.isArray(parsed.turnos) ? parsed.turnos : [],
+      misiones: Array.isArray(parsed.misiones) ? parsed.misiones : [],
+      eventosRadar: filtrarEventosRadarVigentes(parsed.eventosRadar || []),
+      tarjetaCombustible: parsed.tarjetaCombustible,
+    }
+  } catch {
+    return null
+  }
+}
+
+async function persistirDoc(docId: string, data: Record<string, unknown>): Promise<void> {
+  try {
+    await setDoc(
+      doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId),
+      sanitizarFirestore({ ...data, actualizado: Date.now() })
+    )
+  } catch (err) {
+    console.warn(`Error persistiendo ${docId} en Firestore:`, err)
+  }
+}
+
+async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
+  await persistirDoc(DOC_CONFIG, {
+    vehiculosExtra: estado.vehiculosExtra,
+    empleadosExtra: estado.empleadosExtra,
+    rutasHabituales: estado.rutasHabituales,
+    rotacionContador: estado.rotacionContador,
+  })
+}
+
+async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> {
+  await persistirDoc(DOC_OPERACIONES, {
+    turnos: estado.turnos,
+    // Limitamos historial en el doc a las últimas 250 misiones para mantener el documento ligero
+    misiones: estado.misiones.slice(0, 250),
+    eventosRadar: estado.eventosRadar,
+    ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
+  })
+}
+
+async function persistirCombustible(estado: EstadoBearsCompleto): Promise<void> {
+  await persistirDoc(DOC_COMBUSTIBLE, {
+    tarjetaCombustible: estado.tarjetaCombustible,
+    historialTarjetas: estado.historialTarjetas.slice(0, 24),
+    preciosCombustible: estado.preciosCombustible,
+  })
+}
+
+async function persistirChat(estado: EstadoBearsCompleto): Promise<void> {
+  await persistirDoc(DOC_CHAT, {
+    chatMensajes: estado.chatMensajes.slice(-60),
+  })
+}
+
+/**
+ * Hidrata el estado completo de Bear's Reserve desde Firestore.
+ * Si Firestore aún no tiene documentos, migra automáticamente cualquier estado legacy de localStorage.
+ */
+export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCompleto> {
+  if (cacheEstado && !forzar) return cacheEstado
+  if (promesaHidratacion && !forzar) return promesaHidratacion
+
+  promesaHidratacion = (async () => {
+    const base = estadoInicialVacio()
+    let existiaEnFirestore = false
+
+    try {
+      const [snapCfg, snapOp, snapComb, snapChat] = await Promise.all([
+        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_CONFIG)),
+        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_OPERACIONES)),
+        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_COMBUSTIBLE)),
+        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_CHAT)),
+      ])
+
+      if (snapCfg.exists()) {
+        existiaEnFirestore = true
+        const d = snapCfg.data() as Partial<EstadoBearsCompleto>
+        base.vehiculosExtra = d.vehiculosExtra || {}
+        base.empleadosExtra = d.empleadosExtra || {}
+        base.rutasHabituales = normalizarRutas(d.rutasHabituales)
+        base.rotacionContador = Number(d.rotacionContador) || 0
+      }
+
+      if (snapOp.exists()) {
+        existiaEnFirestore = true
+        const d = snapOp.data() as Partial<EstadoBearsCompleto>
+        base.turnos = Array.isArray(d.turnos) ? d.turnos : []
+        base.misiones = Array.isArray(d.misiones) ? d.misiones : []
+        base.eventosRadar = filtrarEventosRadarVigentes(d.eventosRadar || [])
+        base.ultimoEscaneoRadarEn = Number(d.ultimoEscaneoRadarEn) || 0
+      }
+
+      if (snapComb.exists()) {
+        existiaEnFirestore = true
+        const d = snapComb.data() as Partial<EstadoBearsCompleto>
+        if (d.tarjetaCombustible) base.tarjetaCombustible = d.tarjetaCombustible
+        base.historialTarjetas = Array.isArray(d.historialTarjetas) ? d.historialTarjetas : []
+        if (d.preciosCombustible && d.preciosCombustible.corrientePorGalon > 0) {
+          base.preciosCombustible = d.preciosCombustible
+        }
+      }
+
+      if (snapChat.exists()) {
+        existiaEnFirestore = true
+        const d = snapChat.data() as Partial<EstadoBearsCompleto>
+        base.chatMensajes = Array.isArray(d.chatMensajes) ? d.chatMensajes : []
+      }
+    } catch (err) {
+      console.warn('Error leyendo Bear\'s Reserve desde Firestore:', err)
+    }
+
+    // Migración única desde localStorage si Firestore estaba vacío
+    if (!existiaEnFirestore) {
+      const legacy = leerMigracionLegacyLocalStorage()
+      if (legacy) {
+        if (legacy.vehiculosExtra) base.vehiculosExtra = legacy.vehiculosExtra
+        if (legacy.empleadosExtra) base.empleadosExtra = legacy.empleadosExtra
+        if (legacy.rutasHabituales) base.rutasHabituales = normalizarRutas(legacy.rutasHabituales)
+        if (typeof legacy.rotacionContador === 'number') base.rotacionContador = legacy.rotacionContador
+        if (legacy.turnos) base.turnos = legacy.turnos
+        if (legacy.misiones) base.misiones = legacy.misiones
+        if (legacy.eventosRadar) base.eventosRadar = legacy.eventosRadar
+        if (legacy.tarjetaCombustible) base.tarjetaCombustible = legacy.tarjetaCombustible
+      }
+      migrarMesTarjetaSiCambio(base)
+      await Promise.all([
+        persistirConfig(base),
+        persistirOperaciones(base),
+        persistirCombustible(base),
+      ])
+    } else {
+      const cambioMes = migrarMesTarjetaSiCambio(base)
+      if (cambioMes) {
+        await persistirCombustible(base)
+      }
+    }
+
+    establecerPreciosCombustibleCache(base.preciosCombustible)
+    cacheEstado = base
+    return base
+  })()
+
+  try {
+    return await promesaHidratacion
+  } finally {
+    promesaHidratacion = null
+  }
+}
+
+function obtenerCacheSincrono(): EstadoBearsCompleto {
+  if (!cacheEstado) {
+    cacheEstado = estadoInicialVacio()
+  }
+  return cacheEstado
+}
+
+// ---------------------------------------------------------------------------
+// MAPEO DE EMPLEADOS Y VEHÍCULOS (SIN EXCLUSIONES POR CÓDIGO, CON MODO DEMO PERSISTENTE)
+// ---------------------------------------------------------------------------
+
+const EMPLEADOS_DEMO: Nomina[] = [
+  {
+    id: 'emp-demo-1',
+    nombreCompleto: 'Andrés Morales Gómez',
+    cargo: 'Conductor de Rescate Rural',
+    activo: true,
+    tipoContrato: 'indefinido',
+    salarioBaseMensual: 0,
+  },
+  {
+    id: 'emp-demo-2',
+    nombreCompleto: 'Valentina Osorio Ríos',
+    cargo: 'Mecánica y Enlace Veredal',
+    activo: true,
+    tipoContrato: 'indefinido',
+    salarioBaseMensual: 0,
+  },
+]
+
+const VEHICULOS_DEMO: Vehiculo[] = [
+  {
+    id: 'veh-demo-1',
+    placa: 'WML421',
+    marca: 'Chevrolet',
+    linea: 'Kodiak 4x4 Rescate',
+    modelo: 2018,
+    tipo: 'camion',
+    activo: true,
+    estado: 'Disponible',
+    notas: 'Camión 4x4 con winche pesado para rescate en barro y carga.',
+    mantenimiento: { kilometrajeActual: 142350, tareas: [] },
+  },
+  {
+    id: 'veh-demo-2',
+    placa: 'KJR890',
+    marca: 'Toyota',
+    linea: 'Land Cruiser Troop Carrier',
+    modelo: 2021,
+    tipo: 'carro',
+    activo: true,
+    estado: 'Disponible',
+    notas: 'Campero 4x4 con capacidad de pasajeros para ruta escolar rural.',
+    mantenimiento: { kilometrajeActual: 89400, tareas: [] },
+  },
+]
+
+function transformarEmpleado(
+  nomina: Nomina,
+  extra: Partial<EmpleadoOperativo> | undefined,
+  turnosSemana: TurnoSemanal[]
+): EmpleadoOperativo {
   const nombre = nomina.nombreCompleto || 'Colaborador'
   const cargo = nomina.cargo || 'Operador'
   const habilidadesDefault: string[] = []
@@ -212,47 +516,47 @@ function transformarEmpleado(nomina: Nomina, extra?: Partial<EmpleadoOperativo>)
   const cargoLower = cargo.toLowerCase()
   if (cargoLower.includes('chofer') || cargoLower.includes('conductor')) {
     habilidadesDefault.push('Conducción en alta montaña', 'Navegación de trochas')
-  } else if (cargoLower.includes('mecanic') || cargoLower.includes('tecnic')) {
+  } else if (cargoLower.includes('mecanic') || cargoLower.includes('mecánic') || cargoLower.includes('tecnic')) {
     habilidadesDefault.push('Mecánica de emergencia', 'Manejo de winche y eslingas')
   } else {
-    habilidadesDefault.push('Logística comunitaria', 'Primeros auxilios básicos')
+    habilidadesDefault.push('Logística comunitaria', 'Primeros auxilios básicos', 'Apoyo operativo')
   }
 
-  const activo = (() => {
-    // Si en CashMet está inactivo, en Bear's Reserve también
-    if (nomina.activo === false) return false
-    // Si se especificó explícitamente en el extra
-    if (typeof extra?.activo === 'boolean') return extra.activo
-    // Si está en el mapa persistente de habilitados de Bear's Reserve
-    const guardado = obtenerEmpleadoHabilitadoGuardado(nomina.id)
-    if (typeof guardado === 'boolean') return guardado
-    // Por defecto: excluir cargos netamente de oficina o que nada tienen que ver (ej: Editor)
-    if (cargoLower.includes('editor') || cargoLower.includes('audiovisual')) return false
-    return true
-  })()
+  const activoEnCashmet = nomina.activo !== false
+  // NUNCA excluimos a nadie por código según su cargo: solo manda CashMet + el switch explícito del usuario
+  const activo = !activoEnCashmet
+    ? false
+    : typeof extra?.activo === 'boolean'
+      ? extra.activo
+      : true
+
+  const horasCalculadas = turnosSemana
+    .filter((t) => t.empleadoId === nomina.id)
+    .reduce((acc, t) => acc + t.horas, 0)
 
   return {
     id: nomina.id,
     nominaId: nomina.id,
     nombreCompleto: nombre,
     cargo,
-    habilidades: extra?.habilidades || habilidadesDefault,
-    horasSemanalesAsignadas: extra?.horasSemanalesAsignadas || 0,
-    maxHorasSemanales: 42,
+    habilidades: extra?.habilidades?.length ? extra.habilidades : habilidadesDefault,
+    horasSemanalesAsignadas: Number(horasCalculadas.toFixed(1)),
+    maxHorasSemanales: extra?.maxHorasSemanales || 42,
     activo,
+    activoEnCashmet,
     horariosNoDisponibles: extra?.horariosNoDisponibles || [],
     enTurnoActivo: extra?.enTurnoActivo ?? false,
     turnoActualTexto: extra?.turnoActualTexto,
   }
 }
 
-/**
- * Mapea un vehículo de CashMet a VehiculoOperativo de Bear's Reserve (sin categorías rígidas).
- */
-function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): VehiculoOperativo {
+function transformarVehiculo(
+  v: Vehiculo,
+  extra: Partial<VehiculoOperativo> | undefined,
+  idsEnMision: Set<string>,
+  esDemo = false
+): VehiculoOperativo {
   const tipo = v.tipo || 'carro'
-
-  // Deducción técnica offline de respaldo
   const fichaFallback = investigarFichaVehiculoIA(
     v.marca,
     v.linea,
@@ -263,12 +567,29 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     v.capacidad
   )
 
-  const capacidadGalones = extra?.capacidadTanqueGalones ?? fichaFallback.capacidadTanqueGalones
-  const capacidadLitros = extra?.capacidadTanqueLitros ?? fichaFallback.capacidadTanqueLitros
-  const tipoCombustible = extra?.tipoCombustible ?? fichaFallback.tipoCombustible
-  const consumoBase = extra?.consumoKmPorGalon ?? fichaFallback.consumoKmPorGalon
-  const notaFicha = extra?.fichaInvestigadaNota ?? fichaFallback.fichaInvestigadaNota
-  const investigadoIA = extra?.investigadoIA ?? false
+  const disponibleEnCashmet = v.activo !== false && (v.estado === 'Disponible' || !v.estado)
+  const disponibleParaTrabajo = !disponibleEnCashmet
+    ? false
+    : typeof extra?.disponibleParaTrabajo === 'boolean'
+      ? extra.disponibleParaTrabajo
+      : esDemo
+
+  const nivelComb = extra?.nivelCombustiblePorc ?? 85
+  const estadoCalculado: VehiculoOperativo['estado'] =
+    !disponibleEnCashmet || v.estado === 'En reparación'
+      ? 'mantenimiento'
+      : idsEnMision.has(v.id)
+        ? 'en_mision'
+        : nivelComb <= 15
+          ? 'reserva'
+          : 'disponible'
+
+  const kmCashmet = v.mantenimiento?.kilometrajeActual ?? 0
+  const kmFinal = esDemo
+    ? Math.max(kmCashmet, extra?.kilometrajeActual ?? 0)
+    : kmCashmet > 0
+      ? kmCashmet
+      : extra?.kilometrajeActual ?? 0
 
   return {
     id: v.id,
@@ -283,28 +604,19 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
     claseVehiculo: v.claseVehiculo,
     capacidadTexto: v.capacidad,
     cilindraje: v.cilindraje,
-    disponibleParaTrabajo: (() => {
-      const disponibleEnCashmet = v.activo !== false && (v.estado === 'Disponible' || !v.estado)
-      if (!disponibleEnCashmet) return false
-
-      if (typeof extra?.disponibleParaTrabajo === 'boolean') {
-        return extra.disponibleParaTrabajo
-      }
-      const persistente = obtenerHabilitadoGuardado(v.id)
-      if (typeof persistente === 'boolean') {
-        return persistente
-      }
-      return false
-    })(),
-    investigadoIA,
-    fichaInvestigadaNota: notaFicha,
-    estado: extra?.estado || (v.estado === 'En reparación' ? 'mantenimiento' : 'disponible'),
-    tipoCombustible,
-    capacidadTanqueGalones: capacidadGalones,
-    capacidadTanqueLitros: capacidadLitros,
-    nivelCombustiblePorc: extra?.nivelCombustiblePorc ?? 85,
-    consumoKmPorGalon: consumoBase,
-    kilometrajeActual: v.mantenimiento?.kilometrajeActual ?? 0,
+    disponibleParaTrabajo,
+    disponibleEnCashmet,
+    estadoCashmet: v.estado || (v.activo === false ? 'Inactivo' : 'Disponible'),
+    investigadoIA: extra?.investigadoIA ?? false,
+    fuenteFicha: extra?.fuenteFicha,
+    fichaInvestigadaNota: extra?.fichaInvestigadaNota ?? fichaFallback.fichaInvestigadaNota,
+    estado: estadoCalculado,
+    tipoCombustible: extra?.tipoCombustible ?? fichaFallback.tipoCombustible,
+    capacidadTanqueGalones: extra?.capacidadTanqueGalones ?? fichaFallback.capacidadTanqueGalones,
+    capacidadTanqueLitros: extra?.capacidadTanqueLitros ?? fichaFallback.capacidadTanqueLitros,
+    nivelCombustiblePorc: nivelComb,
+    consumoKmPorGalon: extra?.consumoKmPorGalon ?? fichaFallback.consumoKmPorGalon,
+    kilometrajeActual: kmFinal,
     desgasteLlantasPorc: extra?.desgasteLlantasPorc ?? 18,
     estadoBateriaPorc: extra?.estadoBateriaPorc ?? 95,
     totalGalonesConsumidos: extra?.totalGalonesConsumidos ?? 0,
@@ -312,144 +624,69 @@ function transformarVehiculo(v: Vehiculo, extra?: Partial<VehiculoOperativo>): V
   }
 }
 
-// -------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // OPERACIONES PÚBLICAS
-// -------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 export async function listarEmpleadosBears(): Promise<EmpleadoOperativo[]> {
-  const nominados = await listarNomina().catch(() => [])
-  const estado = leerEstadoLocal()
-  if (!nominados.length) {
-    return [
-      {
-        id: 'emp-demo-1',
-        nombreCompleto: 'Andrés Morales Gómez',
-        cargo: 'Conductor de Rescate Rural',
-        habilidades: ['Conducción en barrizal', 'Mecánica de emergencia', 'Winche pesado'],
-        horasSemanalesAsignadas: 28,
-        maxHorasSemanales: 42,
-        activo: true,
-        horariosNoDisponibles: [
-          { diaSemana: 2, horaInicio: '18:00', horaFin: '22:00', motivo: 'Universidad de Caldas' },
-          { diaSemana: 4, horaInicio: '18:00', horaFin: '22:00', motivo: 'Universidad de Caldas' },
-        ],
-        enTurnoActivo: true,
-        turnoActualTexto: 'Guardia Matutina Activa',
-      },
-      {
-        id: 'emp-demo-2',
-        nombreCompleto: 'Valentina Osorio Ríos',
-        cargo: 'Coordinadora de Enlace Veredal',
-        habilidades: ['Primeros auxilios', 'Logística comunitaria', 'Radio comunicaciones'],
-        horasSemanalesAsignadas: 35,
-        maxHorasSemanales: 42,
-        activo: true,
-        horariosNoDisponibles: [
-          { diaSemana: 6, horaInicio: '08:00', horaFin: '12:00', motivo: 'Formación de posgrado' },
-        ],
-        enTurnoActivo: true,
-        turnoActualTexto: 'Guardia Matutina Activa',
-      },
-    ]
-  }
-  return nominados.map((n) => transformarEmpleado(n, estado.empleadosExtra[n.id]))
+  const [nominados, estado] = await Promise.all([
+    listarNomina().catch(() => []),
+    hidratarEstadoBears(),
+  ])
+  const fuente = nominados.length > 0 ? nominados : EMPLEADOS_DEMO
+  return fuente.map((n) => transformarEmpleado(n, estado.empleadosExtra[n.id], estado.turnos))
 }
 
 export async function listarVehiculosBears(): Promise<VehiculoOperativo[]> {
-  const listaCashmet = await listarVehiculos().catch(() => [])
-  const estado = leerEstadoLocal()
-  if (!listaCashmet.length) {
-    return [
-      {
-        id: 'veh-demo-1',
-        vehiculoId: 'veh-demo-1',
-        placa: 'WML421',
-        marca: 'Chevrolet',
-        linea: 'Kodiak 4x4 Rescate',
-        modelo: 2018,
-        tipo: 'camion',
-        disponibleParaTrabajo: true,
-        investigadoIA: true,
-        fichaInvestigadaNota: 'Ficha técnica validada con IA: Tanque 55 gal (208.2 L). Rendimiento cordillera: 8.5 km/gal. Diésel/ACPM.',
-        estado: 'disponible',
-        tipoCombustible: 'diesel',
-        capacidadTanqueGalones: 55,
-        capacidadTanqueLitros: 208,
-        nivelCombustiblePorc: 78,
-        consumoKmPorGalon: 8.5,
-        kilometrajeActual: 142350,
-        desgasteLlantasPorc: 24,
-        estadoBateriaPorc: 92,
-        totalGalonesConsumidos: 120,
-        totalCostoCombustibleCOP: 1254000,
-      },
-      {
-        id: 'veh-demo-2',
-        vehiculoId: 'veh-demo-2',
-        placa: 'KJR890',
-        marca: 'Toyota',
-        linea: 'Land Cruiser Troop Carrier',
-        modelo: 2021,
-        tipo: 'carro',
-        disponibleParaTrabajo: true,
-        investigadoIA: true,
-        fichaInvestigadaNota: 'Ficha técnica validada con IA: Tanque 23.8 gal (90 L). Rendimiento trocha: 24 km/gal. Diésel de alto torque.',
-        estado: 'disponible',
-        tipoCombustible: 'diesel',
-        capacidadTanqueGalones: 23.8,
-        capacidadTanqueLitros: 90,
-        nivelCombustiblePorc: 68,
-        consumoKmPorGalon: 24,
-        kilometrajeActual: 89400,
-        desgasteLlantasPorc: 22,
-        estadoBateriaPorc: 95,
-        totalGalonesConsumidos: 84,
-        totalCostoCombustibleCOP: 1331400,
-      },
-    ]
-  }
-  return listaCashmet.map((v) => transformarVehiculo(v, estado.vehiculosExtra[v.id]))
-}
+  const [listaCashmet, estado] = await Promise.all([
+    listarVehiculos().catch(() => []),
+    hidratarEstadoBears(),
+  ])
+  const esDemo = listaCashmet.length === 0
+  const fuente = esDemo ? VEHICULOS_DEMO : listaCashmet
 
-export function guardarExtraVehiculo(id: string, extra: Partial<VehiculoOperativo>) {
-  const estado = leerEstadoLocal()
-  estado.vehiculosExtra[id] = { ...(estado.vehiculosExtra[id] || {}), ...extra }
-  guardarEstadoLocal(estado)
-
-  if (typeof extra.disponibleParaTrabajo === 'boolean') {
-    try {
-      const raw = localStorage.getItem('bears_reserve_habilitados_map_v1')
-      const map = raw ? JSON.parse(raw) : {}
-      map[id] = extra.disponibleParaTrabajo
-      localStorage.setItem('bears_reserve_habilitados_map_v1', JSON.stringify(map))
-    } catch {
-      /* ignore */
+  const idsEnMision = new Set<string>()
+  for (const m of estado.misiones) {
+    if (m.estado === 'en_curso') {
+      for (const va of m.vehiculosAsignados || []) {
+        idsEnMision.add(va.id)
+      }
     }
   }
+
+  return fuente.map((v) => transformarVehiculo(v, estado.vehiculosExtra[v.id], idsEnMision, esDemo))
 }
 
-export function guardarExtraEmpleado(id: string, extra: Partial<EmpleadoOperativo>) {
-  const estado = leerEstadoLocal()
+export async function guardarExtraVehiculo(
+  id: string,
+  extra: Partial<VehiculoOperativo>
+): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  estado.vehiculosExtra[id] = { ...(estado.vehiculosExtra[id] || {}), ...extra }
+  await persistirConfig(estado)
+}
+
+export async function guardarExtraEmpleado(
+  id: string,
+  extra: Partial<EmpleadoOperativo>
+): Promise<void> {
+  const estado = await hidratarEstadoBears()
   estado.empleadosExtra[id] = { ...(estado.empleadosExtra[id] || {}), ...extra }
-  guardarEstadoLocal(estado)
-  if (typeof extra.activo === 'boolean') {
-    guardarEmpleadoHabilitado(id, extra.activo)
-  }
+  await persistirConfig(estado)
 }
 
 /**
- * Investiga la ficha técnica oficial de un vehículo en particular usando la IA de Gemini.
- * Si Gemini no está disponible o falla, utiliza el catálogo técnico de respaldo.
+ * Investiga la ficha técnica de un vehículo usando Gemini IA (con búsqueda web).
+ * Informa honestamente si la fuente fue Gemini IA o el catálogo local de respaldo.
  */
 export async function investigarVehiculoIndividualIA(
   vehiculoId: string
-): Promise<VehiculoOperativo | null> {
+): Promise<{ vehiculo: VehiculoOperativo | null; usoGemini: boolean }> {
   const vehiculos = await listarVehiculosBears()
   const v = vehiculos.find((x) => x.id === vehiculoId || x.vehiculoId === vehiculoId)
-  if (!v) return null
+  if (!v) return { vehiculo: null, usoGemini: false }
 
-  // 1. Investigar con Gemini en vivo
-  let ficha = await investigarVehiculoConGeminiAI({
+  const fichaGemini = await investigarVehiculoConGeminiAI({
     marca: v.marca,
     linea: v.linea,
     tipo: v.tipo,
@@ -460,9 +697,10 @@ export async function investigarVehiculoIndividualIA(
     capacidadTexto: v.capacidadTexto,
   })
 
-  // 2. Si no hubo respuesta de Gemini, usar catálogo técnico de respaldo
-  if (!ficha) {
-    ficha = investigarFichaVehiculoIA(
+  const usoGemini = Boolean(fichaGemini)
+  const ficha =
+    fichaGemini ??
+    investigarFichaVehiculoIA(
       v.marca,
       v.linea,
       v.tipo,
@@ -471,10 +709,10 @@ export async function investigarVehiculoIndividualIA(
       v.carroceria,
       v.capacidadTexto
     )
-  }
 
-  guardarExtraVehiculo(v.id, {
+  await guardarExtraVehiculo(v.id, {
     investigadoIA: true,
+    fuenteFicha: usoGemini ? 'gemini' : 'catalogo_local',
     fichaInvestigadaNota: ficha.fichaInvestigadaNota,
     capacidadTanqueGalones: ficha.capacidadTanqueGalones,
     capacidadTanqueLitros: ficha.capacidadTanqueLitros,
@@ -483,17 +721,18 @@ export async function investigarVehiculoIndividualIA(
   })
 
   const actualizados = await listarVehiculosBears()
-  return actualizados.find((x) => x.id === vehiculoId) || null
+  return {
+    vehiculo: actualizados.find((x) => x.id === vehiculoId) || null,
+    usoGemini,
+  }
 }
 
-/**
- * Investigar con IA (Gemini) las fichas técnicas oficiales.
- * Por defecto procesa los pendientes, o todos si se fuerza la actualización.
- */
 export async function investigarVehiculosPendientesIA(
   forzarTodos = false
 ): Promise<{
   procesados: number
+  conGemini: number
+  conCatalogoLocal: number
   nombres: string[]
 }> {
   const vehiculos = await listarVehiculosBears()
@@ -501,156 +740,386 @@ export async function investigarVehiculosPendientesIA(
     ? vehiculos.filter((v) => v.disponibleParaTrabajo)
     : vehiculos.filter((v) => v.disponibleParaTrabajo && !v.investigadoIA)
 
-  const procesadosNombres: string[] = []
+  const nombres: string[] = []
+  let conGemini = 0
+  let conCatalogoLocal = 0
 
   for (const v of pendientes) {
-    // 1. Intentar investigar con Gemini en vivo
-    let ficha = await investigarVehiculoConGeminiAI({
-      marca: v.marca,
-      linea: v.linea,
-      tipo: v.tipo,
-      modelo: v.modelo,
-      notas: v.notasCashmet,
-      carroceria: v.carroceria,
-      cilindraje: v.cilindraje,
-      capacidadTexto: v.capacidadTexto,
-    })
-
-    // 2. Respaldo offline
-    if (!ficha) {
-      ficha = investigarFichaVehiculoIA(
-        v.marca,
-        v.linea,
-        v.tipo,
-        v.modelo,
-        v.notasCashmet,
-        v.carroceria,
-        v.capacidadTexto
-      )
+    const res = await investigarVehiculoIndividualIA(v.id)
+    if (res.vehiculo) {
+      nombres.push(`${v.marca} ${v.linea}`)
+      if (res.usoGemini) conGemini++
+      else conCatalogoLocal++
     }
-
-    guardarExtraVehiculo(v.id, {
-      investigadoIA: true,
-      fichaInvestigadaNota: ficha.fichaInvestigadaNota,
-      capacidadTanqueGalones: ficha.capacidadTanqueGalones,
-      capacidadTanqueLitros: ficha.capacidadTanqueLitros,
-      consumoKmPorGalon: ficha.consumoKmPorGalon,
-      tipoCombustible: ficha.tipoCombustible,
-    })
-    procesadosNombres.push(`${v.marca} ${v.linea}`)
   }
 
   return {
-    procesados: pendientes.length,
-    nombres: procesadosNombres,
+    procesados: nombres.length,
+    conGemini,
+    conCatalogoLocal,
+    nombres,
   }
 }
 
-/**
- * Restablece discretamente el desgaste de llantas de un vehículo al 0% (llantas nuevas instaladas).
- */
-export function reemplazarLlantasVehiculo(id: string) {
-  guardarExtraVehiculo(id, { desgasteLlantasPorc: 0 })
+export async function reemplazarLlantasVehiculo(id: string): Promise<void> {
+  await guardarExtraVehiculo(id, { desgasteLlantasPorc: 0 })
 }
 
 export function obtenerRotacionContador(): number {
-  try {
-    return Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
-  } catch {
-    return 0
-  }
+  return obtenerCacheSincrono().rotacionContador || 0
 }
 
-export function guardarRotacionContador(contador: number): void {
-  try {
-    localStorage.setItem('bears_reserve_rotacion_contador_v1', String(contador))
-  } catch {
-    /* ignore */
-  }
+export async function guardarRotacionContador(contador: number): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  estado.rotacionContador = contador
+  await persistirConfig(estado)
 }
 
 export function listarTurnos(): TurnoSemanal[] {
-  return leerEstadoLocal().turnos
+  return obtenerCacheSincrono().turnos
 }
 
-export function guardarTurnos(turnos: TurnoSemanal[]) {
-  const estado = leerEstadoLocal()
+export async function guardarTurnos(turnos: TurnoSemanal[]): Promise<void> {
+  const estado = await hidratarEstadoBears()
   estado.turnos = turnos
-  guardarEstadoLocal(estado)
+  await persistirOperaciones(estado)
 }
 
 export function listarMisiones(): MisionComunitaria[] {
-  return leerEstadoLocal().misiones
+  return obtenerCacheSincrono().misiones
 }
 
-export function guardarMision(mision: MisionComunitaria) {
-  const estado = leerEstadoLocal()
+export async function guardarMision(mision: MisionComunitaria): Promise<void> {
+  const estado = await hidratarEstadoBears()
   const idx = estado.misiones.findIndex((m) => m.id === mision.id)
   if (idx >= 0) {
     estado.misiones[idx] = mision
   } else {
     estado.misiones.unshift(mision)
   }
-  guardarEstadoLocal(estado)
+  await persistirOperaciones(estado)
+}
+
+/**
+ * Despacha o programa una misión operativa:
+ * - Calcula consumo y costo reales según los vehículos asignados y su tipoCombustible.
+ * - Si es inmediata (`en_curso`), registra `iniciadaEn` y `finalizaEstimadaEn` para resolución automática.
+ * - Si es programada (`programada`), crea además un evento real en el Calendario de CashMet.
+ * - Si proviene de un evento de radar, marca el evento como `despachado: true`.
+ */
+export async function crearMisionOperativa(
+  misionBase: MisionComunitaria
+): Promise<MisionComunitaria> {
+  const estado = await hidratarEstadoBears()
+  const vehiculos = await listarVehiculosBears()
+
+  const km = Math.max(0.5, Number(misionBase.distanciaKmIdaYVuelta) || 10)
+  const durMin = Math.max(10, Math.round(Number(misionBase.duracionMinutos) || 60))
+
+  const vehsParticipantes = vehiculos.filter((v) =>
+    (misionBase.vehiculosAsignados || []).some((va) => va.id === v.id)
+  )
+
+  let galTotal = 0
+  let costoTotal = 0
+  let desgasteMax = 0
+  for (const v of vehsParticipantes) {
+    const c = calcularConsumoMision(v.tipo, km, misionBase.terreno, v.consumoKmPorGalon, v.tipoCombustible)
+    const galRal = calcularCombustibleRalenti(v.tipo, misionBase.minutosRalentiEstimados || 0)
+    const galVeh = Number((c.galones + galRal).toFixed(2))
+    galTotal += galVeh
+    costoTotal += Math.round(galVeh * obtenerPrecioGalon(v.tipoCombustible))
+    desgasteMax = Math.max(desgasteMax, c.desgasteLlantasPorc)
+  }
+
+  const ahora = Date.now()
+  const esEnCurso = misionBase.estado === 'en_curso'
+  const horaIni = new Date(ahora).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+  const horaFinEst = new Date(ahora + durMin * 60_000).toLocaleTimeString('es-CO', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  let eventoCalendarioId = misionBase.eventoCalendarioId
+  if (misionBase.estado === 'programada' && !eventoCalendarioId) {
+    try {
+      eventoCalendarioId = await crearEvento({
+        titulo: `🐻 Bear's Reserve: ${misionBase.titulo}`,
+        descripcion: `Destino: ${misionBase.destino} (${km} km · ~${durMin} min). ${misionBase.impactoSocial}`,
+        tipo: 'personal',
+        fechaInicio: misionBase.fecha,
+        allDay: true,
+        recurrente: false,
+        recordatorios: [{ minutosAntes: 1440 }, { minutosAntes: 60 }],
+        relacionado: {
+          vehiculoId: misionBase.vehiculosAsignados[0]?.id,
+        },
+      })
+    } catch {
+      /* si calendario falla, la misión igual se guarda */
+    }
+  }
+
+  const mision: MisionComunitaria = {
+    ...misionBase,
+    distanciaKmIdaYVuelta: km,
+    duracionMinutos: durMin,
+    galonesConsumidosEstimados: Number(galTotal.toFixed(2)),
+    costoCombustibleEstimadoCOP: costoTotal,
+    desgasteLlantasIncrementoPorc: Number(desgasteMax.toFixed(2)),
+    iniciadaEn: esEnCurso ? misionBase.iniciadaEn ?? ahora : undefined,
+    finalizaEstimadaEn: esEnCurso
+      ? misionBase.finalizaEstimadaEn ?? ahora + durMin * 60_000
+      : undefined,
+    horaInicio: esEnCurso ? misionBase.horaInicio ?? horaIni : undefined,
+    horaFin: esEnCurso ? misionBase.horaFin ?? horaFinEst : undefined,
+    eventoCalendarioId,
+  }
+
+  if (mision.eventoRadarId) {
+    estado.eventosRadar = estado.eventosRadar.map((ev) =>
+      ev.id === mision.eventoRadarId ? { ...ev, despachado: true } : ev
+    )
+  }
+
+  const idx = estado.misiones.findIndex((m) => m.id === mision.id)
+  if (idx >= 0) estado.misiones[idx] = mision
+  else estado.misiones.unshift(mision)
+
+  await persistirOperaciones(estado)
+  return mision
+}
+
+export async function iniciarMisionProgramada(misionId: string): Promise<MisionComunitaria | null> {
+  const estado = await hidratarEstadoBears()
+  const m = estado.misiones.find((x) => x.id === misionId)
+  if (!m || m.estado !== 'programada') return null
+
+  const ahora = Date.now()
+  const durMin = Math.max(10, m.duracionMinutos || 60)
+  m.estado = 'en_curso'
+  m.iniciadaEn = ahora
+  m.finalizaEstimadaEn = ahora + durMin * 60_000
+  m.horaInicio = new Date(ahora).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+  m.horaFin = new Date(m.finalizaEstimadaEn).toLocaleTimeString('es-CO', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  await persistirOperaciones(estado)
+  return m
+}
+
+export async function cancelarMisionProgramada(misionId: string): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  estado.misiones = estado.misiones.filter((m) => !(m.id === misionId && m.estado === 'programada'))
+  await persistirOperaciones(estado)
 }
 
 export function listarRutasHabituales(): RutaHabitual[] {
-  return leerEstadoLocal().rutasHabituales
+  return obtenerCacheSincrono().rutasHabituales
 }
 
-export function guardarRutaHabitual(ruta: RutaHabitual) {
-  const estado = leerEstadoLocal()
-  const idx = estado.rutasHabituales.findIndex((r) => r.id === ruta.id)
+export async function guardarRutaHabitual(ruta: RutaHabitual): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  const copia = { ...ruta }
+  const idx = estado.rutasHabituales.findIndex((r) => r.id === copia.id)
   if (idx >= 0) {
-    estado.rutasHabituales[idx] = ruta
+    estado.rutasHabituales[idx] = copia
   } else {
-    estado.rutasHabituales.push(ruta)
+    estado.rutasHabituales.push(copia)
   }
-  guardarEstadoLocal(estado)
+  await persistirConfig(estado)
 }
+
+// ---------------------------------------------------------------------------
+// RADAR EN VIVO CON EXPIRACIÓN AUTOMÁTICA (1–2 DÍAS)
+// ---------------------------------------------------------------------------
 
 export function leerEventosRadar(): EventoRadarLocal[] {
-  return leerEstadoLocal().eventosRadar
+  return filtrarEventosRadarVigentes(obtenerCacheSincrono().eventosRadar)
 }
 
-export function guardarEventosRadar(eventos: EventoRadarLocal[]) {
-  const estado = leerEstadoLocal()
-  estado.eventosRadar = eventos.filter(
-    (e) => e.id !== 'rad-sim-6' && !e.titulo.toLowerCase().includes('standby')
-  )
-  guardarEstadoLocal(estado)
+export async function guardarEventosRadar(eventos: EventoRadarLocal[]): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  estado.eventosRadar = filtrarEventosRadarVigentes(eventos)
+  await persistirOperaciones(estado)
 }
 
-export function descartarEventoRadar(eventoId: string) {
-  const estado = leerEstadoLocal()
+export async function descartarEventoRadar(eventoId: string): Promise<void> {
+  const estado = await hidratarEstadoBears()
   estado.eventosRadar = estado.eventosRadar.filter((e) => e.id !== eventoId)
-  guardarEstadoLocal(estado)
+  await persistirOperaciones(estado)
 }
 
-export function agregarEventoRadarManual(evento: EventoRadarLocal) {
-  const estado = leerEstadoLocal()
-  estado.eventosRadar = [evento, ...estado.eventosRadar.filter((e) => e.id !== evento.id)]
-  guardarEstadoLocal(estado)
+export async function agregarEventoRadarManual(evento: EventoRadarLocal): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  const ahora = Date.now()
+  const conVigencia: EventoRadarLocal = {
+    ...evento,
+    creadoEn: evento.creadoEn ?? ahora,
+    expiraEn: evento.expiraEn ?? ahora + 36 * 60 * 60 * 1000,
+  }
+  estado.eventosRadar = [
+    conVigencia,
+    ...filtrarEventosRadarVigentes(estado.eventosRadar).filter((e) => e.id !== conVigencia.id),
+  ]
+  await persistirOperaciones(estado)
 }
+
+/**
+ * Purga eventos expirados (> 1–2 días) y, si toca refresco periódico (cada 6h) o lo pide el usuario:
+ * 1. Busca noticias viales reales recientes con Gemini + Google Search Grounding.
+ * 2. Regenera llamadas comunitarias veredales frescas cuando faltan o caducaron.
+ */
+export async function sincronizarRadarAutomatico(forzar = false): Promise<{
+  eventos: EventoRadarLocal[]
+  noticiasRealesAgregadas: number
+  llamadasAgregadas: number
+}> {
+  const estado = await hidratarEstadoBears()
+  const ahora = Date.now()
+
+  const vigentesAntes = filtrarEventosRadarVigentes(estado.eventosRadar, ahora)
+  const expiradosEliminados = vigentesAntes.length !== estado.eventosRadar.length
+  estado.eventosRadar = vigentesAntes
+
+  const debeEscanear =
+    forzar ||
+    ahora - (estado.ultimoEscaneoRadarEn || 0) >= INTERVALO_ESCANEO_RADAR_MS ||
+    vigentesAntes.length === 0
+
+  if (!debeEscanear) {
+    if (expiradosEliminados) await persistirOperaciones(estado)
+    return {
+      eventos: estado.eventosRadar,
+      noticiasRealesAgregadas: 0,
+      llamadasAgregadas: 0,
+    }
+  }
+
+  const titulosExistentes = estado.eventosRadar.map((e) => e.titulo)
+  const noticiasVigentes = estado.eventosRadar.filter((e) => e.esNoticiaWebReal && !e.despachado)
+  const llamadasVigentes = estado.eventosRadar.filter((e) => !e.esNoticiaWebReal && !e.despachado)
+
+  let noticiasReales: EventoRadarLocal[] = []
+  let llamadasNuevas: EventoRadarLocal[] = []
+
+  // Buscar noticias web reales (solo cuando se fuerza o hay menos de 2 noticias vigentes)
+  if (forzar || noticiasVigentes.length < 2) {
+    noticiasReales = await buscarNoticiasVialesRealesAI(titulosExistentes)
+  }
+
+  // Regenerar llamadas comunitarias frescas (si hay menos de 2 vigentes o si el usuario pide escanear)
+  if (forzar || llamadasVigentes.length < 2) {
+    const cantNecesaria = forzar ? 1 : Math.max(1, 2 - llamadasVigentes.length)
+    const titulosConWeb = [...titulosExistentes, ...noticiasReales.map((n) => n.titulo)]
+    llamadasNuevas = await generarLlamadasComunitariasIA(titulosConWeb, cantNecesaria)
+    if (llamadasNuevas.length === 0) {
+      llamadasNuevas = generarLlamadasComunitariasRespaldo(
+        [...estado.eventosRadar, ...noticiasReales],
+        cantNecesaria,
+        ahora
+      )
+    }
+  }
+
+  estado.eventosRadar = filtrarEventosRadarVigentes(
+    [...noticiasReales, ...llamadasNuevas, ...estado.eventosRadar],
+    ahora
+  ).slice(0, 12)
+  estado.ultimoEscaneoRadarEn = ahora
+
+  await persistirOperaciones(estado)
+  return {
+    eventos: estado.eventosRadar,
+    noticiasRealesAgregadas: noticiasReales.length,
+    llamadasAgregadas: llamadasNuevas.length,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PRECIOS DE COMBUSTIBLE EN VIVO + TARJETA MENSUAL CON HISTORIAL
+// ---------------------------------------------------------------------------
 
 export function leerTarjetaCombustible(): TarjetaCombustibleReserva {
-  return leerEstadoLocal().tarjetaCombustible
+  const estado = obtenerCacheSincrono()
+  return estado.tarjetaCombustible
+}
+
+export function leerHistorialTarjetas(): TarjetaCombustibleReserva[] {
+  return obtenerCacheSincrono().historialTarjetas || []
+}
+
+export function leerPreciosCombustible(): PreciosCombustible {
+  return obtenerCacheSincrono().preciosCombustible || obtenerPreciosCombustibleActuales()
+}
+
+export async function sincronizarPreciosCombustibleReales(
+  forzar = false
+): Promise<{ precios: PreciosCombustible; actualizadoDesdeWeb: boolean }> {
+  const estado = await hidratarEstadoBears()
+  if (!forzar && !esPrecioDesactualizado(estado.preciosCombustible)) {
+    establecerPreciosCombustibleCache(estado.preciosCombustible)
+    return { precios: estado.preciosCombustible, actualizadoDesdeWeb: false }
+  }
+
+  const reales = await consultarPreciosCombustibleRealesAI()
+  if (reales) {
+    estado.preciosCombustible = reales
+    establecerPreciosCombustibleCache(reales)
+    await persistirCombustible(estado)
+    return { precios: reales, actualizadoDesdeWeb: true }
+  }
+
+  establecerPreciosCombustibleCache(estado.preciosCombustible)
+  return { precios: estado.preciosCombustible, actualizadoDesdeWeb: false }
+}
+
+export async function guardarPreciosCombustibleManuales(valores: {
+  corrientePorGalon: number
+  dieselPorGalon: number
+  extraPorGalon: number
+}): Promise<PreciosCombustible> {
+  const estado = await hidratarEstadoBears()
+  const ahora = Date.now()
+  const nuevos: PreciosCombustible = {
+    corrientePorGalon: Math.max(1000, Math.round(valores.corrientePorGalon)),
+    dieselPorGalon: Math.max(1000, Math.round(valores.dieselPorGalon)),
+    extraPorGalon: Math.max(1000, Math.round(valores.extraPorGalon)),
+    actualizado: `${hoyISO()} · Editado manualmente`,
+    fuente: 'Configuración manual del coordinador',
+    consultadoEn: ahora,
+    esFuenteReal: false,
+    editadoManualmente: true,
+  }
+  estado.preciosCombustible = nuevos
+  establecerPreciosCombustibleCache(nuevos)
+  await persistirCombustible(estado)
+  return nuevos
 }
 
 /**
  * Tanqueo de combustible al 100% que se acumula en la Tarjeta mensual de Bear's Reserve.
+ * No duplica `totalGalonesConsumidos` (ese contador suma únicamente el consumo en misiones).
  */
 export async function tanquearVehiculoCompleto(
   vehiculoId: string,
   motivo: TanqueoRegistro['motivo'] = 'reserva_automatica'
 ): Promise<{ tanqueo: TanqueoRegistro; tarjeta: TarjetaCombustibleReserva }> {
+  const estado = await hidratarEstadoBears()
+  migrarMesTarjetaSiCambio(estado)
+
   const vehiculos = await listarVehiculosBears()
   const v = vehiculos.find((x) => x.id === vehiculoId || x.vehiculoId === vehiculoId)
   if (!v) throw new Error('Vehículo no encontrado')
 
   const capacidad = v.capacidadTanqueGalones || 18
-  const nivelActualPorc = v.nivelCombustiblePorc ?? 50
+  const nivelActualPorc = Math.max(0, Math.min(100, v.nivelCombustiblePorc ?? 50))
   const galonesFaltantes = Number((capacidad * (1 - nivelActualPorc / 100)).toFixed(2))
+  if (galonesFaltantes <= 0.05) {
+    throw new Error('El tanque ya está lleno.')
+  }
 
   const precioGalon = obtenerPrecioGalon(v.tipoCombustible)
   const totalCOP = Math.round(galonesFaltantes * precioGalon)
@@ -658,7 +1127,7 @@ export async function tanquearVehiculoCompleto(
   const ahoraHora = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
   const tanqueo: TanqueoRegistro = {
-    id: `tq-${Date.now()}`,
+    id: `tq-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     vehiculoId: v.id,
     vehiculoPlaca: v.placa,
     vehiculoNombre: `${v.marca} ${v.linea}`,
@@ -672,81 +1141,180 @@ export async function tanquearVehiculoCompleto(
     motivo,
   }
 
-  guardarExtraVehiculo(v.id, {
+  estado.vehiculosExtra[v.id] = {
+    ...(estado.vehiculosExtra[v.id] || {}),
     nivelCombustiblePorc: 100,
-    totalGalonesConsumidos: (v.totalGalonesConsumidos || 0) + galonesFaltantes,
     totalCostoCombustibleCOP: (v.totalCostoCombustibleCOP || 0) + totalCOP,
-  })
+  }
 
-  const estado = leerEstadoLocal()
   estado.tarjetaCombustible.saldoAcumuladoCOP += totalCOP
   estado.tarjetaCombustible.totalGalonesMes = Number(
     (estado.tarjetaCombustible.totalGalonesMes + galonesFaltantes).toFixed(2)
   )
   estado.tarjetaCombustible.tanqueos.unshift(tanqueo)
-  guardarEstadoLocal(estado)
+  // Al acumular un nuevo tanqueo vuelve a existir saldo pendiente por liquidar
+  estado.tarjetaCombustible.liquidadoEnCashmet =
+    saldoPendienteTarjeta(estado.tarjetaCombustible) <= 0
+
+  await Promise.all([persistirConfig(estado), persistirCombustible(estado)])
 
   return { tanqueo, tarjeta: estado.tarjetaCombustible }
 }
 
+// Lock contra doble clic en liquidación
+let liquidacionEnCurso = false
+
 /**
- * Completa una misión comunitaria soportando múltiples vehículos y tripulantes:
- * - Suma los km al odómetro real de CashMet de cada vehículo asignado.
- * - Consume combustible según terreno andino.
- * - Si baja a reserva (15% o menos), auto-tanquea al 100% y lo carga a la Tarjeta.
- * - Incrementa desgaste de llantas de cada vehículo.
- * - Genera la crónica humana en `cronicaHistoria`.
+ * Liquida el saldo PENDIENTE de la Tarjeta de Combustible en CashMet (soporta múltiples
+ * liquidaciones en el mismo mes si luego vuelven a hacerse tanqueos, o liquidar un mes archivado).
+ */
+export async function liquidarTarjetaEnCashmet(
+  cuentaBancoId: string,
+  tarjetaIdObjetivo?: string
+): Promise<TarjetaCombustibleReserva> {
+  if (liquidacionEnCurso) {
+    throw new Error('Ya hay una liquidación en proceso. Espera un momento.')
+  }
+  liquidacionEnCurso = true
+  try {
+    const estado = await hidratarEstadoBears()
+    const tarjeta =
+      tarjetaIdObjetivo && tarjetaIdObjetivo !== estado.tarjetaCombustible.id
+        ? estado.historialTarjetas.find((t) => t.id === tarjetaIdObjetivo)
+        : estado.tarjetaCombustible
+
+    if (!tarjeta) throw new Error('Tarjeta de combustible no encontrada.')
+
+    const pendiente = saldoPendienteTarjeta(tarjeta)
+    if (pendiente <= 0) {
+      throw new Error('No hay saldo pendiente por liquidar en esta tarjeta.')
+    }
+
+    const hoy = hoyISO()
+    const movId = await crearMovimiento({
+      fecha: hoy,
+      tipo: 'gasto',
+      concepto: `Combustible Bear's Reserve (${tarjeta.mes})`,
+      descripcion: `Liquidación de combustible flota comunitaria Bear's Reserve (${tarjeta.totalGalonesMes} gal mes · ${tarjeta.tanqueos.length} tanqueos).`,
+      monto: pendiente,
+      categoria: 'Transporte',
+      cuentaBancoId,
+      fuente: 'manual',
+    })
+
+    const registro: LiquidacionCombustibleRegistro = {
+      id: `liq-${Date.now()}`,
+      fecha: hoy,
+      montoCOP: pendiente,
+      galones: tarjeta.totalGalonesMes,
+      tanqueosCount: tarjeta.tanqueos.length,
+      cuentaBancoId,
+      movimientoId: movId,
+    }
+
+    tarjeta.saldoLiquidadoCOP = (tarjeta.saldoLiquidadoCOP || 0) + pendiente
+    tarjeta.liquidaciones = [registro, ...(tarjeta.liquidaciones || [])]
+    tarjeta.liquidadoEnCashmet = saldoPendienteTarjeta(tarjeta) <= 0
+    tarjeta.fechaLiquidacion = hoy
+    tarjeta.cuentaBancoIdCashmet = cuentaBancoId
+    tarjeta.movimientoIdCashmet = movId
+
+    await persistirCombustible(estado)
+    return tarjeta
+  } finally {
+    liquidacionEnCurso = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// COMPLETAR MISIONES + AUTO-RESOLUCIÓN CON IA AL CUMPLIR TIEMPO ESTIMADO
+// ---------------------------------------------------------------------------
+
+/**
+ * Completa una misión comunitaria (usado por el motor automático con IA y por rutas habituales):
+ * - Si no se fuerza `resultadoManual`, usa Gemini IA (o respaldo realista) para decidir resultado,
+ *   factor de distancia real y crónica narrativa humana.
+ * - Suma km reales al odómetro en CashMet.
+ * - Consume combustible respetando `tipoCombustible` real del vehículo (sin doble conteo).
+ * - Si baja a ≤15%, auto-tanquea al 100% y lo carga a la Tarjeta.
  */
 export async function completarMisionComunitaria(
   misionId: string,
-  resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
+  resultadoManual?: 'exito' | 'parcial' | 'fallida_dificultad'
 ): Promise<{
   mision: MisionComunitaria
   tanqueosAutomaticos: TanqueoRegistro[]
   cronica: string
 }> {
-  const estado = leerEstadoLocal()
+  const estado = await hidratarEstadoBears()
   const mision = estado.misiones.find((m) => m.id === misionId)
   if (!mision) throw new Error('Misión no encontrada')
 
-  // Idempotencia: si la misión ya se completó, no se vuelven a sumar kilómetros,
-  // combustible ni desgaste de llantas.
-  if (mision.estado === 'completada') {
+  // Idempotencia estricta
+  if (mision.estado === 'completada' || mision.estado === 'inconclusa_repliegue') {
     return {
       mision,
       tanqueosAutomaticos: [],
-      cronica: mision.cronicaHistoria ?? generarCronicaMisionNarrativa(mision, [], [], resultado),
+      cronica: mision.cronicaHistoria ?? '',
     }
   }
 
   const todosVehiculos = await listarVehiculosBears()
-
-  // Determinar vehículos asignados
-  const vehiculosIds =
-    mision.vehiculosAsignados?.length > 0
-      ? mision.vehiculosAsignados.map((x) => x.id)
-      : []
-
-  const vehiculosParticipantes = todosVehiculos.filter((v) =>
-    vehiculosIds.includes(v.id) || vehiculosIds.includes(v.vehiculoId)
+  const vehiculosIds = (mision.vehiculosAsignados || []).map((x) => x.id)
+  const vehiculosParticipantes = todosVehiculos.filter(
+    (v) => vehiculosIds.includes(v.id) || vehiculosIds.includes(v.vehiculoId)
   )
+  const nombresTrip = (mision.tripulantesAsignados || []).map((t) => t.nombre)
 
+  // Evaluar desenlace con Gemini IA (o respaldo determinista realista)
+  let resultado: 'exito' | 'parcial' | 'fallida_dificultad' = resultadoManual || 'exito'
+  let factorDistanciaReal = 1.0
+  let cronica = ''
+  let resueltaPorIA = false
+
+  if (!resultadoManual) {
+    const resIA = await resolverMisionConIA(mision, vehiculosParticipantes, nombresTrip)
+    if (resIA) {
+      resultado = resIA.resultado
+      factorDistanciaReal = resIA.factorDistanciaReal
+      cronica = resIA.cronicaHistoria
+      resueltaPorIA = true
+    } else {
+      const resLocal = evaluarDesenlaceMisionLocal(mision, vehiculosParticipantes, nombresTrip)
+      resultado = resLocal.resultado
+      factorDistanciaReal = resLocal.factorDistanciaReal
+      cronica = resLocal.cronicaHistoria
+    }
+  } else {
+    const resLocal = evaluarDesenlaceMisionLocal(mision, vehiculosParticipantes, nombresTrip)
+    resultado = resultadoManual
+    factorDistanciaReal = resultadoManual === 'fallida_dificultad' ? 0.65 : 1.0
+    cronica = resLocal.cronicaHistoria
+  }
+
+  const kmReales = Math.max(0, Number((mision.distanciaKmIdaYVuelta * factorDistanciaReal).toFixed(1)))
   const tanqueosAuto: TanqueoRegistro[] = []
-  let totalGalonesConsumidosMision = 0
+  let totalGalonesMision = 0
+  let totalCostoMision = 0
+  let maxDesgaste = 0
 
   for (const v of vehiculosParticipantes) {
     const { galones: galonesRodamiento, desgasteLlantasPorc } = calcularConsumoMision(
       v.tipo,
-      mision.distanciaKmIdaYVuelta,
+      kmReales,
       mision.terreno,
-      v.consumoKmPorGalon
+      v.consumoKmPorGalon,
+      v.tipoCombustible
     )
     const galonesRalenti = calcularCombustibleRalenti(v.tipo, mision.minutosRalentiEstimados || 0)
     const galones = Number((galonesRodamiento + galonesRalenti).toFixed(2))
-    totalGalonesConsumidosMision += galones
+    const costoVeh = Math.round(galones * obtenerPrecioGalon(v.tipoCombustible))
 
-    // Actualizar odómetro en CashMet
-    const nuevoKm = Math.round(v.kilometrajeActual + mision.distanciaKmIdaYVuelta)
+    totalGalonesMision += galones
+    totalCostoMision += costoVeh
+    maxDesgaste = Math.max(maxDesgaste, desgasteLlantasPorc)
+
+    const nuevoKm = Math.round(v.kilometrajeActual + kmReales)
     if (v.vehiculoId && !v.vehiculoId.startsWith('veh-demo')) {
       const existe = await obtenerVehiculo(v.vehiculoId).catch(() => null)
       if (existe) {
@@ -754,42 +1322,39 @@ export async function completarMisionComunitaria(
       }
     }
 
-    // Combustible y llantas
     const galonesCapacidad = v.capacidadTanqueGalones || 20
     const porcConsumido = (galones / galonesCapacidad) * 100
-    let nuevoNivel = Math.max(1, Math.round(v.nivelCombustiblePorc - porcConsumido))
-    const nuevoDesgaste = Math.min(100, Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2)))
+    const nuevoNivel = Math.max(1, Math.min(100, Math.round(v.nivelCombustiblePorc - porcConsumido)))
+    const nuevoDesgaste = Math.min(
+      100,
+      Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2))
+    )
+
+    // Siempre sumamos `galones` una sola vez aquí (sin duplicar en tanquearVehiculoCompleto)
+    await guardarExtraVehiculo(v.id, {
+      kilometrajeActual: nuevoKm,
+      nivelCombustiblePorc: nuevoNivel,
+      desgasteLlantasPorc: nuevoDesgaste,
+      totalGalonesConsumidos: Number(((v.totalGalonesConsumidos || 0) + galones).toFixed(2)),
+    })
 
     if (nuevoNivel <= 15) {
-      guardarExtraVehiculo(v.id, {
-        kilometrajeActual: nuevoKm,
-        nivelCombustiblePorc: nuevoNivel,
-        desgasteLlantasPorc: nuevoDesgaste,
-      })
       const resTq = await tanquearVehiculoCompleto(v.id, 'reserva_automatica')
       tanqueosAuto.push(resTq.tanqueo)
-      nuevoNivel = 100
-    } else {
-      guardarExtraVehiculo(v.id, {
-        kilometrajeActual: nuevoKm,
-        nivelCombustiblePorc: nuevoNivel,
-        desgasteLlantasPorc: nuevoDesgaste,
-        totalGalonesConsumidos: (v.totalGalonesConsumidos || 0) + galones,
-      })
     }
   }
 
-  // Generar crónica humana
-  const nombresVehs = vehiculosParticipantes.map((x) => `${x.marca} ${x.linea}`)
-  const nombresTrip = (mision.tripulantesAsignados || []).map((t) => t.nombre)
-  const cronica = generarCronicaMisionNarrativa(mision, nombresVehs, nombresTrip, resultado)
-
-  mision.estado = 'completada'
+  mision.distanciaKmIdaYVuelta = kmReales
+  mision.estado = resultado === 'fallida_dificultad' ? 'inconclusa_repliegue' : 'completada'
   mision.resultado = resultado
   mision.cronicaHistoria = cronica
-  mision.galonesConsumidosEstimados = Number(totalGalonesConsumidosMision.toFixed(2))
+  mision.resueltaPorIA = resueltaPorIA
+  mision.galonesConsumidosEstimados = Number(totalGalonesMision.toFixed(2))
+  mision.costoCombustibleEstimadoCOP = totalCostoMision
+  mision.desgasteLlantasIncrementoPorc = Number(maxDesgaste.toFixed(2))
+  mision.horaFin = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
-  guardarMision(mision)
+  await persistirOperaciones(estado)
 
   return {
     mision,
@@ -798,60 +1363,87 @@ export async function completarMisionComunitaria(
   }
 }
 
+let colaMisionesAutomaticas: Promise<unknown> = Promise.resolve()
+
 /**
- * Liquida la Tarjeta de Combustible en CashMet.
+ * Motor autónomo de ciclo de vida de misiones ⏱️🤖:
+ * 1. Arranca misiones `'programada'` cuya fecha ya llegó (`fecha <= hoy`).
+ * 2. Finaliza automáticamente cualquier misión `'en_curso'` cuyo `finalizaEstimadaEn <= Date.now()`
+ *    (o misiones heredadas de días anteriores), evaluando su desenlace y crónica con IA.
  */
-export async function liquidarTarjetaEnCashmet(cuentaBancoId: string): Promise<TarjetaCombustibleReserva> {
-  const estado = leerEstadoLocal()
-  const tarjeta = estado.tarjetaCombustible
-
-  if (tarjeta.saldoAcumuladoCOP <= 0) {
-    throw new Error('No hay saldo acumulado para liquidar este mes.')
-  }
-  if (tarjeta.liquidadoEnCashmet) {
-    throw new Error('La tarjeta de combustible ya fue liquidada para este mes.')
-  }
-
-  const hoy = hoyISO()
-  const movId = await crearMovimiento({
-    fecha: hoy,
-    tipo: 'gasto',
-    concepto: `Combustible Bear's Reserve (${tarjeta.totalGalonesMes} gal · ${tarjeta.mes})`,
-    descripcion: `Liquidación mensual de combustible flota comunitaria Bear's Reserve. ${tarjeta.tanqueos.length} tanqueos registrados.`,
-    monto: tarjeta.saldoAcumuladoCOP,
-    categoria: 'Transporte',
-    cuentaBancoId,
-    fuente: 'manual',
-  })
-
-  tarjeta.liquidadoEnCashmet = true
-  tarjeta.fechaLiquidacion = hoy
-  tarjeta.cuentaBancoIdCashmet = cuentaBancoId
-  tarjeta.movimientoIdCashmet = movId
-
-  guardarEstadoLocal(estado)
-  return tarjeta
+export function verificarYCompletarMisionesVencidas(): Promise<{
+  misionesFinalizadas: MisionComunitaria[]
+  misionesIniciadas: MisionComunitaria[]
+  tanqueosAutomaticos: TanqueoRegistro[]
+}> {
+  const ejecucion = colaMisionesAutomaticas.then(
+    () => ejecutarVerificacionMisionesVencidas(),
+    () => ejecutarVerificacionMisionesVencidas()
+  )
+  colaMisionesAutomaticas = ejecucion.then(
+    () => undefined,
+    () => undefined
+  )
+  return ejecucion
 }
 
-/**
- * Conductor de una ruta de rutina: sale del cuadrante semanal armado por Gema.
- * Si el cuadrante no tiene a nadie para esa ruta ese día, la cubre el coordinador.
- */
-export function obtenerConductorRuta(rutaId: string, fechaISO: string): { id: string; nombre: string } {
-  const turnos = leerEstadoLocal().turnos || []
+async function ejecutarVerificacionMisionesVencidas(): Promise<{
+  misionesFinalizadas: MisionComunitaria[]
+  misionesIniciadas: MisionComunitaria[]
+  tanqueosAutomaticos: TanqueoRegistro[]
+}> {
+  const estado = await hidratarEstadoBears()
+  const ahora = Date.now()
+  const hoy = hoyISO()
+
+  const misionesIniciadas: MisionComunitaria[] = []
+  const misionesFinalizadas: MisionComunitaria[] = []
+  const tanqueosAutomaticos: TanqueoRegistro[] = []
+
+  // 1. Activar programadas cuya fecha ya llegó
+  for (const m of estado.misiones) {
+    if (m.estado === 'programada' && m.fecha <= hoy) {
+      const iniciada = await iniciarMisionProgramada(m.id)
+      if (iniciada) misionesIniciadas.push(iniciada)
+    }
+  }
+
+  // 2. Auto-finalizar las que ya cumplieron su tiempo estimado (o quedaron de un día anterior)
+  const vencidas = estado.misiones.filter((m) => {
+    if (m.estado !== 'en_curso') return false
+    if (typeof m.finalizaEstimadaEn === 'number' && Number.isFinite(m.finalizaEstimadaEn)) {
+      return ahora >= m.finalizaEstimadaEn
+    }
+    return m.fecha < hoy
+  })
+
+  for (const m of vencidas) {
+    const res = await completarMisionComunitaria(m.id)
+    misionesFinalizadas.push(res.mision)
+    tanqueosAutomaticos.push(...res.tanqueosAutomaticos)
+  }
+
+  return { misionesFinalizadas, misionesIniciadas, tanqueosAutomaticos }
+}
+
+// ---------------------------------------------------------------------------
+// RUTAS HABITUALES Y MOTOR AUTOMÁTICO (RESPETA DÍAS, HORAS Y CONDUCTOR REAL)
+// ---------------------------------------------------------------------------
+
+export function obtenerConductorRuta(
+  rutaId: string,
+  fechaISO: string,
+  tipoHorario?: RutaHabitual['tipoHorario']
+): { id: string; nombre: string } {
+  const turnos = obtenerCacheSincrono().turnos || []
   return (
-    conductorDeRutaEnCuadrante(turnos, rutaId, fechaISO) || {
+    conductorDeRutaEnCuadrante(turnos, rutaId, fechaISO, tipoHorario) || {
       id: 'coord-user',
       nombre: 'Tú (Coordinador General)',
     }
   )
 }
 
-/**
- * Ejecuta una ruta habitual (escolar o comunitaria):
- * Calcula km reales, rodamiento y ralentí. El conductor es el del cuadrante semanal;
- * el vehículo es el fijado en la ruta o, si no hay, el que Gema considere más apto.
- */
 export async function ejecutarRutaHabitual(
   ruta: RutaHabitual,
   idCumplimiento?: string,
@@ -860,7 +1452,7 @@ export async function ejecutarRutaHabitual(
   const vehiculos = await listarVehiculosBears()
 
   const vehiculo =
-    vehiculos.find((v) => v.id === (vehiculoIdElegido || ruta.vehiculoIdDefault)) ||
+    vehiculos.find((v) => v.id === (vehiculoIdElegido || ruta.vehiculoIdDefault) && v.disponibleParaTrabajo) ||
     (vehiculos.length > 0
       ? seleccionarVehiculosOptimosMision(
           { titulo: ruta.nombre, tipo: 'ruta_habitual', impactoSocial: ruta.descripcion },
@@ -869,10 +1461,10 @@ export async function ejecutarRutaHabitual(
       : undefined)
 
   const hoyStr = hoyISO()
-  const conductor = obtenerConductorRuta(ruta.id, hoyStr)
+  const conductor = obtenerConductorRuta(ruta.id, hoyStr, ruta.tipoHorario)
 
-  const misionRuta: MisionComunitaria = {
-    id: `rut-mis-${Date.now()}`,
+  const misionRuta = await crearMisionOperativa({
+    id: `rut-mis-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     titulo: ruta.nombre,
     tipo: 'ruta_habitual',
     prioridad: 'media',
@@ -891,31 +1483,27 @@ export async function ejecutarRutaHabitual(
     tripulantesAsignados: [{ id: conductor.id, nombre: conductor.nombre }],
     galonesConsumidosEstimados: 0,
     costoCombustibleEstimadoCOP: 0,
-    desgasteLlantasIncrementoPorc: 0.3,
+    desgasteLlantasIncrementoPorc: 0,
     fecha: hoyStr,
     estado: 'en_curso',
     impactoSocial: `${ruta.descripcion} · Conductor según cuadrante: ${conductor.nombre}`,
     esNoticiaWebReal: false,
-  }
+  })
 
-  guardarMision(misionRuta)
-  ruta.ultimoCumplimientoFecha = idCumplimiento || hoyStr
-  guardarRutaHabitual(ruta)
+  // Guardar cumplimiento sin mutar el objeto recibido desde el estado React
+  await guardarRutaHabitual({
+    ...ruta,
+    ultimoCumplimientoFecha: idCumplimiento || hoyStr,
+  })
 
+  // La ruta habitual se cierra de inmediato generando su crónica y telemetría
   const res = await completarMisionComunitaria(misionRuta.id, 'exito')
   return { mision: res.mision }
 }
 
-/**
- * Motor Autónomo de Verificación de Rutas Escolares ⏰:
- * Si es día de semana (lunes a viernes) y la hora actual sobrepasa el horario programado,
- * se ejecuta automáticamente la ruta escolar (mañana o tarde) con sus kilómetros y ralentí reales.
- */
 let colaRutasAutomaticas: Promise<unknown> = Promise.resolve()
 
 export function verificarYCumplirRutasAutomaticas(): Promise<{ rutasEjecutadas: string[] }> {
-  // Serializa las verificaciones para que dos montajes del portal no ejecuten
-  // la misma ruta dos veces y dupliquen kilómetros/combustible.
   const ejecucion = colaRutasAutomaticas.then(
     () => ejecutarVerificacionRutasAutomaticas(),
     () => ejecutarVerificacionRutasAutomaticas()
@@ -927,41 +1515,52 @@ export function verificarYCumplirRutasAutomaticas(): Promise<{ rutasEjecutadas: 
   return ejecucion
 }
 
+function horaSalidaADecimal(horaSalida?: string, duracionMinutos = 75): number {
+  if (!horaSalida || !/^\d{1,2}:\d{2}$/.test(horaSalida)) return 7.25
+  const [h, m] = horaSalida.split(':').map(Number)
+  return h + (m + duracionMinutos) / 60
+}
+
 async function ejecutarVerificacionRutasAutomaticas(): Promise<{
   rutasEjecutadas: string[]
 }> {
+  const estado = await hidratarEstadoBears()
   const hoy = hoyISO()
   const fechaObj = new Date()
-  const diaSemana = fechaObj.getDay() // 0=Dom, 1=Lun, ..., 5=Vie, 6=Sab
+  const diaSemana = fechaObj.getDay() // 0=Dom, 1=Lun, ..., 6=Sab
   const horaActualDecimal = fechaObj.getHours() + fechaObj.getMinutes() / 60
 
-  const estado = leerEstadoLocal()
   const ejecutadas: string[] = []
 
-  // De lunes a viernes (1 a 5)
-  if (diaSemana >= 1 && diaSemana <= 5) {
-    for (const r of estado.rutasHabituales) {
-      if (!r.activa || !r.esAutomatica) continue
+  for (const r of [...estado.rutasHabituales]) {
+    if (!r.activa || !r.esAutomatica) continue
+    if (!r.diasSemana.includes(diaSemana)) continue
 
-      // Ruta de la mañana: si ya pasaron las 07:15 AM y no se ha ejecutado hoy
-      if (r.tipoHorario === 'manana' && horaActualDecimal >= 7.25) {
-        const idCumplimiento = `${hoy}-manana`
-        if (r.ultimoCumplimientoFecha !== idCumplimiento) {
-          await ejecutarRutaHabitual(r, idCumplimiento)
-          ejecutadas.push(`${r.nombre} (Automática Mañana)`)
-        }
-      }
+    // Se autoejecuta cuando ya pasó la hora de salida + duración estimada
+    const horaCorte = horaSalidaADecimal(r.horaSalida, r.duracionMinutos || 75)
+    if (horaActualDecimal < horaCorte) continue
 
-      // Ruta de la tarde: si ya pasaron las 16:45 (4:45 PM) y no se ha ejecutado hoy
-      if (r.tipoHorario === 'tarde' && horaActualDecimal >= 16.75) {
-        const idCumplimiento = `${hoy}-tarde`
-        if (r.ultimoCumplimientoFecha !== idCumplimiento) {
-          await ejecutarRutaHabitual(r, idCumplimiento)
-          ejecutadas.push(`${r.nombre} (Automática Tarde)`)
-        }
-      }
-    }
+    const sufijo = r.tipoHorario || r.id
+    const idCumplimiento = `${hoy}-${sufijo}`
+    if (r.ultimoCumplimientoFecha === idCumplimiento) continue
+
+    await ejecutarRutaHabitual(r, idCumplimiento)
+    ejecutadas.push(r.nombre)
   }
 
   return { rutasEjecutadas: ejecutadas }
+}
+
+// ---------------------------------------------------------------------------
+// PERSISTENCIA DEL CHAT DE GEMA EN FIRESTORE
+// ---------------------------------------------------------------------------
+
+export function leerChatGema(): MensajeGema[] {
+  return obtenerCacheSincrono().chatMensajes || []
+}
+
+export async function guardarChatGema(mensajes: MensajeGema[]): Promise<void> {
+  const estado = await hidratarEstadoBears()
+  estado.chatMensajes = mensajes.slice(-60)
+  await persistirChat(estado)
 }

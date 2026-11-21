@@ -1,8 +1,11 @@
-import { hoyISO } from '@/lib/fechas'
+import { hoyISO, isoLocal } from '@/lib/fechas'
+import { resolverCoordenadasLugar } from './geo'
+import { TTL_LLAMADA_COMUNITARIA_MS } from './gemaAI'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
   MisionComunitaria,
+  PreciosCombustible,
   RutaHabitual,
   TipoCombustible,
   TurnoSemanal,
@@ -17,7 +20,17 @@ type RolMision = 'conductor' | 'conductor_pesado' | 'mecanico' | 'winche' | 'aux
 
 const PALABRAS_ROL: Record<RolMision, string[]> = {
   conductor: ['conduc', 'chofer', 'trocha', 'montaña', 'manejo', 'polivalente'],
-  conductor_pesado: ['c2', 'c3', 'pesado', 'camion', 'camión', 'tractomula', 'quinta rueda', '5ta rueda', 'volqueta'],
+  conductor_pesado: [
+    'c2',
+    'c3',
+    'pesado',
+    'camion',
+    'camión',
+    'tractomula',
+    'quinta rueda',
+    '5ta rueda',
+    'volqueta',
+  ],
   mecanico: ['mecan', 'mecán', 'tecnic', 'técnic', 'desvar', 'polivalente'],
   winche: ['winche', 'eslinga', 'remolque', 'rescate', 'barrizal', 'grua', 'grúa', 'polivalente'],
   auxilios: ['auxilio', 'primeros', 'paramédic', 'enfermer', 'aph', 'salud'],
@@ -46,12 +59,25 @@ function afinidadRol(emp: EmpleadoOperativo, rol: RolMision): number {
   return PALABRAS_ROL[rol].reduce((acc, p) => (corpus.includes(p) ? acc + 1 : acc), 0)
 }
 
-function horaAMinutos(h: string): number {
-  const [hh, mm] = h.split(':').map(Number)
-  return (hh || 0) * 60 + (mm || 0)
+function horaAMinutos(h: string, finMedianoche = false): number {
+  const [hh, mm] = String(h || '00:00').split(':').map(Number)
+  const mins = (Number.isFinite(hh) ? hh : 0) * 60 + (Number.isFinite(mm) ? mm : 0)
+  if (finMedianoche && mins === 0) return 24 * 60
+  return mins
 }
 
-/** Empleados que, según el cuadrante, están de guardia en esa fecha y hora. */
+function restarUnDiaISO(fechaISO: string): string {
+  const [y, m, d] = fechaISO.split('-').map(Number)
+  const dt = new Date(y, m - 1, d, 12, 0, 0)
+  dt.setDate(dt.getDate() - 1)
+  return isoLocal(dt)
+}
+
+/**
+ * Empleados que, según el cuadrante, están de guardia en esa fecha y hora exactas.
+ * Maneja correctamente los turnos nocturnos que cruzan medianoche (ej. 22:00 a 06:00):
+ * entre 00:00 y 05:59 busca a quien inició el turno nocturno el día ANTERIOR.
+ */
 export function empleadosEnTurnoAhora(
   turnos: TurnoSemanal[],
   empleados: EmpleadoOperativo[],
@@ -59,18 +85,24 @@ export function empleadosEnTurnoAhora(
   horaHHMM: string
 ): EmpleadoOperativo[] {
   const min = horaAMinutos(horaHHMM)
+  const fechaAyer = restarUnDiaISO(fechaISO)
+
   const ids = new Set(
     turnos
       .filter((t) => {
-        if (t.fecha !== fechaISO) return false
         const ini = horaAMinutos(t.horaInicio)
         const fin = horaAMinutos(t.horaFin)
         if (ini <= fin) {
-          return ini <= min && min < fin
-        } else {
-          // Franja nocturna que cruza la medianoche (ej: 22:00 a 06:00)
-          return min >= ini || min < fin
+          return t.fecha === fechaISO && ini <= min && min < fin
         }
+        // Turno nocturno que cruza medianoche (ej: 22:00 - 06:00)
+        if (min >= ini) {
+          return t.fecha === fechaISO
+        }
+        if (min < fin) {
+          return t.fecha === fechaAyer
+        }
+        return false
       })
       .map((t) => t.empleadoId)
   )
@@ -82,7 +114,6 @@ export function empleadosEnTurnoAhora(
  * - Siempre 1 conductor por vehículo (si es pesado, prefiere licencia C2/C3).
  * - Desvare → mecánico. Barrizal/volcamiento/derrumbe → operador de winche.
  * - Accidente/herido → primeros auxilios. Trasteo/ayudas → apoyo logístico.
- * Solo toma gente que está de guardia en ese momento; si no alcanza, entras tú.
  */
 export function seleccionarTripulacionMision(
   mision: { titulo: string; tipo: string; impactoSocial?: string },
@@ -95,11 +126,12 @@ export function seleccionarTripulacionMision(
   const texto = `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''}`.toLowerCase()
   const incluye = (...ps: string[]) => ps.some((p) => texto.includes(p))
 
-  // Roles requeridos
   const roles: Array<{ rol: RolMision; etiqueta: string }> = []
   for (const v of vehiculosElegidos) {
     const corpusV = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''}`.toLowerCase()
-    const pesado = v.tipo === 'camion' || /camion|camión|tractomula|kodiak|volqueta|5ta rueda|quinta rueda|bus/.test(corpusV)
+    const pesado =
+      v.tipo === 'camion' ||
+      /camion|camión|tractomula|kodiak|volqueta|5ta rueda|quinta rueda|\bbus\b/.test(corpusV)
     roles.push({
       rol: pesado ? 'conductor_pesado' : 'conductor',
       etiqueta: `Conductor ${v.marca} ${v.linea}`,
@@ -115,19 +147,25 @@ export function seleccionarTripulacionMision(
   if (incluye('trasteo', 'mudanza', 'mercado', 'ayudas', 'víveres', 'viveres', 'carga', 'tejas', 'donaci'))
     roles.push({ rol: 'logistica', etiqueta: 'Apoyo de carga' })
 
-  // Pool: guardia activa en ese momento → si no hay cuadrante, activos no bloqueados por horario personal
+  // Pool: guardia activa en ese momento → fallback a empleados activos sin restricción horaria
   let pool = empleadosEnTurnoAhora(turnos, empleados, fechaISO, horaHHMM)
   let fuente = 'de guardia según el cuadrante'
   if (pool.length === 0) {
-    const diaSemana = ((new Date(`${fechaISO}T12:00:00`).getDay() + 6) % 7) + 1
+    // Convención JS: 0=Dom, 1=Lun, ..., 6=Sab (consistente con HorarioPersonalEmpleado)
+    const [y, m, d] = fechaISO.split('-').map(Number)
+    const diaSemana = new Date(y, m - 1, d, 12, 0, 0).getDay()
+    const minActual = horaAMinutos(horaHHMM)
     pool = empleados.filter(
       (e) =>
         e.activo &&
-        !e.horariosNoDisponibles.some(
-          (h) => h.diaSemana === diaSemana && h.horaInicio <= horaHHMM && horaHHMM < h.horaFin
-        )
+        !e.horariosNoDisponibles.some((h) => {
+          if (h.diaSemana !== diaSemana) return false
+          const hi = horaAMinutos(h.horaInicio)
+          const hf = horaAMinutos(h.horaFin, true)
+          return hi <= minActual && minActual < hf
+        })
     )
-    fuente = 'disponibles (sin cuadrante cargado para esta hora)'
+    fuente = 'disponibles (sin guardia específica en esa hora)'
   }
 
   const usados = new Set<string>()
@@ -145,8 +183,6 @@ export function seleccionarTripulacionMision(
       }))
       .sort((a, b) => b.score - a.score)
 
-    // Un conductor sin afinidad igual puede ir (todos manejan algo); los roles técnicos exigen afinidad,
-    // salvo que no haya nadie más y el rol sea secundario → se omite y se reporta
     const elegido =
       candidatos.find((c) => c.score > 0) ||
       (r.rol === 'conductor' || r.rol === 'conductor_pesado' ? candidatos[0] : undefined)
@@ -159,9 +195,12 @@ export function seleccionarTripulacionMision(
     }
   }
 
-  // Si nadie puede manejar, el coordinador cubre (regla de respaldo)
   if (!tripulacion.some((t) => t.rol.startsWith('Conductor'))) {
-    tripulacion.unshift({ id: 'coord-user', nombre: 'Tú (Coordinador General)', rol: 'Conductor (respaldo)' })
+    tripulacion.unshift({
+      id: 'coord-user',
+      nombre: 'Tú (Coordinador General)',
+      rol: 'Conductor (respaldo)',
+    })
   }
 
   let motivo = `Tripulación de ${tripulacion.length}: ${tripulacion.map((t) => `${t.nombre} (${t.rol})`).join(', ')}. Personal ${fuente}.`
@@ -173,35 +212,51 @@ export function seleccionarTripulacionMision(
 
 /**
  * Para las rutas de rutina: el conductor es el que quedó asignado en el cuadrante semanal.
+ * Prioriza coincidencia exacta por `rutaHabitualId` y respalda con el conductor de la franja correspondiente.
  */
 export function conductorDeRutaEnCuadrante(
   turnos: TurnoSemanal[],
   rutaId: string,
-  fechaISO: string
+  fechaISO: string,
+  tipoHorario?: RutaHabitual['tipoHorario']
 ): { id: string; nombre: string } | null {
-  const t = turnos.find(
-    (x) =>
-      x.fecha === fechaISO &&
-      (x.rutaHabitualId === rutaId ||
-        (x.notas && x.notas.includes(rutaId)) ||
-        (rutaId.includes('matutina') && x.franja === 'manana' && x.rolGuardia.toLowerCase().includes('conductor')) ||
-        (rutaId.includes('vespertina') && x.franja === 'tarde' && x.rolGuardia.toLowerCase().includes('conductor')) ||
-        (rutaId.includes('mercado') && x.franja === 'manana' && x.rolGuardia.toLowerCase().includes('conductor')))
-  )
-  return t ? { id: t.empleadoId, nombre: t.empleadoNombre } : null
+  const turnosDia = turnos.filter((x) => x.fecha === fechaISO && !x.esRespaldoCoordinador)
+  if (!turnosDia.length) return null
+
+  // 1. Coincidencia exacta por rutaHabitualId
+  const exacto = turnosDia.find((x) => x.rutaHabitualId === rutaId || x.notas?.includes(rutaId))
+  if (exacto) return { id: exacto.empleadoId, nombre: exacto.empleadoNombre }
+
+  // 2. Coincidencia por tipoHorario / nombre de ruta en la franja correspondiente
+  const esManana =
+    tipoHorario === 'manana' ||
+    tipoHorario === 'mercado_sabado' ||
+    /manana|matutina|mercado/.test(rutaId)
+  const esTarde = tipoHorario === 'tarde' || /tarde|vespertina/.test(rutaId)
+  const franjaObjetivo = esTarde ? 'tarde' : esManana ? 'manana' : undefined
+
+  if (franjaObjetivo) {
+    const porFranjaConductor = turnosDia.find(
+      (x) =>
+        x.franja === franjaObjetivo &&
+        (x.id.includes('-cond') || x.rolGuardia.toLowerCase().includes('conduc'))
+    )
+    if (porFranjaConductor) {
+      return { id: porFranjaConductor.empleadoId, nombre: porFranjaConductor.empleadoNombre }
+    }
+    const cualquieraEnFranja = turnosDia.find((x) => x.franja === franjaObjetivo)
+    if (cualquieraEnFranja) {
+      return { id: cualquieraEnFranja.empleadoId, nombre: cualquieraEnFranja.empleadoNombre }
+    }
+  }
+
+  return null
 }
 
 /**
- * Investigador de especificaciones oficiales con IA 🔍:
- * Deduce con realismo técnico la capacidad de tanque oficial (galones y litros),
- * consumo en relieve montañoso andino y tipo de combustible para cualquier vehículo
- * del parque automotor colombiano (desde Corsa y Spark hasta camiones pesados y tractomulas de 5ta rueda).
- */
-/**
- * Investigador de especificaciones oficiales con IA 🔍:
- * Deduce con realismo técnico la capacidad de tanque oficial (galones y litros),
- * consumo en relieve montañoso andino y tipo de combustible para cualquier vehículo
- * del parque automotor (soviéticos/rusos, europeos, americanos, japoneses y comerciales).
+ * Catálogo técnico offline de respaldo (solo cuando Gemini no está disponible).
+ * Usa coincidencias con límites de palabra (\b) y validación de marca para evitar falsos positivos
+ * (ej. un BMW M2 o Ford F-250 jamás debe clasificarse como camión Freightliner o KrAZ).
  */
 export function investigarFichaVehiculoIA(
   marca: string,
@@ -227,159 +282,184 @@ export function investigarFichaVehiculoIA(
 
   const corpus = `${m} ${l} ${t} ${n} ${c} ${cap}`
 
-  // 0. Si el usuario especificó explícitamente la capacidad en las notas o ficha de CashMet
-  // Ej: "tanque 80 gal", "tanque de 330 L", "tanque 100 galones", "300 litros"
-  const matchGal = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:gal|galones)/) ||
-                   corpus.match(/(\d+(?:\.\d+)?)\s*(?:gal|galones)/)
-  const matchLitros = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:l|litros|lt)/) ||
-                      corpus.match(/(\d+(?:\.\d+)?)\s*(?:l|litros|lt)\b/)
+  // 0. Capacidad explícita declarada en notas de CashMet
+  const matchGal = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:gal|galones)\b/)
+  const matchLitros = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:l|litros|lt)\b/)
 
-  if (matchGal && Number(matchGal[1]) >= 3) {
+  const detectarCombustibleEnNotas = (): TipoCombustible | null => {
+    if (/\b(diesel|diésel|acpm)\b/.test(n)) return 'diesel'
+    if (/\b(extra|premium|98\s*oct)\b/.test(n)) return 'extra'
+    if (/\b(corriente|gasolina)\b/.test(n)) return 'corriente'
+    return null
+  }
+  const combNotas = detectarCombustibleEnNotas()
+
+  if (matchGal && Number(matchGal[1]) >= 2 && Number(matchGal[1]) <= 600) {
     const gal = Number(matchGal[1])
     const lit = Number((gal * 3.78541).toFixed(1))
-    const esDiesel = /diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|man|scania|volvo|isuzu|hino/.test(corpus)
+    const esDiesel =
+      combNotas === 'diesel' ||
+      (!combNotas &&
+        (t === 'camion' ||
+          /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
+    const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
-      tipoCombustible: esDiesel ? 'diesel' : 'corriente',
-      fichaInvestigadaNota: `Ficha técnica verificada según configuración en notas: Tanque ${gal} gal (${lit} L). ${esDiesel ? 'Diésel/ACPM' : 'Gasolina'}.`,
+      tipoCombustible: tipoComb,
+      fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${gal} gal (${lit} L). Combustible: ${tipoComb.toUpperCase()}.`,
     }
-  } else if (matchLitros && Number(matchLitros[1]) >= 15) {
+  } else if (matchLitros && Number(matchLitros[1]) >= 8 && Number(matchLitros[1]) <= 2200) {
     const lit = Number(matchLitros[1])
     const gal = Number((lit / 3.78541).toFixed(1))
-    const esDiesel = /diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|man|scania|volvo|isuzu|hino/.test(corpus)
+    const esDiesel =
+      combNotas === 'diesel' ||
+      (!combNotas &&
+        (t === 'camion' ||
+          /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
+    const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
-      tipoCombustible: esDiesel ? 'diesel' : 'corriente',
-      fichaInvestigadaNota: `Ficha técnica verificada según configuración en notas: Tanque oficial ${lit} L (${gal} gal). ${esDiesel ? 'Diésel/ACPM' : 'Gasolina'}.`,
+      tipoCombustible: tipoComb,
+      fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${lit} L (${gal} gal). Combustible: ${tipoComb.toUpperCase()}.`,
     }
   }
 
   // 1. Motocicletas
-  if (t === 'moto' || corpus.includes('moto') || l.includes('xtz') || l.includes('dr ') || l.includes('pulsar') || l.includes('boxer') || l.includes('xr ')) {
+  if (
+    t === 'moto' ||
+    /\bmoto(cicleta)?\b/.test(corpus) ||
+    /\b(xtz|dr\s*\d+|pulsar|boxer|xr\s*\d+|v-?strom|akt|nkd|fz|mt-?0|cb\s*\d+)\b/.test(l)
+  ) {
+    const esAltoCilindraje = /\b(600|650|700|800|900|1000|1200|1250)\b/.test(corpus)
+    const gal = esAltoCilindraje ? 4.8 : 3.2
+    const lit = Number((gal * 3.78541).toFixed(1))
     return {
-      capacidadTanqueGalones: 3.2,
-      capacidadTanqueLitros: 12.1,
-      consumoKmPorGalon: 110,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica motocicleta: Tanque 3.2 gal (12.1 L). Rendimiento cordillera: 110 km/gal. Gasolina Corriente.`,
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esAltoCilindraje ? 65 : 110,
+      tipoCombustible: combNotas ?? (esAltoCilindraje ? 'extra' : 'corriente'),
+      fichaInvestigadaNota: `Catálogo técnico motocicleta: Tanque ${gal} gal (${lit} L). Rendimiento cordillera: ~${esAltoCilindraje ? 65 : 110} km/gal.`,
     }
   }
 
-  // 2. GAZelle (GAZ 3302, 2705, 3221, Sobol) — Camión ligero / Van 1.5t rusa
-  if (l.includes('gazelle') || l.includes('3302') || l.includes('sobol') || (m === 'gaz' && (corpus.includes('ligero') || corpus.includes('pickup')))) {
+  // 2. GAZelle (GAZ 3302, 2705, 3221, Sobol)
+  if (
+    /\b(gazelle|sobol)\b/.test(l) ||
+    (/\bgaz\b/.test(m) && (/\b3302\b/.test(l) || corpus.includes('ligero') || corpus.includes('pickup')))
+  ) {
     return {
       capacidadTanqueGalones: 18.0,
       capacidadTanqueLitros: 68.1,
       consumoKmPorGalon: 31,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica oficial GAZ 3302 GAZelle: Tanque original de fábrica 18 gal (68.1 L). Rendimiento mixto cordillera: ~31 km/gal. Diésel/ACPM.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico GAZ 3302 GAZelle: Tanque 18 gal (68.1 L). Rendimiento cordillera: ~31 km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 3. KAVZ (KAVZ 685, 3976, Overlander) — Autobús rural 4x4 soviético chasis GAZ-53
-  if (m.includes('kavz') || l.includes('kavz') || l.includes('685') || (corpus.includes('overlander') && corpus.includes('autobús'))) {
+  // 3. KAVZ (KAVZ 685, 3976, Overlander)
+  if (/\bkavz\b/.test(`${m} ${l}`) || (corpus.includes('overlander') && corpus.includes('autobús'))) {
     return {
       capacidadTanqueGalones: 27.7,
       capacidadTanqueLitros: 105.0,
       consumoKmPorGalon: 19,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica oficial KAVZ 685 Overlander: Chasis camión GAZ-53 con tanque de 27.7 gal (105 L). Rendimiento rural: ~19 km/gal. Diésel/ACPM.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico KAVZ 685 Overlander: Tanque 27.7 gal (105 L). Rendimiento rural: ~19 km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 4. KrAZ pesados (KrAZ 250, 255, 256, Monster, 260, 6322) — Motor YaMZ-238 V8 Diesel
-  if (m.includes('kraz') || l.includes('kraz') || l.includes('250') || l.includes('256') || (corpus.includes('soviético') && corpus.includes('6x6'))) {
+  // 4. KrAZ pesados
+  if (/\bkraz\b/.test(`${m} ${l}`) || (corpus.includes('soviético') && corpus.includes('6x6'))) {
     return {
       capacidadTanqueGalones: 87.2,
       capacidadTanqueLitros: 330.0,
       consumoKmPorGalon: 8.2,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica pesada KrAZ (Motor V8 YaMZ-238 14.86 L): Tanques dobles de fábrica 2x165 L = 330 L (87.2 gal). Rendimiento trabajo pesado: ~8.2 km/gal. Diésel pesado.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico KrAZ pesado: Tanques dobles 330 L (87.2 gal). Rendimiento: ~8.2 km/gal. Diésel.`,
     }
   }
 
-  // 5. GAZ camiones medianos (GAZ 53, GAZ 66, GAZ 3307, GAZ 3308 Sadko, GAZ 3309)
-  if (m === 'gaz' || l.includes('gaz 53') || l.includes('gaz 66') || l.includes('sadko') || l.includes('3308') || l.includes('3307')) {
-    const es66 = l.includes('66') || l.includes('sadko')
+  // 5. GAZ camiones medianos
+  if (/\bgaz\b/.test(m) || /\bgaz[\s-]*(53|66|3307|3308|3309)\b|\bsadko\b/.test(l)) {
+    const es66 = /\b66\b|\bsadko\b/.test(l)
     const gal = es66 ? 55.5 : 27.7
     const lit = es66 ? 210.0 : 105.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: es66 ? 14 : 17,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica GAZ camión todo terreno: Tanque oficial ${gal} gal (${lit} L). Rendimiento en trocha: ~${es66 ? 14 : 17} km/gal. Diésel/ACPM.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico GAZ camión todo terreno: Tanque ${gal} gal (${lit} L). Rendimiento trocha: ~${es66 ? 14 : 17} km/gal. Diésel.`,
     }
   }
 
-  // 6. Ural pesados (Ural 375, Ural 4320, Ural Next 6x6)
-  if (m.includes('ural') || l.includes('ural') || l.includes('4320')) {
+  // 6. Ural pesados
+  if (/\bural\b/.test(`${m} ${l}`) || (t === 'camion' && /\b4320\b/.test(l))) {
     return {
       capacidadTanqueGalones: 68.7,
       capacidadTanqueLitros: 260.0,
       consumoKmPorGalon: 10.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Ural 4320 6x6: Tanque principal 200 L + auxiliar 60 L = 260 L (68.7 gal). Rendimiento trocha pesada: ~10.5 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Ural 4320 6x6: Tanque 260 L (68.7 gal). Rendimiento trocha: ~10.5 km/gal. Diésel.`,
     }
   }
 
-  // 7. KamAZ pesados (KamAZ 5320, 5410, 5511, 4310, 43118, 6520)
-  if (m.includes('kamaz') || l.includes('kamaz') || l.includes('5320') || l.includes('43118') || l.includes('6520')) {
-    const esLargoO6x6 = l.includes('43118') || l.includes('6520') || corpus.includes('6x6')
+  // 7. KamAZ pesados
+  if (/\bkamaz\b/.test(`${m} ${l}`)) {
+    const esLargoO6x6 = /\b(43118|6520)\b/.test(l) || corpus.includes('6x6')
     const gal = esLargoO6x6 ? 92.5 : 66.0
     const lit = esLargoO6x6 ? 350.0 : 250.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: 11.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica KamAZ Diésel: Tanque oficial de aluminio ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal. Diésel/ACPM.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico KamAZ Diésel: Tanque ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal.`,
     }
   }
 
-  // 8. ZIL camiones (ZIL 130, ZIL 131 6x6)
-  if (m.includes('zil') || l.includes('zil') || l.includes('130') || l.includes('131')) {
-    const es131 = l.includes('131') || corpus.includes('6x6')
+  // 8. ZIL camiones (requiere marca ZIL explícita)
+  if (/\bzil\b/.test(`${m} ${l}`)) {
+    const es131 = /\b131\b/.test(l) || corpus.includes('6x6')
     const gal = es131 ? 89.8 : 44.9
     const lit = es131 ? 340.0 : 170.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: es131 ? 11 : 14,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica ZIL: Tanque oficial ${lit} L (${gal} gal). Rendimiento montaña: ~${es131 ? 11 : 14} km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico ZIL: Tanque ${lit} L (${gal} gal). Rendimiento montaña: ~${es131 ? 11 : 14} km/gal.`,
     }
   }
 
-  // 9. MAZ camiones pesados (MAZ 500, 5432, 6422)
-  if (m.includes('maz') || l.includes('maz') || l.includes('6422')) {
+  // 9. MAZ camiones pesados
+  if (/\bmaz\b/.test(`${m} ${l}`)) {
     return {
       capacidadTanqueGalones: 92.5,
       capacidadTanqueLitros: 350.0,
       consumoKmPorGalon: 9.8,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica MAZ: Tanque de carga pesada 350 L (92.5 gal). Rendimiento montaña: ~9.8 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico MAZ: Tanque 350 L (92.5 gal). Rendimiento montaña: ~9.8 km/gal. Diésel.`,
     }
   }
 
-  // 10. UAZ camperos y furgones (UAZ 469, Hunter, Patriot, 452 Bukhanka)
-  if (m.includes('uaz') || l.includes('uaz') || l.includes('bukhanka') || l.includes('hunter') || l.includes('patriot') || l.includes('469') || l.includes('452')) {
+  // 10. UAZ camperos y furgones
+  if (/\buaz\b/.test(`${m} ${l}`) || /\bbukhanka\b/.test(l)) {
     return {
       capacidadTanqueGalones: 20.6,
       capacidadTanqueLitros: 78.0,
       consumoKmPorGalon: 26,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica UAZ 4x4: Tanques duales simétricos 2x39 L = 78 L (20.6 gal). Rendimiento trocha: ~26 km/gal. Gasolina Corriente.`,
+      tipoCombustible: combNotas ?? 'corriente',
+      fichaInvestigadaNota: `Catálogo técnico UAZ 4x4: Tanques duales 78 L (20.6 gal). Rendimiento trocha: ~26 km/gal. Gasolina Corriente.`,
     }
   }
 
-  // 11. Kenworth pesados (Kenworth T800, TwinSteer, W900, T680, C500)
-  if (m.includes('kenworth') || l.includes('kenworth') || l.includes('t800') || l.includes('twinsteer') || l.includes('w900') || l.includes('t680') || l.includes('c500')) {
-    const esTwinSteer = l.includes('twinsteer') || corpus.includes('10x10') || corpus.includes('8x4')
+  // 11. Kenworth pesados
+  if (/\bkenworth\b/.test(`${m} ${l}`) || /\b(t800|twinsteer|w900|t680)\b/.test(l)) {
+    const esTwinSteer = /\btwinsteer\b/.test(l) || corpus.includes('10x10') || corpus.includes('8x4')
     const gal = esTwinSteer ? 200 : 240
     const lit = Number((gal * 3.78541).toFixed(1))
     const kmGal = esTwinSteer ? 5.8 : 6.2
@@ -387,24 +467,24 @@ export function investigarFichaVehiculoIA(
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: kmGal,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha pesada Kenworth ${esTwinSteer ? 'T800 TwinSteer 10x10' : 'T800'}: Tanques duales de aluminio ${gal} gal (${lit} L). Rendimiento cordillera: ~${kmGal} km/gal. Diésel/ACPM.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Kenworth: Tanques duales ${gal} gal (${lit} L). Rendimiento cordillera: ~${kmGal} km/gal. Diésel/ACPM.`,
     }
   }
 
-  // 12. MAN camiones europeos (MAN TGS, TGX, TGM, TGL, 18.420, 18.440)
-  if (m.includes('man') || l.includes('tgs') || l.includes('tgx') || l.includes('tgm') || l.includes('18.420') || l.includes('18.440')) {
+  // 12. MAN camiones europeos (palabra exacta \bman\b en marca o línea TGS/TGX/TGM/TGL)
+  if (/\bman\b/.test(m) || (t === 'camion' && /\b(tgs|tgx|tgm|tgl)\b/.test(l))) {
     return {
       capacidadTanqueGalones: 105.7,
       capacidadTanqueLitros: 400.0,
       consumoKmPorGalon: 12.2,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica MAN TGS 18.420 Euro 6: Tanque original de aluminio D26 400 L (105.7 gal). Rendimiento ruta andina: ~12.2 km/gal. Diésel Euro 6.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico MAN camión: Tanque 400 L (105.7 gal). Rendimiento andino: ~12.2 km/gal. Diésel.`,
     }
   }
 
-  // 13. Scania (R420, R440, R480, R500, G440, P360, 113, 124)
-  if (m.includes('scania') || l.includes('scania') || l.includes('r440') || l.includes('r420') || l.includes('r500')) {
+  // 13. Scania
+  if (/\bscania\b/.test(`${m} ${l}`)) {
     const esCabezote = corpus.includes('cabezote') || corpus.includes('tractomula') || corpus.includes('quinta rueda')
     const gal = esCabezote ? 118.9 : 92.5
     const lit = esCabezote ? 450.0 : 350.0
@@ -412,302 +492,333 @@ export function investigarFichaVehiculoIA(
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: 11.8,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Scania: Tanque original de aluminio ${lit} L (${gal} gal). Rendimiento montaña: ~11.8 km/gal. Diésel Euro 5/6.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Scania: Tanque ${lit} L (${gal} gal). Rendimiento montaña: ~11.8 km/gal. Diésel.`,
     }
   }
 
-  // 14. Volvo (FH, FM, FMX, VM, FH12, FH16, FM400)
-  if (m.includes('volvo') || l.includes('volvo') || l.includes('fh') || l.includes('fmx') || l.includes('vm')) {
-    const esFmxOVolqueta = l.includes('fmx') || corpus.includes('volqueta')
-    const esVm = l.includes('vm')
+  // 14. Volvo camiones (solo si es camión o modelos FH/FMX/VM con marca Volvo)
+  if (/\bvolvo\b/.test(m) && (t === 'camion' || /\b(fh|fmx|vm|fm\d*)\b/.test(l))) {
+    const esFmxOVolqueta = /\bfmx\b/.test(l) || corpus.includes('volqueta')
+    const esVm = /\bvm\b/.test(l)
     const gal = esVm ? 72.6 : esFmxOVolqueta ? 109.6 : 118.9
     const lit = esVm ? 275.0 : esFmxOVolqueta ? 415.0 : 450.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: 11.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Volvo camión/tracto: Tanque oficial ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Volvo camión: Tanque ${lit} L (${gal} gal). Rendimiento cordillera: ~11.5 km/gal. Diésel.`,
     }
   }
 
-  // 15. Mercedes-Benz pesados y medianos (Actros, Axor, Atego, Arocs, Unimog, 1113, 1620)
-  if (m.includes('mercedes') || l.includes('actros') || l.includes('axor') || l.includes('atego') || l.includes('unimog') || l.includes('1113') || l.includes('1620')) {
-    if (l.includes('unimog')) {
+  // 15. Mercedes-Benz camiones / Unimog (no afecta autos Mercedes clase C/E/A)
+  if (
+    /\bunimog\b/.test(l) ||
+    (/\bmercedes\b/.test(m) && (t === 'camion' || /\b(actros|axor|atego|arocs|1113|1620)\b/.test(l)))
+  ) {
+    if (/\bunimog\b/.test(l)) {
       return {
         capacidadTanqueGalones: 42.3,
         capacidadTanqueLitros: 160.0,
         consumoKmPorGalon: 16,
-        tipoCombustible: 'diesel',
-        fichaInvestigadaNota: `Ficha técnica Mercedes-Benz Unimog 4x4 militar/rural: Tanque oficial 160 L (42.3 gal). Rendimiento trocha: ~16 km/gal. Diésel.`,
+        tipoCombustible: combNotas ?? 'diesel',
+        fichaInvestigadaNota: `Catálogo técnico Mercedes-Benz Unimog 4x4: Tanque 160 L (42.3 gal). Rendimiento trocha: ~16 km/gal. Diésel.`,
       }
     }
-    const esPesado = l.includes('actros') || l.includes('arocs') || l.includes('axor')
+    const esPesado = /\b(actros|arocs|axor)\b/.test(l)
     const gal = esPesado ? 118.9 : 55.5
     const lit = esPesado ? 450.0 : 210.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esPesado ? 11.5 : 17.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Mercedes-Benz: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~${esPesado ? 11.5 : 17.5} km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Mercedes-Benz camión: Tanque ${lit} L (${gal} gal). Rendimiento: ~${esPesado ? 11.5 : 17.5} km/gal. Diésel.`,
     }
   }
 
-  // 16. Freightliner (Cascadia, Columbia, M2 106, M2 112, FLD120)
-  if (m.includes('freightliner') || l.includes('cascadia') || l.includes('columbia') || l.includes('m2')) {
-    const esM2 = l.includes('m2')
+  // 16. Freightliner (solo si marca Freightliner o camión Cascadia/Columbia/M2)
+  if (
+    /\bfreightliner\b/.test(`${m} ${l}`) ||
+    (t === 'camion' && /\b(cascadia|columbia|m2)\b/.test(l))
+  ) {
+    const esM2 = /\bm2\b/.test(l)
     const gal = esM2 ? 65 : 200
     const lit = Number((gal * 3.78541).toFixed(1))
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esM2 ? 14 : 6.2,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Freightliner ${esM2 ? 'M2' : 'Cascadia/Columbia'}: Tanque ${gal} gal (${lit} L). Rendimiento: ~${esM2 ? 14 : 6.2} km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Freightliner ${esM2 ? 'M2' : 'Cascadia/Columbia'}: Tanque ${gal} gal (${lit} L). Diésel.`,
     }
   }
 
-  // 17. International (WorkStar 7600, ProStar, 4300 DuraStar, Eagle 9400)
-  if (m.includes('international') || l.includes('workstar') || l.includes('prostar') || l.includes('durastar') || l.includes('7600') || l.includes('4300') || l.includes('9400')) {
-    const esDuraStar = l.includes('4300') || l.includes('durastar')
-    const esWorkStar = l.includes('7600') || l.includes('workstar')
+  // 17. International camiones
+  if (
+    /\binternational\b/.test(m) ||
+    (t === 'camion' && /\b(workstar|prostar|durastar|7600|4300|9400)\b/.test(l))
+  ) {
+    const esDuraStar = /\b(4300|durastar)\b/.test(l)
+    const esWorkStar = /\b(7600|workstar)\b/.test(l)
     const gal = esDuraStar ? 50 : esWorkStar ? 80 : 200
     const lit = Number((gal * 3.78541).toFixed(1))
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esDuraStar ? 16 : esWorkStar ? 8.5 : 6.2,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica International: Tanque ${gal} gal (${lit} L). Rendimiento montaña: ~${esDuraStar ? 16 : 8.5} km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico International: Tanque ${gal} gal (${lit} L). Diésel.`,
     }
   }
 
-  // 18. Mack (Granite, Anthem, Vision, CH613)
-  if (m.includes('mack') || l.includes('granite') || l.includes('anthem') || l.includes('vision')) {
-    const esGranite = l.includes('granite') || corpus.includes('volqueta')
+  // 18. Mack camiones
+  if (/\bmack\b/.test(m)) {
+    const esGranite = /\bgranite\b/.test(l) || corpus.includes('volqueta')
     const gal = esGranite ? 88 : 200
     const lit = Number((gal * 3.78541).toFixed(1))
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esGranite ? 8.5 : 6.2,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha pesada Mack ${esGranite ? 'Granite Volqueta' : 'Tracto'}: Tanque ${gal} gal (${lit} L). Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Mack: Tanque ${gal} gal (${lit} L). Diésel.`,
     }
   }
 
-  // 19. Camiones Isuzu / Chevrolet nacionales (NHR, NKR, NPR, NQR, FTR, FVR, FVZ, Kodiak, Brigadier)
-  if (corpus.includes('kodiak')) {
+  // 19. Camiones Isuzu / Chevrolet comerciales
+  if (/\bkodiak\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 50.0,
       capacidadTanqueLitros: 189.3,
       consumoKmPorGalon: 8.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet Kodiak (Cat 3116/3126): Tanque 50 gal (189.3 L). Rendimiento cordillera: ~8.5 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet Kodiak: Tanque 50 gal (189.3 L). Rendimiento cordillera: ~8.5 km/gal. Diésel.`,
     }
   }
-  if (corpus.includes('brigadier')) {
+  if (/\bbrigadier\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 65.0,
       capacidadTanqueLitros: 246.1,
       consumoKmPorGalon: 7.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet Brigadier: Tanque 65 gal (246.1 L). Rendimiento: ~7.5 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet Brigadier: Tanque 65 gal (246.1 L). Diésel.`,
     }
   }
-  if (corpus.includes('nhr')) {
+  if (/\bnhr\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 19.8,
       capacidadTanqueLitros: 75.0,
       consumoKmPorGalon: 34,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet NHR: Tanque oficial 75 L (19.8 gal). Rendimiento: ~34 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet NHR: Tanque 75 L (19.8 gal). Rendimiento: ~34 km/gal. Diésel.`,
     }
   }
-  if (corpus.includes('npr') || corpus.includes('nkr') || corpus.includes('reward')) {
+  if (/\b(npr|nkr)\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 26.4,
       capacidadTanqueLitros: 100.0,
       consumoKmPorGalon: 24,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet NPR / Isuzu: Tanque oficial 100 L (26.4 gal). Rendimiento: ~24 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet NPR / NKR: Tanque 100 L (26.4 gal). Rendimiento: ~24 km/gal. Diésel.`,
     }
   }
-  if (corpus.includes('nqr')) {
+  if (/\bnqr\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 37.0,
       capacidadTanqueLitros: 140.0,
       consumoKmPorGalon: 20,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet NQR: Tanque oficial 140 L (37.0 gal). Rendimiento: ~20 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet NQR: Tanque 140 L (37.0 gal). Rendimiento: ~20 km/gal. Diésel.`,
     }
   }
-  if (corpus.includes('ftr')) {
+  if (/\bftr\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 52.8,
       capacidadTanqueLitros: 200.0,
       consumoKmPorGalon: 14,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet FTR: Tanque oficial 200 L (52.8 gal). Rendimiento: ~14 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet FTR: Tanque 200 L (52.8 gal). Rendimiento: ~14 km/gal. Diésel.`,
     }
   }
-  if (corpus.includes('fvr') || corpus.includes('fvz')) {
+  if (/\b(fvr|fvz)\b/.test(corpus)) {
     return {
       capacidadTanqueGalones: 79.2,
       capacidadTanqueLitros: 300.0,
       consumoKmPorGalon: 9.5,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet FVR / FVZ doble troque: Tanque 300 L (79.2 gal). Rendimiento: ~9.5 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet FVR / FVZ: Tanque 300 L (79.2 gal). Diésel.`,
     }
   }
 
   // 20. Hino / Fuso / Foton / JAC camiones
-  if (m.includes('hino') || l.includes('dutro') || l.includes('hino 300')) {
+  if (/\bhino\b/.test(m) || /\bdutro\b/.test(l)) {
+    const es500 = /\b(500|fc9j|fg8j)\b/.test(l)
     return {
-      capacidadTanqueGalones: 26.4,
-      capacidadTanqueLitros: 100.0,
-      consumoKmPorGalon: 24,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Hino Dutro / Serie 300: Tanque oficial 100 L (26.4 gal). Rendimiento: ~24 km/gal. Diésel.`,
+      capacidadTanqueGalones: es500 ? 52.8 : 26.4,
+      capacidadTanqueLitros: es500 ? 200.0 : 100.0,
+      consumoKmPorGalon: es500 ? 14 : 24,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Hino ${es500 ? '500' : '300/Dutro'}: Tanque ${es500 ? '200 L (52.8 gal)' : '100 L (26.4 gal)'}. Diésel.`,
     }
   }
-  if (l.includes('hino 500') || l.includes('fc9j') || l.includes('fg8j')) {
-    return {
-      capacidadTanqueGalones: 52.8,
-      capacidadTanqueLitros: 200.0,
-      consumoKmPorGalon: 14,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Hino 500: Tanque oficial 200 L (52.8 gal). Rendimiento: ~14 km/gal. Diésel.`,
-    }
-  }
-  if (m.includes('fuso') || l.includes('canter')) {
+  if (/\bfuso\b/.test(m) || /\bcanter\b/.test(l)) {
     return {
       capacidadTanqueGalones: 26.4,
       capacidadTanqueLitros: 100.0,
       consumoKmPorGalon: 25,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Mitsubishi Fuso Canter: Tanque oficial 100 L (26.4 gal). Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Mitsubishi Fuso Canter: Tanque 100 L (26.4 gal). Diésel.`,
     }
   }
-  if (m.includes('foton') || m.includes('jac')) {
-    const esPesado = corpus.includes('volqueta') || corpus.includes('6x4') || corpus.includes('auman') || corpus.includes('gallop')
+  if (/\b(foton|jac)\b/.test(m) && t === 'camion') {
+    const esPesado = corpus.includes('volqueta') || corpus.includes('6x4') || /\b(auman|gallop)\b/.test(l)
     const gal = esPesado ? 79.2 : 26.4
     const lit = esPesado ? 300.0 : 100.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esPesado ? 9.5 : 24,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica camión ${m.toUpperCase()}: Tanque oficial ${lit} L (${gal} gal). Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico camión ${m.toUpperCase()}: Tanque ${lit} L (${gal} gal). Diésel.`,
     }
   }
 
-  // 21. Toyota Land Cruiser / Hilux / Troop Carrier / Coaster
-  if (m.includes('toyota') || l.includes('land cruiser') || l.includes('hilux') || l.includes('prado') || l.includes('trooper') || l.includes('troop carrier')) {
-    if (l.includes('troop') || corpus.includes('tropero')) {
+  // 21. Toyota
+  if (/\btoyota\b/.test(m) || /\b(land cruiser|hilux|prado|fortuner|troop carrier|coaster)\b/.test(l)) {
+    if (/\btroop\b|\btropero\b/.test(corpus)) {
       return {
         capacidadTanqueGalones: 47.5,
         capacidadTanqueLitros: 180.0,
         consumoKmPorGalon: 23,
-        tipoCombustible: 'diesel',
-        fichaInvestigadaNota: `Ficha técnica Toyota Land Cruiser Troop Carrier HZJ78: Tanques duales de fábrica 2x90 L = 180 L (47.5 gal). Rendimiento: ~23 km/gal. Diésel.`,
+        tipoCombustible: combNotas ?? 'diesel',
+        fichaInvestigadaNota: `Catálogo técnico Toyota Land Cruiser Troop Carrier: Tanques duales 180 L (47.5 gal). Diésel.`,
       }
     }
-    if (l.includes('coaster')) {
+    if (/\bcoaster\b/.test(l)) {
       return {
         capacidadTanqueGalones: 25.1,
         capacidadTanqueLitros: 95.0,
         consumoKmPorGalon: 21,
-        tipoCombustible: 'diesel',
-        fichaInvestigadaNota: `Ficha técnica Toyota Coaster: Tanque de 95 L (25.1 gal). Rendimiento: ~21 km/gal. Diésel.`,
+        tipoCombustible: combNotas ?? 'diesel',
+        fichaInvestigadaNota: `Catálogo técnico Toyota Coaster: Tanque 95 L (25.1 gal). Diésel.`,
       }
     }
-    if (l.includes('fj70') || l.includes('machito') || l.includes('serie 70') || l.includes('fzj71')) {
+    if (/\b(fj70|machito|serie 70|fzj71)\b/.test(l)) {
       return {
         capacidadTanqueGalones: 23.8,
         capacidadTanqueLitros: 90.0,
         consumoKmPorGalon: 22,
-        tipoCombustible: 'diesel',
-        fichaInvestigadaNota: `Ficha técnica Toyota Land Cruiser Serie 70: Tanque oficial 90 L (23.8 gal). Rendimiento: ~22 km/gal. Diésel.`,
+        tipoCombustible: combNotas ?? 'diesel',
+        fichaInvestigadaNota: `Catálogo técnico Toyota Land Cruiser Serie 70: Tanque 90 L (23.8 gal). Diésel.`,
+      }
+    }
+    if (/\b(corolla|yaris)\b/.test(l)) {
+      return {
+        capacidadTanqueGalones: 13.2,
+        capacidadTanqueLitros: 50.0,
+        consumoKmPorGalon: 44,
+        tipoCombustible: combNotas ?? 'corriente',
+        fichaInvestigadaNota: `Catálogo técnico Toyota compacto/sedán: Tanque 50 L (13.2 gal). Gasolina Corriente.`,
       }
     }
     return {
       capacidadTanqueGalones: 21.1,
       capacidadTanqueLitros: 80.0,
       consumoKmPorGalon: 30,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica Toyota Hilux / Prado 4x4: Tanque oficial 80 L (21.1 gal). Rendimiento trocha: ~30 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico Toyota 4x4 (Hilux/Prado/Fortuner): Tanque 80 L (21.1 gal). Rendimiento trocha: ~30 km/gal. Diésel.`,
     }
   }
 
-  // 22. Vans y Transporte Colectivo (Sprinter, Master, Transit, Urvan, HiAce)
-  if (corpus.includes('sprinter') || corpus.includes('master') || corpus.includes('transit') || corpus.includes('urvan') || corpus.includes('hiace')) {
-    const esSprinter = corpus.includes('sprinter')
+  // 22. Ford Pickups (F-150, F-250, F-350, Ranger)
+  if (/\bford\b/.test(m) && /\b(f-?150|f-?250|f-?350|ranger)\b/.test(l)) {
+    const esHeavy = /\b(f-?250|f-?350)\b/.test(l)
+    const esRanger = /\branger\b/.test(l)
+    const gal = esHeavy ? 34.0 : esRanger ? 21.1 : 26.0
+    const lit = Number((gal * 3.78541).toFixed(1))
+    return {
+      capacidadTanqueGalones: gal,
+      capacidadTanqueLitros: lit,
+      consumoKmPorGalon: esHeavy ? 18 : esRanger ? 29 : 22,
+      tipoCombustible: combNotas ?? (esRanger || esHeavy ? 'diesel' : 'extra'),
+      fichaInvestigadaNota: `Catálogo técnico Ford Pickup: Tanque ${gal} gal (${lit} L).`,
+    }
+  }
+
+  // 23. Vans y Transporte Colectivo
+  if (/\b(sprinter|master|transit|urvan|hiace)\b/.test(l)) {
+    const esSprinter = /\bsprinter\b/.test(l)
     const gal = esSprinter ? 19.8 : 21.1
     const lit = esSprinter ? 75.0 : 80.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: 29,
-      tipoCombustible: 'diesel',
-      fichaInvestigadaNota: `Ficha técnica transporte de pasajeros: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~29 km/gal. Diésel.`,
+      tipoCombustible: combNotas ?? 'diesel',
+      fichaInvestigadaNota: `Catálogo técnico transporte de pasajeros: Tanque ${lit} L (${gal} gal). Diésel.`,
     }
   }
 
-  // 23. Camperos livianos (Suzuki Jimny, Samurai, Vitara)
-  if (l.includes('jimny') || l.includes('samurai') || l.includes('vitara') || m.includes('suzuki')) {
-    const esVitara = l.includes('vitara')
+  // 24. Camperos livianos Suzuki
+  if (/\b(jimny|samurai|vitara)\b/.test(l) || (/\bsuzuki\b/.test(m) && !/\b(swift|alto)\b/.test(l))) {
+    const esVitara = /\bvitara\b/.test(l)
     const gal = esVitara ? 14.5 : 10.5
     const lit = esVitara ? 55.0 : 40.0
     return {
       capacidadTanqueGalones: gal,
       capacidadTanqueLitros: lit,
       consumoKmPorGalon: esVitara ? 34 : 38,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica 4x4 liviano Suzuki: Tanque oficial ${lit} L (${gal} gal). Rendimiento: ~${esVitara ? 34 : 38} km/gal. Gasolina Corriente.`,
+      tipoCombustible: combNotas ?? 'corriente',
+      fichaInvestigadaNota: `Catálogo técnico Suzuki 4x4: Tanque ${lit} L (${gal} gal). Gasolina Corriente.`,
     }
   }
 
-  // 24. Automóviles compactos y utilitarios comunes
-  if (l.includes('corsa')) {
+  // 25. Automóviles compactos y utilitarios comunes
+  if (/\bcorsa\b/.test(l)) {
     return {
       capacidadTanqueGalones: 11.9,
       capacidadTanqueLitros: 45.0,
       consumoKmPorGalon: 39,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Chevrolet Corsa: Capacidad oficial 45 L (11.9 gal). Rendimiento montaña: ~39 km/gal. Gasolina Corriente.`,
+      tipoCombustible: combNotas ?? 'corriente',
+      fichaInvestigadaNota: `Catálogo técnico Chevrolet Corsa: Tanque 45 L (11.9 gal). Gasolina Corriente.`,
     }
   }
-  if (l.includes('spark') || l.includes('picanto') || l.includes('i10') || l.includes('alto')) {
+  if (/\b(spark|picanto|i10|kwid)\b/.test(l) || (/\bsuzuki\b/.test(m) && /\balto\b/.test(l))) {
     return {
       capacidadTanqueGalones: 9.2,
       capacidadTanqueLitros: 35.0,
       consumoKmPorGalon: 46,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica vehículo compacto: Tanque oficial 35 L (9.2 gal). Rendimiento: ~46 km/gal. Gasolina Corriente.`,
+      tipoCombustible: combNotas ?? 'corriente',
+      fichaInvestigadaNota: `Catálogo técnico compacto: Tanque 35 L (9.2 gal). Rendimiento: ~46 km/gal. Gasolina Corriente.`,
     }
   }
-  if (l.includes('duster') || l.includes('stepway') || l.includes('sandero') || l.includes('logan') || l.includes('clio')) {
-    const esDuster = l.includes('duster')
+  if (/\b(duster|stepway|sandero|logan|clio|oroch)\b/.test(l)) {
+    const esDuster = /\b(duster|oroch)\b/.test(l)
     return {
       capacidadTanqueGalones: 13.2,
       capacidadTanqueLitros: 50.0,
       consumoKmPorGalon: esDuster ? 32 : 36,
-      tipoCombustible: 'corriente',
-      fichaInvestigadaNota: `Ficha técnica Renault: Tanque oficial 50 L (13.2 gal). Rendimiento: ~${esDuster ? 32 : 36} km/gal. Gasolina Corriente.`,
+      tipoCombustible: combNotas ?? 'corriente',
+      fichaInvestigadaNota: `Catálogo técnico Renault: Tanque 50 L (13.2 gal). Gasolina Corriente.`,
     }
   }
 
-  // 25. Fallback técnico según clase y configuración del vehículo
-  const esPesado = corpus.includes('volqueta') || corpus.includes('6x4') || corpus.includes('6x6') || corpus.includes('quinta rueda') || corpus.includes('tractomula')
-  const esCamionMediano = t === 'camion' || corpus.includes('camion') || corpus.includes('camión')
-  const esPickupOCampero = corpus.includes('4x4') || corpus.includes('pickup') || corpus.includes('campero')
+  // 26. Fallback genérico seguro por tipo y configuración
+  const esPesado =
+    corpus.includes('volqueta') ||
+    corpus.includes('6x4') ||
+    corpus.includes('6x6') ||
+    corpus.includes('quinta rueda') ||
+    corpus.includes('tractomula')
+  const esCamionMediano = t === 'camion' || /\b(camion|camión)\b/.test(corpus)
+  const esPickupOCampero = /\b(4x4|pickup|campero)\b/.test(corpus)
 
   const galonesFinal = esPesado ? 87.0 : esCamionMediano ? 36.0 : esPickupOCampero ? 21.0 : 13.2
   const litrosFinal = Number((galonesFinal * 3.78541).toFixed(1))
-  const tipoComb = (esPesado || esCamionMediano || esPickupOCampero) ? 'diesel' : 'corriente'
+  const tipoComb: TipoCombustible =
+    combNotas ?? (esPesado || esCamionMediano || esPickupOCampero ? 'diesel' : 'corriente')
   const kmGalon = esPesado ? 8.5 : esCamionMediano ? 18 : esPickupOCampero ? 28 : 36
 
   return {
@@ -715,15 +826,12 @@ export function investigarFichaVehiculoIA(
     capacidadTanqueLitros: litrosFinal,
     consumoKmPorGalon: kmGalon,
     tipoCombustible: tipoComb,
-    fichaInvestigadaNota: `Ficha técnica ${esPesado ? 'camión pesado' : esCamionMediano ? 'camión' : 'vehículo'}: Capacidad calculada ${galonesFinal} gal (${litrosFinal} L). Rendimiento: ~${kmGalon} km/gal. ${tipoComb.toUpperCase()}.`,
+    fichaInvestigadaNota: `Catálogo técnico preliminar (${esPesado ? 'camión pesado' : esCamionMediano ? 'camión' : 'vehículo'}): Tanque estimado ${galonesFinal} gal (${litrosFinal} L). ${tipoComb.toUpperCase()}.`,
   }
 }
 
 /**
- * Inteligencia de Selección y Asignación de Vehículos para Misiones 🧠🚚:
- * Analiza el tipo de contingencia (lodo, niños, mudanza, apoyo) y cruza con
- * las notas de CashMet (4x4, winche, 5ta rueda, capacidad de pasajeros)
- * y el nombre del modelo para despachar la unidad perfecta.
+ * Inteligencia de Selección y Asignación de Vehículos para Misiones 🧠🚚
  */
 export function seleccionarVehiculosOptimosMision(
   mision: { titulo: string; tipo: string; impactoSocial?: string; terreno?: string },
@@ -733,10 +841,17 @@ export function seleccionarVehiculosOptimosMision(
   motivoGema: string
   candidatosSecundarios: VehiculoOperativo[]
 } {
-  const aptos = vehiculosDisponibles.filter((v) => v.disponibleParaTrabajo && v.nivelCombustiblePorc > 15)
+  const aptosLibres = vehiculosDisponibles.filter(
+    (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento' && v.nivelCombustiblePorc > 15
+  )
+  const aptos =
+    aptosLibres.length > 0
+      ? aptosLibres
+      : vehiculosDisponibles.filter((v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento')
   const pool = aptos.length > 0 ? aptos : vehiculosDisponibles
 
-  const textoMision = `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''} ${mision.terreno || ''}`.toLowerCase()
+  const textoMision =
+    `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''} ${mision.terreno || ''}`.toLowerCase()
 
   const requierePasajeros =
     textoMision.includes('escolar') ||
@@ -763,22 +878,40 @@ export function seleccionarVehiculosOptimosMision(
     textoMision.includes('mercado') ||
     textoMision.includes('tejas')
 
-  // Evaluar cada vehículo
   const puntuados = pool.map((v) => {
     let score = 0
-    const corpusV = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.capacidadTexto || ''}`.toLowerCase()
+    const corpusV =
+      `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.capacidadTexto || ''}`.toLowerCase()
 
-    const tiene4x4 = corpusV.includes('4x4') || corpusV.includes('winche') || corpusV.includes('trocha') || corpusV.includes('land cruiser') || corpusV.includes('hilux')
-    const tienePasajeros = corpusV.includes('bus') || corpusV.includes('buseta') || corpusV.includes('van') || corpusV.includes('pasajero') || corpusV.includes('escolar') || corpusV.includes('troop carrier')
-    const tienePesado = corpusV.includes('quinta rueda') || corpusV.includes('5ta rueda') || corpusV.includes('tractomula') || corpusV.includes('kodiak') || corpusV.includes('camion')
+    const tiene4x4 =
+      corpusV.includes('4x4') ||
+      corpusV.includes('6x6') ||
+      corpusV.includes('winche') ||
+      corpusV.includes('trocha') ||
+      corpusV.includes('land cruiser') ||
+      corpusV.includes('hilux')
+    const tienePasajeros =
+      corpusV.includes('bus') ||
+      corpusV.includes('buseta') ||
+      corpusV.includes('van') ||
+      corpusV.includes('pasajero') ||
+      corpusV.includes('escolar') ||
+      corpusV.includes('troop carrier') ||
+      corpusV.includes('kavz')
+    const tienePesado =
+      corpusV.includes('quinta rueda') ||
+      corpusV.includes('5ta rueda') ||
+      corpusV.includes('tractomula') ||
+      corpusV.includes('kodiak') ||
+      corpusV.includes('camion') ||
+      v.tipo === 'camion'
 
     if (requierePasajeros && tienePasajeros) score += 50
     if (requiere4x4ORescate && tiene4x4) score += 60
     if (requiereCargaPesada && tienePesado) score += 40
+    if (v.estado === 'en_mision') score -= 40
 
-    // Si tiene buen nivel de combustible
     score += (v.nivelCombustiblePorc || 50) * 0.1
-
     return { vehiculo: v, score, tiene4x4, tienePasajeros, tienePesado }
   })
 
@@ -786,12 +919,12 @@ export function seleccionarVehiculosOptimosMision(
   const mejor = puntuados[0]?.vehiculo || pool[0]
 
   let motivo = `Gema seleccionó ${mejor.marca} ${mejor.linea}`
-  if (requierePasajeros && (mejor.notasCashmet || '').includes('pasajeros')) {
+  if (requierePasajeros && (mejor.notasCashmet || '').toLowerCase().includes('pasajero')) {
     motivo += ` porque tus notas en CashMet indican capacidad de pasajeros, ideal para la ruta escolar.`
-  } else if (requiere4x4ORescate && (mejor.notasCashmet || '').includes('winche')) {
+  } else if (requiere4x4ORescate && (mejor.notasCashmet || '').toLowerCase().includes('winche')) {
     motivo += ` porque tus notas en CashMet confirman winche y tracción para terrenos de alto barro.`
   } else if (requiereCargaPesada) {
-    motivo += ` por su volumen de carga y torque para transporte pesado campesino.`
+    motivo += ` por su volumen de carga y torque para transporte campesino.`
   } else {
     motivo += ` por estar listo en base con tanque al ${mejor.nivelCombustiblePorc}%.`
   }
@@ -803,223 +936,282 @@ export function seleccionarVehiculosOptimosMision(
   }
 }
 
+// ---------------------------------------------------------------------------
+// RADAR CON CADUCIDAD REAL (1–2 DÍAS) Y POOL DE LLAMADAS VEREDALES FRESCAS
+// ---------------------------------------------------------------------------
+
+const MAX_ANTIGUEDAD_EVENTO_MS = 48 * 60 * 60 * 1000 // 2 días máximo
+
 /**
- * Eventos y contingencias del Radar.
- * Los marcados con esNoticiaWebReal: true provienen de noticias en vivo (reciben el chulito discreto ✓).
- * Los marcados con esNoticiaWebReal: false son llamadas y situaciones comunitarias asumidas / simuladas por Gema.
+ * Filtra eventos del radar eliminando automáticamente cualquiera que haya expirado
+ * (por `expiraEn <= ahora` o cuya fecha calendario tenga más de 2 días de antigüedad).
  */
-export const EVENTOS_RADAR_PREDETERMINADOS: EventoRadarLocal[] = [
+export function filtrarEventosRadarVigentes(
+  eventos: EventoRadarLocal[],
+  ahora = Date.now()
+): EventoRadarLocal[] {
+  return (eventos || []).filter((e) => {
+    if (!e || !e.id) return false
+    if (e.id === 'rad-sim-6' || e.titulo.toLowerCase().includes('standby')) return false
+    if (typeof e.expiraEn === 'number' && Number.isFinite(e.expiraEn)) {
+      if (e.expiraEn <= ahora) return false
+    }
+    if (typeof e.creadoEn === 'number' && Number.isFinite(e.creadoEn)) {
+      if (ahora - e.creadoEn > MAX_ANTIGUEDAD_EVENTO_MS) return false
+    } else if (e.fecha && /^\d{4}-\d{2}-\d{2}$/.test(e.fecha)) {
+      const [y, m, d] = e.fecha.split('-').map(Number)
+      const fechaMs = new Date(y, m - 1, d, 23, 59, 59).getTime()
+      if (ahora - fechaMs > MAX_ANTIGUEDAD_EVENTO_MS) return false
+    }
+    return true
+  })
+}
+
+const POOL_LLAMADAS_COMUNITARIAS_RESPALDO: Array<
+  Omit<EventoRadarLocal, 'id' | 'fecha' | 'creadoEn' | 'expiraEn'>
+> = [
   {
-    id: 'rad-web-1',
-    titulo: 'Vía Manizales - Fresno con paso restringido por pérdida de banca',
-    lugar: 'Sector Mesones · Vía a Letras (Caldas)',
-    departamento: 'Caldas',
-    lat: 5.0790,
-    lng: -75.3350,
-    fuenteNoticia: 'Invías & Prensa Regional Eje Cafetero',
-    resumen: 'Paso a un solo carril por desprendimiento de ladera. Larga fila de vehículos pesados y familias varadas sin víveres ni agua.',
-    fecha: hoyISO(),
-    esEmergenciaGrave: true,
-    atencionOficialPresente: true,
-    esNoticiaWebReal: true, // ✓ Noticia real de internet
-    recomendacionGema: 'apoyo_logistico',
-    justificacionGema: 'Hay policía regulando el tránsito, pero las familias y camioneros llevan más de 6 horas atrapados en frío de páramo sin abrigo ni alimentos.',
-  },
-  {
-    id: 'rad-sim-2',
-    titulo: 'Llamada de auxilio: Familia campesina en Vereda El Desquite requiere trasteo de emergencia',
+    titulo: 'Familia campesina en Vereda El Desquite requiere trasteo solidario en trocha',
     lugar: 'Vereda El Desquite (Trocha alta) · Manizales',
     departamento: 'Caldas',
-    lat: 5.0560,
-    lng: -75.4380,
+    lat: 5.056,
+    lng: -75.438,
     fuenteNoticia: 'Llamada directa a la Central Bear\'s Reserve',
-    resumen: 'Madre cabeza de hogar con tres niños y adulto mayor. Su vivienda presenta agrietamiento severo por infiltración de agua. Necesitan trasladar enseres y camas por trocha de difícil acceso a un albergue familiar antes de la noche.',
-    fecha: hoyISO(),
+    resumen:
+      'Madre cabeza de hogar con tres niños y adulto mayor necesita trasladar enseres por trocha destapada antes de las lluvias de la tarde.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
-    esNoticiaWebReal: false, // Llamada comunitaria asumida
+    esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Situación netamente comunitaria. Ninguna empresa de mudanza ni camión convencional sube a esa ladera destapada. Misión prioritaria de apoyo.',
+    justificacionGema: 'Camino rural donde no ingresan vehículos convencionales. Ideal unidad 4x4 de carga.',
   },
   {
-    id: 'rad-sim-3',
-    titulo: 'Camión lechero con rotura de cardán atascado en vado de barro',
+    titulo: 'Camión lechero con falla de cardán atascado en vado de barro',
     lugar: 'Sector Bajo Tablazo ↔ Vereda La Linda',
     departamento: 'Caldas',
     lat: 5.0345,
-    lng: -75.5280,
+    lng: -75.528,
     fuenteNoticia: 'Comité de Ganaderos Veredales WhatsApp',
-    resumen: 'Transporta 1.800 litros de leche de 9 pequeñas parcelas familiares. El barro húmedo le impidió salir tras la falla mecánica. Si no se remolca a orilla firme antes del mediodía se perderá el trabajo semanal.',
-    fecha: hoyISO(),
+    resumen:
+      'Transporta 1.800 litros de leche de 9 parcelas familiares. Si no se remolca a terreno firme se pierde la producción del día.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
-    esNoticiaWebReal: false, // Llamada comunitaria asumida
+    esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Despliegue de vehículo de tracción pesada con winche y cables de arrastre. Salvar la producción de nuestros campesinos.',
+    justificacionGema: 'Despliegue de vehículo con winche y eslingas de arrastre pesado.',
   },
   {
-    id: 'rad-web-4',
-    titulo: 'Derrumbe en Autopista Medellín - Bogotá con cierre total',
-    lugar: 'Municipio de San Luis · Antioquia',
-    departamento: 'Antioquia',
-    lat: 6.0425,
-    lng: -74.9936,
-    fuenteNoticia: 'Periódico El Colombiano / Invías',
-    resumen: 'Cierre total de la troncal por más de 10.000 m3 de tierra.',
-    fecha: hoyISO(),
-    esEmergenciaGrave: true,
-    atencionOficialPresente: true,
-    esNoticiaWebReal: true, // ✓ Noticia real de internet
-    recomendacionGema: 'monitorear_sin_intervenir',
-    justificacionGema: 'Queda a más de 160 km en Antioquia y cuenta con retroexcavadoras de la gobernación y concesión. Fuera del rango de auxilio inmediato.',
-  },
-  {
-    id: 'rad-sim-5',
-    titulo: 'Árbol centenario derribado sobre cerco y paso peatonal de niños campesinos',
-    lugar: 'Vereda San Peregrino · Caldas',
+    titulo: 'Árbol derribado sobre paso peatonal escolar y manguera de acueducto veredal',
+    lugar: 'Vereda San Peregrino · Manizales',
     departamento: 'Caldas',
     lat: 5.0742,
-    lng: -75.5810,
-    fuenteNoticia: 'Junta de Acción Comunal Rural',
-    resumen: 'Tronco y ramas espinosas cortaron la manguera de acueducto veredal y bloquean el camino de herradura que usan los niños para caminar a la escuela.',
-    fecha: hoyISO(),
+    lng: -75.581,
+    fuenteNoticia: 'Junta de Acción Comunal San Peregrino',
+    resumen:
+      'Tronco bloquea el camino que usan los niños hacia la escuela y rompió la conducción de agua de seis viviendas.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
-    esNoticiaWebReal: false, // Llamada comunitaria asumida
+    esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Se requiere equipo con motosierra, eslingas de arrastre y personal para liberar el camino y ayudar a reconectar el tubo de agua.',
+    justificacionGema: 'Muy cerca de Base Finca El Guadual. Requiere motosierra, cadenas y cuadrilla de apoyo.',
   },
-]
-
-/**
- * Banco de contingencias dinámicas y realistas para escaneo en vivo de frecuencias por Gema 📡
- */
-const CONTINGENCIAS_DINAMICAS_POOL: Omit<EventoRadarLocal, 'id' | 'fecha'>[] = [
   {
-    titulo: 'Deslizamiento con pérdida parcial de banca en vía antigua a Chinchiná',
+    titulo: 'Deslizamiento menor en vía antigua a Chinchiná bloquea salida de cosecha',
     lugar: 'Vereda El Rosario (Sector La Siria) · Caldas',
     departamento: 'Caldas',
     lat: 5.0489,
     lng: -75.5684,
     fuenteNoticia: 'Radio Comunitaria Chinchiná Stereo',
-    resumen: 'Lluvia constante de madrugada provocó caída de talud sobre la calzada veredal. Familias campesinas no pueden sacar plátano ni cítricos.',
+    resumen:
+      'Lluvia de madrugada provocó caída de talud sobre calzada veredal. Productores de plátano y café no pueden sacar carga.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
     esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Camino veredal secundario desatendido por maquinaria oficial. Se requiere camión o campero con winche y cuadrilla con palas.',
+    justificacionGema: 'Vía veredal secundaria sin maquinaria oficial. Requiere tracción 4x4 y herramientas.',
   },
   {
-    titulo: 'Campero de acopiador de café atrapado en cuneta profunda por torrencial aguacero',
+    titulo: 'Campero cafetero encunetado en greda húmeda en Vereda Morrogacho',
     lugar: 'Vereda Morrogacho · Manizales',
     departamento: 'Caldas',
     lat: 5.0612,
-    lng: -75.5340,
+    lng: -75.534,
     fuenteNoticia: 'Llamada de vecino a la Reserva',
-    resumen: 'Toyota Land Cruiser con 12 bultos de café cereza resbaló en greda húmeda y quedó de costado al borde de un zanjón.',
+    resumen:
+      'Campero con 12 bultos de café cereza resbaló al borde de una cuneta profunda y requiere extracción controlada.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
     esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Riesgo de volcamiento completo. Maniobra ideal de polea de reenvío y anclaje a árbol con winche de 12.000 lbs.',
+    justificacionGema: 'Maniobra de polea de reenvío y winche para evitar volcamiento.',
   },
   {
-    titulo: 'Bloqueo por rocas y material suelto en paso veredal La Quiebra de Vélez',
-    lugar: 'Sector La Quiebra de Vélez ↔ Cabaña · Caldas',
+    titulo: 'Avería de embrague en furgón escolar comunitario en subida de Alto Tablazo',
+    lugar: 'Sector Alto Tablazo · Manizales',
+    departamento: 'Caldas',
+    lat: 5.043,
+    lng: -75.509,
+    fuenteNoticia: 'Grupo WhatsApp Veredal Tablazo',
+    resumen:
+      'Vehículo comunitario quedó sin tracción en plena pendiente con 7 pasajeros esperando transbordo o remolque.',
+    esEmergenciaGrave: false,
+    atencionOficialPresente: false,
+    esNoticiaWebReal: false,
+    recomendacionGema: 'apoyo_logistico',
+    justificacionGema: 'Remolque con barra rígida y apoyo mecánico de emergencia.',
+  },
+  {
+    titulo: 'Rocas sueltas obstaculizan paso veredal en La Quiebra de Vélez',
+    lugar: 'Sector La Quiebra de Vélez ↔ La Cabaña · Caldas',
     departamento: 'Caldas',
     lat: 5.1021,
     lng: -75.5645,
-    fuenteNoticia: 'Comité de Cafeteros de Manizales',
-    resumen: 'Tres piedras de gran volumen obstruyen el paso del camión recolector de basura y vehículos de víveres hacia las veredas altas.',
+    fuenteNoticia: 'Comité de Cafeteros Veredal',
+    resumen:
+      'Tres rocas de gran volumen impiden el tránsito hacia las fincas altas. Solicitan camión con cadenas para despejar.',
     esEmergenciaGrave: false,
     atencionOficialPresente: false,
     esNoticiaWebReal: false,
     recomendacionGema: 'intervenir_urgente',
-    justificacionGema: 'Arrastre pesado con cables acerados y vehículo de alto torque para despejar el carril.',
-  },
-  {
-    titulo: 'Avería mecánica de furgón escolar comunitario en subida de Alto Tablazo',
-    lugar: 'Sector Alto Tablazo · Manizales',
-    departamento: 'Caldas',
-    lat: 5.0430,
-    lng: -75.5090,
-    fuenteNoticia: 'Grupo WhatsApp Veredal Tablazo',
-    resumen: 'Vehículo particular de transporte veredal sufrió daño de embrague en plena rampa con 7 pasajeros esperando auxilio.',
-    esEmergenciaGrave: false,
-    atencionOficialPresente: false,
-    esNoticiaWebReal: false,
-    recomendacionGema: 'apoyo_logistico',
-    justificacionGema: 'Remolque con barra de tiro rígida o auxilio de transbordo hacia Manizales.',
-  },
-  {
-    titulo: 'Inundación de vado de quebrada con paso suspendido hacia vereda Gallinazo',
-    lugar: 'Vía Gallinazo · Villamaría (Caldas)',
-    departamento: 'Caldas',
-    lat: 5.0280,
-    lng: -75.4750,
-    fuenteNoticia: 'Bomberos Voluntarios Villamaría',
-    resumen: 'Creciente súbita de la quebrada depositó palizadas y piedras sobre el pontón impidiendo el tránsito de motocicletas y camperos.',
-    esEmergenciaGrave: true,
-    atencionOficialPresente: true,
-    esNoticiaWebReal: true,
-    recomendacionGema: 'apoyo_logistico',
-    justificacionGema: 'Apoyo con motosierra y cadenas para retirar troncos arrastrados por la corriente una vez baje el caudal.',
+    justificacionGema: 'Arrastre pesado con vehículo de alto torque.',
   },
 ]
 
 /**
- * Escanea frecuencias y genera nuevas contingencias de campo autónomas con Gema
+ * Respaldo local (sin internet/Gemini) para generar llamadas comunitarias frescas con caducidad de ~28h.
+ * NUNCA inventa `esNoticiaWebReal: true`.
  */
-export function escanearNuevosEventosRadarIA(eventosActuales: EventoRadarLocal[]): {
-  nuevosEventos: EventoRadarLocal[]
-  eventoAgregado: EventoRadarLocal | null
-} {
-  const titulosExistentes = new Set(eventosActuales.map((e) => e.titulo.toLowerCase().trim()))
-  const candidatos = CONTINGENCIAS_DINAMICAS_POOL.filter(
-    (c) => !titulosExistentes.has(c.titulo.toLowerCase().trim())
+export function generarLlamadasComunitariasRespaldo(
+  eventosActuales: EventoRadarLocal[],
+  cantidad = 2,
+  ahora = Date.now()
+): EventoRadarLocal[] {
+  const existentes = new Set(eventosActuales.map((e) => e.titulo.toLowerCase().trim()))
+  const candidatos = POOL_LLAMADAS_COMUNITARIAS_RESPALDO.filter(
+    (c) => !existentes.has(c.titulo.toLowerCase().trim())
   )
+  const hoy = hoyISO()
+  const elegidos: EventoRadarLocal[] = []
 
-  let seleccionado: EventoRadarLocal
-  if (candidatos.length > 0) {
-    const elegido = candidatos[Math.floor(Math.random() * candidatos.length)]
-    seleccionado = {
-      ...elegido,
-      id: `rad-din-${Date.now()}`,
-      fecha: hoyISO(),
-    }
-  } else {
-    // Generar dinámicamente con timestamp
-    const timestamp = Date.now()
-    seleccionado = {
-      id: `rad-din-${timestamp}`,
-      titulo: `Alerta veredal de auxilio en vía rural San Peregrino #${String(timestamp).slice(-3)}`,
-      lugar: 'Vereda San Peregrino · Sector Fincas Bajas',
+  const mezcla = [...candidatos].sort(() => Math.random() - 0.5)
+  for (let i = 0; i < Math.min(cantidad, mezcla.length); i++) {
+    const item = mezcla[i]
+    elegidos.push({
+      ...item,
+      id: `rad-com-${ahora}-${i}`,
+      fecha: hoy,
+      creadoEn: ahora,
+      expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
+      esNoticiaWebReal: false,
+    })
+  }
+
+  if (elegidos.length === 0 && cantidad > 0) {
+    const coords = resolverCoordenadasLugar('Vereda San Peregrino', 'Caldas')
+    elegidos.push({
+      id: `rad-com-${ahora}`,
+      titulo: `Solicitud veredal de apoyo vial en San Peregrino (#${String(ahora).slice(-3)})`,
+      lugar: 'Vereda San Peregrino · Manizales',
       departamento: 'Caldas',
-      lat: 5.0685 + (Math.random() - 0.5) * 0.02,
-      lng: -75.589 + (Math.random() - 0.5) * 0.02,
-      fuenteNoticia: 'Llamada de radio frecuencia comunitaria',
-      resumen: 'Camión de carga local atascado en barrizal tras lluvia torrencial. Requiere tracción de rescate.',
-      fecha: hoyISO(),
+      lat: coords.lat,
+      lng: coords.lng,
+      fuenteNoticia: 'Radio frecuencia comunitaria Bear\'s Reserve',
+      resumen: 'Vehículo rural con dificultad de paso en tramo destapado tras lluvias recientes.',
+      fecha: hoy,
+      creadoEn: ahora,
+      expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
       esEmergenciaGrave: false,
       atencionOficialPresente: false,
       esNoticiaWebReal: false,
       recomendacionGema: 'intervenir_urgente',
-      justificacionGema: 'Despliegue de unidad 4x4 con winche para halar el vehículo a terreno firme.',
-    }
+      justificacionGema: 'Evaluar despacho de unidad 4x4 desde Finca El Guadual.',
+    })
   }
 
-  return {
-    nuevosEventos: [seleccionado, ...eventosActuales],
-    eventoAgregado: seleccionado,
-  }
+  return elegidos
 }
 
 /**
- * Generador de Crónicas de Campo en lenguaje humano auténtico 📖:
- * Relata de forma humana y realista cómo transcurrió la misión, el tiempo invertido,
- * los vehículos y personal que participaron, y el desenlace (que puede ser exitoso,
- * con desenlace parcial o un repliegue por condiciones extremas).
+ * Compatibilidad: devuelve llamadas comunitarias frescas (sin noticias web falsas).
  */
+export const EVENTOS_RADAR_PREDETERMINADOS: EventoRadarLocal[] =
+  generarLlamadasComunitariasRespaldo([], 3)
+
+export function escanearNuevosEventosRadarIA(eventosActuales: EventoRadarLocal[]): {
+  nuevosEventos: EventoRadarLocal[]
+  eventoAgregado: EventoRadarLocal | null
+} {
+  const vigentes = filtrarEventosRadarVigentes(eventosActuales)
+  const generados = generarLlamadasComunitariasRespaldo(vigentes, 1)
+  const agregado = generados[0] ?? null
+  return {
+    nuevosEventos: agregado ? [agregado, ...vigentes] : vigentes,
+    eventoAgregado: agregado,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EVALUACIÓN AUTÓNOMA DE MISIONES (RESPALDO LOCAL SI GEMINI NO ESTÁ DISPONIBLE)
+// ---------------------------------------------------------------------------
+
+export function evaluarDesenlaceMisionLocal(
+  mision: MisionComunitaria,
+  vehiculosParticipantes: VehiculoOperativo[],
+  tripulantesNombres: string[]
+): {
+  resultado: 'exito' | 'parcial' | 'fallida_dificultad'
+  factorDistanciaReal: number
+  cronicaHistoria: string
+} {
+  // Rutas habituales (escolares / mercado) casi siempre concluyen con éxito
+  if (mision.tipo === 'ruta_habitual') {
+    const nombresVehs = vehiculosParticipantes.map((v) => `${v.marca} ${v.linea}`)
+    return {
+      resultado: 'exito',
+      factorDistanciaReal: 1.0,
+      cronicaHistoria: generarCronicaMisionNarrativa(mision, nombresVehs, tripulantesNombres, 'exito'),
+    }
+  }
+
+  // Puntaje de idoneidad según terreno, equipo 4x4/winche, llantas y dificultad
+  let riesgo = 0.08
+  if (mision.terreno === 'trocha_extrema_barrizal') riesgo += 0.28
+  else if (mision.terreno === 'trocha_moderada') riesgo += 0.1
+  if (mision.prioridad === 'critica_extrema') riesgo += 0.12
+
+  const tieneEquipoAdecuado = vehiculosParticipantes.some((v) => {
+    const corpus = `${v.marca} ${v.linea} ${v.tipo} ${v.notasCashmet || ''}`.toLowerCase()
+    return v.tipo === 'camion' || /4x4|6x6|winche|trocha|land cruiser|hilux|unimog/.test(corpus)
+  })
+  if (tieneEquipoAdecuado) riesgo -= 0.16
+  else if (mision.terreno === 'trocha_extrema_barrizal') riesgo += 0.22
+
+  const llantasCriticas = vehiculosParticipantes.some((v) => v.desgasteLlantasPorc >= 75)
+  if (llantasCriticas) riesgo += 0.14
+
+  const r = Math.random()
+  let resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
+  let factorDistanciaReal = 1.0
+
+  if (r < Math.max(0.03, riesgo * 0.35)) {
+    resultado = 'fallida_dificultad'
+    factorDistanciaReal = 0.65
+  } else if (r < Math.max(0.1, riesgo)) {
+    resultado = 'parcial'
+    factorDistanciaReal = 0.92
+  } else {
+    resultado = 'exito'
+    factorDistanciaReal = 1.0
+  }
+
+  const nombresVehs = vehiculosParticipantes.map((v) => `${v.marca} ${v.linea}`)
+  return {
+    resultado,
+    factorDistanciaReal,
+    cronicaHistoria: generarCronicaMisionNarrativa(mision, nombresVehs, tripulantesNombres, resultado),
+  }
+}
+
 export function generarCronicaMisionNarrativa(
   mision: MisionComunitaria,
   vehiculosNombres: string[],
@@ -1031,61 +1223,66 @@ export function generarCronicaMisionNarrativa(
       ? `${mision.duracionMinutos} minutos`
       : `${(mision.duracionMinutos / 60).toFixed(1)} horas`
 
-  const flotaTexto = vehiculosNombres.length > 0 ? vehiculosNombres.join(' y ') : 'vehículo de la reserva'
-  const equipoTexto = tripulantesNombres.length > 0 ? tripulantesNombres.join(', ') : 'equipo de guardia'
+  const flotaTexto =
+    vehiculosNombres.length > 0 ? vehiculosNombres.join(' y ') : 'vehículo de la reserva'
+  const equipoTexto =
+    tripulantesNombres.length > 0 ? tripulantesNombres.join(', ') : 'equipo de guardia'
 
   if (resultado === 'exito') {
     return (
-      `Relato de Operaciones · Salida desde la base central hacia ${mision.destino}. ` +
-      `La maniobra tomó aproximadamente ${duracionTexto} con un recorrido acumulado de ${mision.distanciaKmIdaYVuelta} km sobre ${mision.terreno.replace(/_/g, ' ')}. ` +
-      `A cargo de la comisión estuvieron ${equipoTexto}, empleando ${flotaTexto}. ` +
-      `Al llegar al lugar se coordinó directamente con los pobladores de la zona; se aseguraron los anclajes y se superaron los tramos más críticos de barro sin novedades mecánicas graves. ` +
-      `El objetivo se completó satisfactoriamente, dejando a la comunidad asistida y retornando a base con la flota lista para el siguiente turno.`
+      `Relato de Operaciones · Salida desde Finca El Guadual hacia ${mision.destino}. ` +
+      `La operación duró ${duracionTexto} con un recorrido de ${mision.distanciaKmIdaYVuelta} km sobre ${mision.terreno.replace(/_/g, ' ')}. ` +
+      `A cargo estuvieron ${equipoTexto}, empleando ${flotaTexto}. ` +
+      `Se coordinó directamente con la comunidad en terreno y se completó el objetivo sin novedades mecánicas graves, retornando a base listos para el siguiente turno.`
     )
   }
 
   if (resultado === 'parcial') {
     return (
       `Bitácora de Intervención Compleja · Despliegue hacia ${mision.destino} (${duracionTexto}, ${mision.distanciaKmIdaYVuelta} km). ` +
-      `Intervinieron ${equipoTexto} con ${flotaTexto}. El terreno presentó inclinaciones severas y lodazal inestable que exigió el uso continuo de winches y doble tracción. ` +
-      `Se logró remolcar y evacuar la carga principal hasta una zona firme y segura de la carretera; sin embargo, debido al riesgo de deslizamiento de la banca superior y falta de tracción en la pendiente final, ` +
-      `se coordinó con líderes comunales para continuar el tramo restante a pie con bestias de carga. Equipo replegado a base sin daños a la integridad del personal.`
+      `Participaron ${equipoTexto} con ${flotaTexto}. El terreno presentó lodazal e inclinación exigente que requirió maniobras lentas y anclajes. ` +
+      `Se aseguró y trasladó la carga principal a zona firme; el tramo final se coordinó con líderes veredales por riesgo de banca inestable. Equipo de vuelta en base sin lesionados.`
     )
   }
 
   return (
-    `Reporte de Repliegue Táctico y Resguardo · Desplazamiento hacia ${mision.destino} durante ${duracionTexto}. ` +
-    `La tripulación (${equipoTexto}) a bordo de ${flotaTexto} enfrentó una crecida repentina de cauce y derrumbe activo que bloqueó por completo la trocha. ` +
-    `Evaluada la seguridad del personal y la estabilidad del suelo, se determinó suspender el ingreso motorizado para evitar encunetamiento o volcamiento. ` +
-    `Se entregaron víveres y botiquines a mano a los caminantes de la vereda antes de retornar con precaución a la base central.`
+    `Reporte de Repliegue Táctico · Desplazamiento hacia ${mision.destino} durante ${duracionTexto}. ` +
+    `La tripulación (${equipoTexto}) a bordo de ${flotaTexto} encontró condiciones críticas de derrumbe activo y piso inestable en la trocha. ` +
+    `Priorizando la seguridad del personal y la integridad del vehículo, se suspendió el ingreso final, se entregó apoyo inmediato a pie a los vecinos del sector y se retornó con precaución a la base central.`
   )
 }
 
+// ---------------------------------------------------------------------------
+// MOTOR DE TURNOS SEMANALES 24/7 (TOPE ESTRICTO 42H, SIN EXCLUSIONES POR CARGO)
+// ---------------------------------------------------------------------------
+
 /**
- * Motor de rotación inteligente de turnos 24/7 (Tope 40-42 horas semanales,
- * cobertura continua de Lunes a Domingo sin huecos ni jornadas partidas,
- * y distribución equitativa donde todos los colaboradores activos completan entre 40 y 42h).
+ * Genera el cuadrante semanal 24/7 respetando:
+ * - Tope estricto <= 42 horas por colaborador (turnos continuos de 8h exactas).
+ * - Usa TODOS los colaboradores marcados como `activo` en Bear's Reserve (ninguno queda en 0h por cargo).
+ * - Vincula los IDs REALES de las `rutasHabituales` activas (`rut-escolar-manana`, `rut-escolar-tarde`, `rut-mercado-campesino`, etc.).
+ * - Rotación circular que funciona con CUALQUIER número de empleados (incluyendo múltiplos de 3).
+ * - IDs de turno únicos sin colisiones y validación correcta de horarios de estudio/medianoche.
  */
 export function generarTurnosSemanalesIA(
   empleados: EmpleadoOperativo[],
   fechaLunesISO: string,
-  _rutasHabituales: RutaHabitual[] = [],
+  rutasHabituales: RutaHabitual[] = [],
   rotacionOffset: number = 0
 ): TurnoSemanal[] {
   const turnos: TurnoSemanal[] = []
   const DIAS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
-  // Descomponer fecha local de forma segura evitando desajustes UTC
   const partes = fechaLunesISO.split('-').map(Number)
   const baseFecha = new Date(partes[0], partes[1] - 1, partes[2], 12, 0, 0)
 
-  // Solo colaboradores operativos activos (excluye cargos administrativos u omitidos como editores)
   const empleadosActivos = empleados.filter((e) => e.activo !== false)
   const n = empleadosActivos.length
+  if (n === 0) return []
 
-  // Rotación circular interactiva: desplaza el punto de partida en cada clic para reordenar la semana
-  const shift = n > 0 ? (Math.abs(rotacionOffset) * 3) % n : 0
-  const poolRotado = n > 0 ? [...empleadosActivos.slice(shift), ...empleadosActivos.slice(0, shift)] : []
+  // Rotación circular que cambia en cada clic para cualquier n > 1 (incluyendo n = 3, 6, 9)
+  const shift = n > 1 ? Math.abs(rotacionOffset) % n : 0
+  const poolRotado = [...empleadosActivos.slice(shift), ...empleadosActivos.slice(0, shift)]
 
   const horasAsignadas: Record<string, number> = {}
   const turnosPorEmpleado: Record<string, number> = {}
@@ -1096,29 +1293,24 @@ export function generarTurnosSemanalesIA(
     diasOcupadosPorEmpleado[e.id] = new Set<number>()
   })
 
-  // Estructura de los 7 días de la semana
   const diasInfo: Array<{
     d: number
     fechaISO: string
     nombreDia: string
-    diaSemanaRestriccion: number
+    diaSemanaRestriccion: number // 0=Dom, 1=Lun..6=Sab
     diaSemanaSiguiente: number
   }> = []
 
   for (let d = 0; d < 7; d++) {
     const fechaDia = new Date(baseFecha)
     fechaDia.setDate(baseFecha.getDate() + d)
-    const y = fechaDia.getFullYear()
-    const m = String(fechaDia.getMonth() + 1).padStart(2, '0')
-    const diaNum = String(fechaDia.getDate()).padStart(2, '0')
-    const fechaISO = `${y}-${m}-${diaNum}`
+    const fechaISO = isoLocal(fechaDia)
     const nombreDia = DIAS[d]
     const diaSemanaRestriccion = d === 6 ? 0 : d + 1
     const diaSemanaSiguiente = (diaSemanaRestriccion + 1) % 7
     diasInfo.push({ d, fechaISO, nombreDia, diaSemanaRestriccion, diaSemanaSiguiente })
   }
 
-  // Registro de quién trabajó en turno nocturno por día (para garantizar descanso el día siguiente)
   const nocheTrabajadaPorDia: Record<number, Set<string>> = {
     0: new Set(),
     1: new Set(),
@@ -1129,44 +1321,62 @@ export function generarTurnosSemanalesIA(
     6: new Set(),
   }
 
-  // Verificador de idoneidad y disponibilidad de un empleado
+  // Rutas habituales activas mapeadas por día de semana y franja
+  const rutasActivas = rutasHabituales.filter((r) => r.activa !== false)
+  const buscarRutaParaFranja = (
+    diaSemana: number,
+    franja: 'manana' | 'tarde'
+  ): RutaHabitual | undefined => {
+    return rutasActivas.find((r) => {
+      if (!r.diasSemana.includes(diaSemana)) return false
+      if (franja === 'manana') {
+        return (
+          r.tipoHorario === 'manana' ||
+          r.tipoHorario === 'mercado_sabado' ||
+          (r.horaSalida ? horaAMinutos(r.horaSalida) < 12 * 60 : false)
+        )
+      }
+      return (
+        r.tipoHorario === 'tarde' ||
+        (r.horaSalida ? horaAMinutos(r.horaSalida) >= 12 * 60 : false)
+      )
+    })
+  }
+
+  const tieneConflictoHorario = (
+    emp: EmpleadoOperativo,
+    diaInfo: (typeof diasInfo)[number],
+    franja: 'manana' | 'tarde' | 'noche'
+  ): boolean => {
+    return (emp.horariosNoDisponibles || []).some((h) => {
+      const hIni = horaAMinutos(h.horaInicio)
+      const hFin = horaAMinutos(h.horaFin, true)
+      if (franja === 'noche') {
+        const chocaNoche = h.diaSemana === diaInfo.diaSemanaRestriccion && hFin > 22 * 60
+        const chocaMadrugada = h.diaSemana === diaInfo.diaSemanaSiguiente && hIni < 6 * 60
+        return chocaNoche || chocaMadrugada
+      }
+      if (franja === 'manana') {
+        return h.diaSemana === diaInfo.diaSemanaRestriccion && hIni < 14 * 60 && hFin > 6 * 60
+      }
+      return h.diaSemana === diaInfo.diaSemanaRestriccion && hIni < 22 * 60 && hFin > 14 * 60
+    })
+  }
+
   const puedeAsignarse = (
     emp: EmpleadoOperativo,
     d: number,
     franja: 'manana' | 'tarde' | 'noche',
-    tipoPuesto: 'conductor' | 'mecanico',
     duracionHoras: number
-  ) => {
-    // No exceder el tope legal máximo de 42.5 horas
-    if ((horasAsignadas[emp.id] || 0) + duracionHoras > 42.5) return false
-    // Máximo 1 turno por día (jornada continua de 8h, sin doblar turno el mismo día)
+  ): boolean => {
+    const tope = Math.min(42, emp.maxHorasSemanales || 42)
+    if ((horasAsignadas[emp.id] || 0) + duracionHoras > tope) return false
     if (diasOcupadosPorEmpleado[emp.id]?.has(d)) return false
-    // Si viene saliendo de turno nocturno (terminó a las 06:00 AM hoy), no puede entrar a la mañana a las 06:00
     if (franja === 'manana' && d > 0 && nocheTrabajadaPorDia[d - 1]?.has(emp.id)) return false
-
-    const diaInfo = diasInfo[d]
-    // Respetar compromisos personales / universitarios
-    const tieneConflicto = emp.horariosNoDisponibles.some((h) => {
-      if (franja === 'noche') {
-        const chocaNoche = h.diaSemana === diaInfo.diaSemanaRestriccion && h.horaFin > '22:00'
-        const chocaMadrugada = h.diaSemana === diaInfo.diaSemanaSiguiente && h.horaInicio < '06:00'
-        return chocaNoche || chocaMadrugada
-      } else if (franja === 'manana') {
-        return h.diaSemana === diaInfo.diaSemanaRestriccion && h.horaInicio < '14:00' && h.horaFin > '06:00'
-      } else {
-        return h.diaSemana === diaInfo.diaSemanaRestriccion && h.horaInicio < '22:00' && h.horaFin > '14:00'
-      }
-    })
-    if (tieneConflicto) return false
-
-    // Validación de afinidad mínima
-    if (tipoPuesto === 'mecanico' && afinidadMecanico(emp) === 0) return false
-    if (tipoPuesto === 'conductor' && afinidadConductor(emp) === 0) return false
-
+    if (tieneConflictoHorario(emp, diasInfo[d], franja)) return false
     return true
   }
 
-  // Helper para asignar un turno y actualizar contadores
   const asignarTurno = (
     emp: EmpleadoOperativo,
     d: number,
@@ -1185,7 +1395,7 @@ export function generarTurnosSemanalesIA(
 
     const diaInfo = diasInfo[d]
     turnos.push({
-      id: `tur-${diaInfo.fechaISO}-${franja}-${idSufijo}`,
+      id: `tur-${diaInfo.fechaISO}-${franja}-${idSufijo}-${emp.id}`,
       semanaISO: fechaLunesISO,
       empleadoId: emp.id,
       empleadoNombre: emp.nombreCompleto,
@@ -1202,10 +1412,20 @@ export function generarTurnosSemanalesIA(
   }
 
   // =========================================================================
-  // FASE 1: CONDUCTORES TRONCALES (Garantiza Conductor en las 21 franjas L-D)
+  // FASE 1: CONDUCTORES TRONCALES Y RUTAS HABITUALES (21 franjas L-D)
   // =========================================================================
   for (const diaInfo of diasInfo) {
-    const { d, nombreDia } = diaInfo
+    const { d, nombreDia, diaSemanaRestriccion } = diaInfo
+    const rutaManana = buscarRutaParaFranja(diaSemanaRestriccion, 'manana')
+    const rutaTarde = buscarRutaParaFranja(diaSemanaRestriccion, 'tarde')
+
+    const rutaMananaId =
+      rutaManana?.id ??
+      (d <= 4 ? 'rut-escolar-manana' : d === 5 ? 'rut-mercado-campesino' : undefined)
+    const rutaTardeId = rutaTarde?.id ?? (d <= 4 ? 'rut-escolar-tarde' : undefined)
+
+    const horaMananaIni = rutaManana?.horaSalida === '05:30' ? '05:30' : '06:00'
+    const horaMananaFin = horaMananaIni === '05:30' ? '13:30' : '14:00'
 
     const franjasCond: Array<{
       franja: 'manana' | 'tarde' | 'noche'
@@ -1218,54 +1438,52 @@ export function generarTurnosSemanalesIA(
     }> = [
       {
         franja: 'manana',
-        horaInicio: '06:00',
-        horaFin: '14:00',
-        horas: d <= 4 ? 8.5 : d === 5 ? 8.5 : 8.0, // 8.5h para rutas con inspección/alistamiento
-        rol:
-          d <= 4
+        horaInicio: horaMananaIni,
+        horaFin: horaMananaFin,
+        horas: 8,
+        rol: rutaManana
+          ? `🚌 Conducción ${rutaManana.nombre} (${rutaManana.horaSalida || horaMananaIni}) + Guardia Base (${nombreDia})`
+          : d <= 4
             ? `🚌 Conducción Ruta Escolar Matutina 06:00 + Guardia Base (${nombreDia})`
             : d === 5
               ? `🧺 Conducción Ruta Solidaria Mercado Campesino 05:30 + Guardia Base (${nombreDia})`
               : `🚗 Conductor de Guardia Matutina & Base Central (${nombreDia})`,
-        rutaHabitualId: d <= 4 ? 'rut-escolar-matutina' : d === 5 ? 'rut-mercado-campesino' : undefined,
+        rutaHabitualId: rutaMananaId,
         idSufijo: 'cond-ruta',
       },
       {
         franja: 'tarde',
         horaInicio: '14:00',
         horaFin: '22:00',
-        horas: d <= 4 ? 8.5 : 8.0,
-        rol:
-          d <= 4
+        horas: 8,
+        rol: rutaTarde
+          ? `🚌 Conducción ${rutaTarde.nombre} (${rutaTarde.horaSalida || '15:00'}) + Guardia Base (${nombreDia})`
+          : d <= 4
             ? `🚌 Conducción Ruta Escolar Vespertina 15:00 + Guardia Base (${nombreDia})`
             : `🚗 Conductor de Guardia Vespertina & Auxilio Veredal (${nombreDia})`,
-        rutaHabitualId: d <= 4 ? 'rut-escolar-vespertina' : undefined,
+        rutaHabitualId: rutaTardeId,
         idSufijo: 'cond-ruta',
       },
       {
         franja: 'noche',
         horaInicio: '22:00',
         horaFin: '06:00',
-        horas: 8.0,
-        rol: `🚗 Conductor Nocturno & Respuesta Inmediata a Emergencias (${nombreDia})`,
+        horas: 8,
+        rol: `🚗 Conductor Nocturno & Respuesta Inmediata (${nombreDia})`,
         idSufijo: 'cond-noche',
       },
     ]
 
     for (const fc of franjasCond) {
-      const candidatos = poolRotado
-        .filter((emp) => puedeAsignarse(emp, d, fc.franja, 'conductor', fc.horas))
-        .sort((a, b) => {
-          // 1. Quien tenga menos horas asignadas va de primero para avanzar en equidad
-          const hA = horasAsignadas[a.id] || 0
-          const hB = horasAsignadas[b.id] || 0
-          if (hA !== hB) return hA - hB
-          // 2. Afinidad de conducción
-          const ca = afinidadConductor(a)
-          const cb = afinidadConductor(b)
-          if (cb !== ca) return cb - ca
-          return 0
-        })
+      // Prioriza quienes tienen afinidad de conductor; si no hay ninguno libre, acepta cualquier activo disponible
+      const disponibles = poolRotado.filter((emp) => puedeAsignarse(emp, d, fc.franja, fc.horas))
+      const conAfinidad = disponibles.filter((emp) => afinidadConductor(emp) > 0)
+      const candidatos = (conAfinidad.length > 0 ? conAfinidad : disponibles).sort((a, b) => {
+        const hA = horasAsignadas[a.id] || 0
+        const hB = horasAsignadas[b.id] || 0
+        if (hA !== hB) return hA - hB
+        return afinidadConductor(b) - afinidadConductor(a)
+      })
 
       if (candidatos[0]) {
         asignarTurno(
@@ -1284,7 +1502,7 @@ export function generarTurnosSemanalesIA(
   }
 
   // =========================================================================
-  // FASE 2: MECÁNICOS Y SOPORTE (Garantiza Mecánico en las 21 franjas L-D)
+  // FASE 2: MECÁNICOS / SOPORTE EN BASE (hasta 21 franjas L-D)
   // =========================================================================
   for (const diaInfo of diasInfo) {
     const { d, nombreDia } = diaInfo
@@ -1294,49 +1512,51 @@ export function generarTurnosSemanalesIA(
       horaInicio: string
       horaFin: string
       horas: number
-      rol: string
+      rolMec: string
+      rolApoyo: string
       idSufijo: string
     }> = [
       {
         franja: 'manana',
         horaInicio: '06:00',
         horaFin: '14:00',
-        horas: 8.0,
-        rol: `🔧 Mecánico de Base / Soporte Técnico & Alistamiento Flota (${nombreDia})`,
+        horas: 8,
+        rolMec: `🔧 Mecánico de Base / Soporte Técnico & Alistamiento (${nombreDia})`,
+        rolApoyo: `🛡️ Guardia de Base & Logística Comunitaria Matutina (${nombreDia})`,
         idSufijo: 'mec-base',
       },
       {
         franja: 'tarde',
         horaInicio: '14:00',
         horaFin: '22:00',
-        horas: 8.0,
-        rol: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
+        horas: 8,
+        rolMec: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
+        rolApoyo: `🛡️ Guardia de Base & Apoyo Veredal Vespertino (${nombreDia})`,
         idSufijo: 'mec-tarde',
       },
       {
         franja: 'noche',
         horaInicio: '22:00',
         horaFin: '06:00',
-        horas: 8.0,
-        rol: `🔧 Mecánico Nocturno & Rescate Pesado / Alerta Cordillera (${nombreDia})`,
+        horas: 8,
+        rolMec: `🔧 Mecánico Nocturno & Rescate Pesado (${nombreDia})`,
+        rolApoyo: `🛡️ Guardia Nocturna de Radio & Coordinación (${nombreDia})`,
         idSufijo: 'mec-noche',
       },
     ]
 
     for (const fm of franjasMec) {
-      const candidatos = poolRotado
-        .filter((emp) => puedeAsignarse(emp, d, fm.franja, 'mecanico', fm.horas))
-        .sort((a, b) => {
-          const hA = horasAsignadas[a.id] || 0
-          const hB = horasAsignadas[b.id] || 0
-          if (hA !== hB) return hA - hB
-          const ma = afinidadMecanico(a)
-          const mb = afinidadMecanico(b)
-          if (mb !== ma) return mb - ma
-          return 0
-        })
+      const disponibles = poolRotado.filter((emp) => puedeAsignarse(emp, d, fm.franja, fm.horas))
+      const conAfinidad = disponibles.filter((emp) => afinidadMecanico(emp) > 0)
+      const candidatos = (conAfinidad.length > 0 ? conAfinidad : disponibles).sort((a, b) => {
+        const hA = horasAsignadas[a.id] || 0
+        const hB = horasAsignadas[b.id] || 0
+        if (hA !== hB) return hA - hB
+        return afinidadMecanico(b) - afinidadMecanico(a)
+      })
 
       if (candidatos[0]) {
+        const esMec = afinidadMecanico(candidatos[0]) > 0
         asignarTurno(
           candidatos[0],
           d,
@@ -1344,7 +1564,7 @@ export function generarTurnosSemanalesIA(
           fm.horaInicio,
           fm.horaFin,
           fm.horas,
-          fm.rol,
+          esMec ? fm.rolMec : fm.rolApoyo,
           fm.idSufijo
         )
       }
@@ -1352,79 +1572,60 @@ export function generarTurnosSemanalesIA(
   }
 
   // =========================================================================
-  // FASE 3: REFUERZOS DIURNOS (Para que todos alcancen entre 40 y 42 horas)
+  // FASE 3: EQUIDAD HASTA 40H SEMANALES PARA TODO EL PERSONAL ACTIVO
   // =========================================================================
-  // Se distribuyen en días laborables y fines de semana hasta que cada colaborador activo
-  // complete sus 5 turnos semanales (meta legal de 40 a 42 horas).
   let intentos = 0
-  while (intentos < 50) {
+  while (intentos < n * 7) {
     intentos++
-    // Buscar colaboradores que tengan menos de 5 turnos o menos de 40 horas
     const pendientes = poolRotado
-      .filter((e) => (turnosPorEmpleado[e.id] || 0) < 5 && (horasAsignadas[e.id] || 0) < 40)
+      .filter((e) => (turnosPorEmpleado[e.id] || 0) < 5 && (horasAsignadas[e.id] || 0) <= 34)
       .sort((a, b) => (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0))
 
     if (pendientes.length === 0) break
 
-    const emp = pendientes[0]
-    let asignado = false
+    let progresoEnCiclo = false
+    for (const emp of pendientes) {
+      let asignado = false
+      const esCond = afinidadConductor(emp) > 0
+      const esMec = afinidadMecanico(emp) > 0
 
-    // Buscar un día libre para este colaborador (preferir Lunes a Domingo en franjas diurnas)
-    for (const diaInfo of diasInfo) {
-      const { d, nombreDia } = diaInfo
-      if (diasOcupadosPorEmpleado[emp.id]?.has(d)) continue
+      for (const franja of ['manana', 'tarde', 'noche'] as const) {
+        for (const diaInfo of diasInfo) {
+          const { d, nombreDia } = diaInfo
+          if (!puedeAsignarse(emp, d, franja, 8)) continue
 
-      // Intentar turno mañana primero, luego tarde
-      for (const franja of ['manana', 'tarde'] as const) {
-        const horasTurno = 8.0
-        if (puedeAsignarse(emp, d, franja, 'conductor', horasTurno)) {
           const rolTexto =
-            franja === 'manana'
-              ? `🚗 Conductor de Apoyo / Guardia Rápida Veredal (${nombreDia})`
-              : `🚗 Conductor de Asistencia Comunitaria & Despacho Rápido (${nombreDia})`
+            franja === 'noche'
+              ? `🛡️ Guardia Nocturna de Apoyo (${nombreDia})`
+              : esCond
+                ? franja === 'manana'
+                  ? `🚗 Conductor de Apoyo / Guardia Rápida Veredal (${nombreDia})`
+                  : `🚗 Conductor de Asistencia Comunitaria (${nombreDia})`
+                : esMec
+                  ? `🔧 Soporte Técnico & Taller Preventivo (${nombreDia})`
+                  : `🛡️ Apoyo Logístico & Enlace Comunitario (${nombreDia})`
 
           asignarTurno(
             emp,
             d,
             franja,
-            franja === 'manana' ? '06:00' : '14:00',
-            franja === 'manana' ? '14:00' : '22:00',
-            horasTurno,
+            franja === 'manana' ? '06:00' : franja === 'tarde' ? '14:00' : '22:00',
+            franja === 'manana' ? '14:00' : franja === 'tarde' ? '22:00' : '06:00',
+            8,
             rolTexto,
             `apoyo-${d}`
           )
           asignado = true
+          progresoEnCiclo = true
           break
         }
+        if (asignado) break
       }
-      if (asignado) break
     }
 
-    if (!asignado) {
-      // Si no pudo en franja diurna, intentar noche si está libre
-      for (const diaInfo of diasInfo) {
-        const { d, nombreDia } = diaInfo
-        if (diasOcupadosPorEmpleado[emp.id]?.has(d)) continue
-        if (puedeAsignarse(emp, d, 'noche', 'conductor', 8.0)) {
-          asignarTurno(
-            emp,
-            d,
-            'noche',
-            '22:00',
-            '06:00',
-            8.0,
-            `🚗 Guardia Nocturna Adicional de Apoyo (${nombreDia})`,
-            `apoyo-noche-${d}`
-          )
-          asignado = true
-          break
-        }
-      }
-      if (!asignado) break
-    }
+    if (!progresoEnCiclo) break
   }
 
-  // Ordenar cronológicamente los turnos generados por fecha y hora
   turnos.sort((a, b) => {
     if (a.fecha !== b.fecha) return a.fecha.localeCompare(b.fecha)
     return a.horaInicio.localeCompare(b.horaInicio)
@@ -1433,58 +1634,79 @@ export function generarTurnosSemanalesIA(
   return turnos
 }
 
-/**
- * Genera un informe diario integral de operaciones y guardia comunitaria 📋.
- */
+// ---------------------------------------------------------------------------
+// INFORME DIARIO Y RESPALDO LOCAL DE RADIO GEMA (SI GEMINI ESTÁ OFFLINE)
+// ---------------------------------------------------------------------------
+
 export function generarInformeDiarioOperaciones(contexto: {
   empleados: EmpleadoOperativo[]
   vehiculos: VehiculoOperativo[]
   turnos: TurnoSemanal[]
   misiones: MisionComunitaria[]
+  eventosRadar?: EventoRadarLocal[]
 }): string {
   const hoy = hoyISO()
   const misionesHoy = contexto.misiones.filter((m) => m.fecha === hoy)
-  const misionesCompletadas = misionesHoy.filter((m) => m.estado === 'completada')
+  const misionesCompletadas = misionesHoy.filter(
+    (m) => m.estado === 'completada' || m.estado === 'inconclusa_repliegue'
+  )
   const misionesEnCurso = misionesHoy.filter((m) => m.estado === 'en_curso')
   const turnosHoy = contexto.turnos.filter((t) => t.fecha === hoy)
   const vehiculosTrabajo = contexto.vehiculos.filter((v) => v.disponibleParaTrabajo)
+  const alertasVigentes = filtrarEventosRadarVigentes(contexto.eventosRadar || [])
 
   let informe = `🐻💎 **INFORME DIARIO DE OPERACIONES · BEAR'S RESERVE**\n`
-  informe += `📅 **Fecha**: ${hoy} · Cordillera Central / Manizales\n\n`
+  informe += `📅 **Fecha**: ${hoy} · Base Finca El Guadual (Manizales)\n\n`
 
-  informe += `👥 **Personal en Guardia Activa (Tope 42h)**:\n`
+  informe += `👥 **Personal en Guardia Hoy (Tope 42h)**:\n`
   if (turnosHoy.length > 0) {
     turnosHoy.forEach((t) => {
-      informe += `• ${t.esRespaldoCoordinador ? '🚨' : '👤'} **${t.empleadoNombre}**: ${t.horaInicio} - ${t.horaFin} (${t.rolGuardia})\n`
+      informe += `• 👤 **${t.empleadoNombre}**: ${t.horaInicio} - ${t.horaFin} (${t.rolGuardia})\n`
     })
   } else {
-    informe += `• Dotación en alerta pasiva y rotación semanal lista.\n`
+    informe += `• Sin turnos programados para hoy.\n`
   }
 
-  informe += `\n🚚 **Estado y Telemetría de Flota (${vehiculosTrabajo.length} asignados)**:\n`
-  vehiculosTrabajo.forEach((v) => {
-    const estadoTanque = v.nivelCombustiblePorc <= 20 ? '⚠️ En reserva' : '✅ Óptimo'
-    informe += `• **${v.marca} ${v.linea}** (${v.placa || 'En servicio'}): Tanque ${v.nivelCombustiblePorc}% (${estadoTanque}) · Odómetro: ${v.kilometrajeActual.toLocaleString('es-CO')} km · Llantas: ${v.desgasteLlantasPorc}% desgaste\n`
-  })
+  informe += `\n🚚 **Estado de Flota Habilitada (${vehiculosTrabajo.length} vehículos)**:\n`
+  if (vehiculosTrabajo.length === 0) {
+    informe += `• No hay vehículos habilitados para Bear's Reserve aún.\n`
+  } else {
+    vehiculosTrabajo.forEach((v) => {
+      const estadoTanque = v.nivelCombustiblePorc <= 20 ? '⚠️ En reserva' : '✅ Óptimo'
+      const estadoOp = v.estado === 'en_mision' ? '🚨 En misión' : 'En base'
+      informe += `• **${v.marca} ${v.linea}** (${v.placa || 'Sin placa'}): ${estadoOp} · Tanque ${v.nivelCombustiblePorc}% (${estadoTanque}) · Odómetro: ${v.kilometrajeActual.toLocaleString('es-CO')} km · Llantas: ${v.desgasteLlantasPorc}%\n`
+    })
+  }
 
-  informe += `\n🏔️ **Misiones e Intervenciones Comunitarias**:\n`
+  informe += `\n📡 **Radar Vigente (${alertasVigentes.length} alertas activas)**:\n`
+  if (alertasVigentes.length === 0) {
+    informe += `• Sin contingencias activas en este momento.\n`
+  } else {
+    alertasVigentes.slice(0, 4).forEach((ev) => {
+      informe += `• ${ev.esNoticiaWebReal ? '✓ [Web]' : '📻 [Veredal]'} **${ev.titulo}** (${ev.lugar})\n`
+    })
+  }
+
+  informe += `\n🏔️ **Misiones de Hoy**:\n`
   if (misionesHoy.length === 0) {
-    informe += `• Sin salidas extraordinarias hoy. Flota en base en guardia preventiva y alistamiento de winches.\n`
+    informe += `• Sin salidas registradas hoy. Flota en guardia preventiva.\n`
   } else {
     if (misionesEnCurso.length > 0) {
       informe += `• 🚨 **En Curso**: ${misionesEnCurso.map((m) => m.titulo).join('; ')}\n`
     }
     if (misionesCompletadas.length > 0) {
-      informe += `• 🏁 **Completadas con éxito**: ${misionesCompletadas.map((m) => `${m.titulo} (${m.distanciaKmIdaYVuelta} km)`).join('; ')}\n`
+      informe += `• 🏁 **Cerradas**: ${misionesCompletadas.map((m) => `${m.titulo} (${m.distanciaKmIdaYVuelta} km)`).join('; ')}\n`
     }
   }
 
-  informe += `\n❤️ *Compromiso Bear's Reserve: 0% ánimo de lucro, 100% servicio comunitario a las familias campesinas.*`
+  informe += `\n❤️ *Bear's Reserve: 0% ánimo de lucro, 100% servicio comunitario.*`
   return informe
 }
 
 /**
- * Inteligencia conversacional y de mando de Gema 💎
+ * Motor local de respaldo para Radio Gema (solo cuando Gemini no está disponible).
+ * Orden de prioridades corregido: "rotar" tiene prioridad sobre "turno",
+ * y responde también alertas viales, precios, rutas y crónicas.
  */
 export function responderGema(
   mensaje: string,
@@ -1493,6 +1715,9 @@ export function responderGema(
     vehiculos: VehiculoOperativo[]
     turnos: TurnoSemanal[]
     misiones: MisionComunitaria[]
+    eventosRadar?: EventoRadarLocal[]
+    rutasHabituales?: RutaHabitual[]
+    preciosCombustible?: PreciosCombustible
   }
 ): {
   respuesta: string
@@ -1500,10 +1725,26 @@ export function responderGema(
     | { tipo: 'rotar_turnos' }
     | { tipo: 'tanquear_vehiculo'; vehiculoId: string }
     | { tipo: 'generar_informe' }
+    | { tipo: 'escanear_radar' }
+    | { tipo: 'actualizar_precios' }
 } {
   const q = mensaje.toLowerCase().trim()
 
-  // 1. Informe diario
+  // 1. Rotación de turnos (ANTES de la consulta general de "turno")
+  if (
+    q.includes('rotar') ||
+    q.includes('reorganizar') ||
+    q.includes('organizar turnos') ||
+    q.includes('cuadrar turnos') ||
+    q.includes('nueva semana')
+  ) {
+    return {
+      respuesta: `💎 ¡Listo! Estoy rotando el cuadrante 24/7 para esta semana respetando el tope de 42 horas y los horarios personales de cada colaborador activo. 🐻✨`,
+      accion: { tipo: 'rotar_turnos' },
+    }
+  }
+
+  // 2. Informe diario
   if (q.includes('informe') || q.includes('reporte') || q.includes('resumen') || q.includes('novedades')) {
     return {
       respuesta: generarInformeDiarioOperaciones(contexto),
@@ -1511,57 +1752,132 @@ export function responderGema(
     }
   }
 
-  // 2. Consulta de turnos o quién está trabajando
-  if (q.includes('quién está') || q.includes('quien esta') || q.includes('trabajando') || q.includes('turno')) {
-    const turnosHoy = contexto.turnos.filter((t) => t.fecha === hoyISO())
+  // 3. Alertas viales / radar / noticias
+  if (
+    q.includes('alerta') ||
+    q.includes('radar') ||
+    q.includes('vial') ||
+    q.includes('vía') ||
+    q.includes('via ') ||
+    q.includes('noticia') ||
+    q.includes('emergencia') ||
+    q.includes('derrumbe') ||
+    q.includes('escanear')
+  ) {
+    const vigentes = filtrarEventosRadarVigentes(contexto.eventosRadar || [])
+    if (q.includes('escanear') || q.includes('actualizar radar')) {
+      return {
+        respuesta: `📡 Sintonizando frecuencias y buscando alertas viales recientes en Caldas y el Eje Cafetero...`,
+        accion: { tipo: 'escanear_radar' },
+      }
+    }
+    if (vigentes.length === 0) {
+      return {
+        respuesta: `📡 En este momento el radar no tiene alertas vigentes en Caldas ni municipios vecinos. Si quieres, dime **"escanear radar"** para buscar novedades en vivo.`,
+      }
+    }
+    const lista = vigentes
+      .map(
+        (ev) =>
+          `• ${ev.esNoticiaWebReal ? '✓ **Noticia Web**' : '📻 **Llamada Veredal**'}: **${ev.titulo}** — *${ev.lugar}* (${ev.departamento})`
+      )
+      .join('\n')
+    return {
+      respuesta: `🚨 **Alertas vigentes en el Radar (${vigentes.length}):**\n\n${lista}\n\nTodas caducan automáticamente tras 1–2 días para mantener el tablero al día.`,
+    }
+  }
+
+  // 4. Consulta de turnos / guardia hoy
+  if (
+    q.includes('quién está') ||
+    q.includes('quien esta') ||
+    q.includes('trabajando') ||
+    q.includes('guardia') ||
+    q.includes('turno')
+  ) {
+    const hoy = hoyISO()
+    const turnosHoy = contexto.turnos.filter((t) => t.fecha === hoy)
     let detalleTurnos = ''
     if (turnosHoy.length) {
       detalleTurnos = turnosHoy
         .map(
           (t) =>
-            `• ${t.esRespaldoCoordinador ? '🚨' : '👤'} **${t.empleadoNombre}**: ${t.horaInicio} a ${t.horaFin} — *${t.rolGuardia}*`
+            `• 👤 **${t.empleadoNombre}**: ${t.horaInicio} a ${t.horaFin} — *${t.rolGuardia}*`
         )
         .join('\n')
     } else {
+      const horasPorEmp = new Map<string, number>()
+      for (const t of contexto.turnos) {
+        horasPorEmp.set(t.empleadoId, (horasPorEmp.get(t.empleadoId) || 0) + t.horas)
+      }
       detalleTurnos = contexto.empleados
         .filter((e) => e.activo)
         .map(
           (e) =>
-            `• 👤 **${e.nombreCompleto}** (${e.cargo}): ${e.horasSemanalesAsignadas}/42h semanales disponibles`
+            `• 👤 **${e.nombreCompleto}** (${e.cargo}): ${horasPorEmp.get(e.id) || 0}/42h asignadas`
         )
         .join('\n')
     }
 
     return {
-      respuesta: `🐻 ¡Hola con todo el cariño! Este es el estado de guardia comunitaria para hoy:\n\n${detalleTurnos}\n\n💎 Cuidamos el bienestar del equipo para que nadie exceda las 42 horas semanales ni descuide sus clases universitarias o su hogar. ¿Quieres que ajuste alguna franja? ❤️`,
+      respuesta: `🐻 **Estado de guardia para hoy (${hoy}):**\n\n${detalleTurnos || '• No hay personal activo en Bear\'s Reserve.'}\n\n💎 Ningún colaborador supera las 42 horas semanales.`,
     }
   }
 
-  // 3. Consulta de flota, combustible y llantas
-  if (q.includes('combustible') || q.includes('gasolina') || q.includes('diesel') || q.includes('tanque') || q.includes('llantas') || q.includes('flota')) {
-    const detalleFlota = contexto.vehiculos
-      .filter((v) => v.disponibleParaTrabajo)
-      .map((v) => {
-        const alertaReserva = v.nivelCombustiblePorc <= 20 ? ' ⚠️ (Cerca de reserva)' : ''
-        return `• 🚚 **${v.marca} ${v.linea}** (${v.placa || 'En servicio'}): Tanque al **${v.nivelCombustiblePorc}%** (${v.capacidadTanqueGalones} gal) · Odómetro: **${v.kilometrajeActual.toLocaleString('es-CO')} km** · Llantas: **${v.desgasteLlantasPorc}% desgaste**${alertaReserva}`
+  // 5. Consulta de precios / flota / combustible / llantas
+  if (
+    q.includes('precio') ||
+    q.includes('combustible') ||
+    q.includes('gasolina') ||
+    q.includes('diesel') ||
+    q.includes('acpm') ||
+    q.includes('tanque') ||
+    q.includes('llantas') ||
+    q.includes('flota')
+  ) {
+    if (q.includes('actualizar precio')) {
+      return {
+        respuesta: `⛽ Consultando precios vigentes de combustible en Colombia...`,
+        accion: { tipo: 'actualizar_precios' },
+      }
+    }
+    const habilitados = contexto.vehiculos.filter((v) => v.disponibleParaTrabajo)
+    const detalleFlota = habilitados.length
+      ? habilitados
+          .map((v) => {
+            const alertaReserva = v.nivelCombustiblePorc <= 20 ? ' ⚠️ (En reserva)' : ''
+            const estadoOp = v.estado === 'en_mision' ? ' [EN MISIÓN]' : ''
+            return `• 🚚 **${v.marca} ${v.linea}** (${v.placa || 'Sin placa'})${estadoOp}: Tanque **${v.nivelCombustiblePorc}%** (${v.capacidadTanqueGalones} gal ${v.tipoCombustible.toUpperCase()}) · Odómetro: **${v.kilometrajeActual.toLocaleString('es-CO')} km** · Llantas: **${v.desgasteLlantasPorc}%**${alertaReserva}`
+          })
+          .join('\n')
+      : '• Aún no tienes vehículos habilitados en la pestaña Flota.'
+
+    const preciosLinea = contexto.preciosCombustible
+      ? `\n\n⛽ **Precios de referencia (${contexto.preciosCombustible.fuente}):** Corriente $${contexto.preciosCombustible.corrientePorGalon.toLocaleString('es-CO')} · ACPM $${contexto.preciosCombustible.dieselPorGalon.toLocaleString('es-CO')} · Extra $${contexto.preciosCombustible.extraPorGalon.toLocaleString('es-CO')}`
+      : ''
+
+    return {
+      respuesta: `🏔️ **Estado de la flota Bear's Reserve:**\n\n${detalleFlota}${preciosLinea}`,
+    }
+  }
+
+  // 6. Rutas habituales / escolares / crónicas
+  if (q.includes('ruta') || q.includes('escolar') || q.includes('mercado')) {
+    const rutas = contexto.rutasHabituales || []
+    const hoy = hoyISO()
+    const detalle = rutas
+      .map((r) => {
+        const cond = conductorDeRutaEnCuadrante(contexto.turnos, r.id, hoy, r.tipoHorario)
+        return `• 🛣️ **${r.nombre}** (${r.distanciaKm} km · ${r.horaSalida || 'Flexible'}) — Conductor hoy: **${cond ? cond.nombre : 'Sin turno hoy'}**`
       })
       .join('\n')
-
     return {
-      respuesta: `🏔️ Estado en tiempo real de nuestra flota comunitaria Bear's Reserve:\n\n${detalleFlota}\n\n⛽ Recuerda que si algún vehículo baja al 15% o menos, el sistema lo tanqueará automáticamente al 100% y cargará el costo a la Tarjeta de Combustible para que nunca nos quedemos tirados en una trocha. 💎`,
+      respuesta: `🚌 **Rutas Habituales de Bear's Reserve:**\n\n${detalle || '• Sin rutas configuradas.'}`,
     }
   }
 
-  // 4. Solicitud de rotación de turnos
-  if (q.includes('rotar') || q.includes('organizar turnos') || q.includes('cuadrar turnos') || q.includes('nueva semana')) {
-    return {
-      respuesta: `💎 ¡Comprendido! Estoy revisando los horarios personales y universitarios de cada colaborador para estructurar la nueva semana sin sobrepasar las 42 horas legales. Si alguna guardia queda sin cobertura, te asigno a ti como respaldo de emergencia. 🐻✨`,
-      accion: { tipo: 'rotar_turnos' },
-    }
-  }
-
-  // 5. Saludo o consulta general
+  // 7. Saludo o consulta general
   return {
-    respuesta: `💎 ¡Hola! Soy **Gema**, tu oficial de operaciones y guardia en **Bear's Reserve** 🐻❤️.\n\nEstoy atenta a las veredas de Manizales, Caldas y la cordillera. Puedo asistirte en:\n• 📋 **Emitir el Informe Diario** con novedades y telemetría de hoy.\n• 📅 **Planificar y rotar los turnos** semanales (máx 42h respetando estudio y familia).\n• 🚨 **Monitorear el radar de contingencias** (distinguiendo noticias web reales ✓ de llamadas veredales).\n• ⛽ **Verificar el consumo y nivel del tanque** de cada vehículo.\n• 📖 **Revisar las crónicas humanas de las misiones** de auxilio completadas.\n\n¿En qué podemos servir hoy a nuestra comunidad? 🏔️🛠️`,
+    respuesta: `💎 ¡Hola! Soy **Gema**, oficial de operaciones de **Bear's Reserve** 🐻.\n\nPuedo ayudarte en tiempo real con:\n• 📋 **Informe diario** de operaciones y novedades.\n• 📅 **Guardia de hoy y rotación de turnos** (tope 42h).\n• 🚨 **Alertas viales y radar** de Caldas y la región.\n• ⛽ **Estado de flota, combustible, llantas y precios**.\n• 🚌 **Rutas escolares y habituales** con sus conductores.\n\n*(Modo respaldo local activo mientras Gemini responde).*`,
   }
 }
