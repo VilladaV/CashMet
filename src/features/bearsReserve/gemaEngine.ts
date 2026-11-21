@@ -1,5 +1,4 @@
 import { hoyISO, isoLocal } from '@/lib/fechas'
-import { resolverCoordenadasLugar } from './geo'
 import { TTL_LLAMADA_COMUNITARIA_MS } from './gemaAI'
 import type {
   EmpleadoOperativo,
@@ -942,6 +941,102 @@ export function seleccionarVehiculosOptimosMision(
 
 const MAX_ANTIGUEDAD_EVENTO_MS = 48 * 60 * 60 * 1000 // 2 días máximo
 
+function normalizarTextoSimple(texto: string): string {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+}
+
+/**
+ * Valida por código que la fecha real de publicación de una noticia web esté
+ * dentro de la ventana permitida (por defecto, máximo 2 días atrás respecto a `hoy`).
+ * Evita que noticias viejas de hace semanas entren como si fueran de hoy.
+ */
+export function esFechaNoticiaReciente(
+  fechaPublicacionISO: string | undefined,
+  hoy: string = hoyISO(),
+  maxDiasAntiguedad = 2
+): boolean {
+  if (!fechaPublicacionISO) return false
+  const limpia = String(fechaPublicacionISO).trim().slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(limpia)) return false
+
+  const [yP, mP, dP] = limpia.split('-').map(Number)
+  const [yH, mH, dH] = hoy.split('-').map(Number)
+  const pub = new Date(yP, mP - 1, dP, 12, 0, 0)
+  const ref = new Date(yH, mH - 1, dH, 12, 0, 0)
+
+  if (Number.isNaN(pub.getTime()) || Number.isNaN(ref.getTime())) return false
+  // Verificar que la fecha exista realmente (evita 2026-02-31)
+  if (pub.getFullYear() !== yP || pub.getMonth() !== mP - 1 || pub.getDate() !== dP) return false
+
+  const diffDias = Math.round((ref.getTime() - pub.getTime()) / (24 * 60 * 60 * 1000))
+  // Permitimos -1 por diferencias de huso horario (UTC vs Colombia) hasta maxDiasAntiguedad días atrás
+  return diffDias >= -1 && diffDias <= maxDiasAntiguedad
+}
+
+const TEMAS_COMUNITARIOS: Array<{ clave: string; regex: RegExp }> = [
+  { clave: 'lechero', regex: /\blecher|leche|lactic/ },
+  { clave: 'escuela', regex: /\bescuel|colegi|escolar|ninos|estudiantes|pupitres/ },
+  { clave: 'derrumbe', regex: /\bderrumb|deslizam|talud|rocas|piedras|banca/ },
+  { clave: 'trasteo', regex: /\btraste|mudanz|enseres/ },
+  { clave: 'arbol', regex: /\barbol|tronco|ramas|motosierra/ },
+  { clave: 'cafetero', regex: /\bcafe|cafeter|cosecha|platano/ },
+  { clave: 'desvare', regex: /\bdesvar|embrague|averia|mecanica|bateria|cardan/ },
+  { clave: 'agua', regex: /\bacueduct|inundac|quebrada|creciente|vado/ },
+]
+
+export function detectarTemaEvento(ev: Pick<EventoRadarLocal, 'titulo' | 'resumen'>): string | null {
+  const txt = normalizarTextoSimple(`${ev.titulo} ${ev.resumen || ''}`)
+  for (const t of TEMAS_COMUNITARIOS) {
+    if (t.regex.test(txt)) return t.clave
+  }
+  return null
+}
+
+export function extraerClaveVereda(lugar: string): string {
+  const norm = normalizarTextoSimple(lugar)
+    .replace(/vereda|sector|municipio de|caldas|manizales|via|antigua/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return norm.split(' ').slice(0, 2).join(' ')
+}
+
+/**
+ * Detecta si un nuevo evento del radar es semánticamente redundante con alguno ya activo:
+ * - Mismo título exacto, O
+ * - En llamadas comunitarias (no web): misma vereda/sector principal O misma temática ya activa.
+ */
+export function esEventoRedundante(
+  candidato: Pick<EventoRadarLocal, 'titulo' | 'lugar' | 'resumen' | 'esNoticiaWebReal'>,
+  existentes: EventoRadarLocal[]
+): boolean {
+  const tituloNorm = normalizarTextoSimple(candidato.titulo)
+  const veredaCand = extraerClaveVereda(candidato.lugar)
+  const temaCand = detectarTemaEvento(candidato)
+
+  for (const ex of existentes) {
+    if (normalizarTextoSimple(ex.titulo) === tituloNorm) return true
+    if (ex.despachado) continue
+
+    // Para llamadas comunitarias evitamos repetir vereda o temática al mismo tiempo
+    if (!candidato.esNoticiaWebReal && !ex.esNoticiaWebReal) {
+      const veredaEx = extraerClaveVereda(ex.lugar)
+      if (veredaCand && veredaEx && (veredaCand === veredaEx || veredaCand.includes(veredaEx) || veredaEx.includes(veredaCand))) {
+        return true
+      }
+      const temaEx = detectarTemaEvento(ex)
+      if (temaCand && temaEx && temaCand === temaEx) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
 /**
  * Filtra eventos del radar eliminando automáticamente cualquiera que haya expirado
  * (por `expiraEn <= ahora` o cuya fecha calendario tenga más de 2 días de antigüedad).
@@ -958,7 +1053,8 @@ export function filtrarEventosRadarVigentes(
     }
     if (typeof e.creadoEn === 'number' && Number.isFinite(e.creadoEn)) {
       if (ahora - e.creadoEn > MAX_ANTIGUEDAD_EVENTO_MS) return false
-    } else if (e.fecha && /^\d{4}-\d{2}-\d{2}$/.test(e.fecha)) {
+    }
+    if (e.fecha && /^\d{4}-\d{2}-\d{2}$/.test(e.fecha)) {
       const [y, m, d] = e.fecha.split('-').map(Number)
       const fechaMs = new Date(y, m - 1, d, 23, 59, 59).getTime()
       if (ahora - fechaMs > MAX_ANTIGUEDAD_EVENTO_MS) return false
@@ -1079,6 +1175,7 @@ const POOL_LLAMADAS_COMUNITARIAS_RESPALDO: Array<
 
 /**
  * Respaldo local (sin internet/Gemini) para generar llamadas comunitarias frescas con caducidad de ~28h.
+ * Evita repetir veredas y temáticas que ya están activas en el radar.
  * NUNCA inventa `esNoticiaWebReal: true`.
  */
 export function generarLlamadasComunitariasRespaldo(
@@ -1086,46 +1183,24 @@ export function generarLlamadasComunitariasRespaldo(
   cantidad = 2,
   ahora = Date.now()
 ): EventoRadarLocal[] {
-  const existentes = new Set(eventosActuales.map((e) => e.titulo.toLowerCase().trim()))
-  const candidatos = POOL_LLAMADAS_COMUNITARIAS_RESPALDO.filter(
-    (c) => !existentes.has(c.titulo.toLowerCase().trim())
-  )
   const hoy = hoyISO()
   const elegidos: EventoRadarLocal[] = []
+  const acumulados: EventoRadarLocal[] = [...eventosActuales]
 
-  const mezcla = [...candidatos].sort(() => Math.random() - 0.5)
-  for (let i = 0; i < Math.min(cantidad, mezcla.length); i++) {
-    const item = mezcla[i]
-    elegidos.push({
+  const mezcla = [...POOL_LLAMADAS_COMUNITARIAS_RESPALDO].sort(() => Math.random() - 0.5)
+  for (const item of mezcla) {
+    if (elegidos.length >= cantidad) break
+    if (esEventoRedundante(item, acumulados)) continue
+    const nuevo: EventoRadarLocal = {
       ...item,
-      id: `rad-com-${ahora}-${i}`,
+      id: `rad-com-${ahora}-${elegidos.length}`,
       fecha: hoy,
       creadoEn: ahora,
       expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
       esNoticiaWebReal: false,
-    })
-  }
-
-  if (elegidos.length === 0 && cantidad > 0) {
-    const coords = resolverCoordenadasLugar('Vereda San Peregrino', 'Caldas')
-    elegidos.push({
-      id: `rad-com-${ahora}`,
-      titulo: `Solicitud veredal de apoyo vial en San Peregrino (#${String(ahora).slice(-3)})`,
-      lugar: 'Vereda San Peregrino · Manizales',
-      departamento: 'Caldas',
-      lat: coords.lat,
-      lng: coords.lng,
-      fuenteNoticia: 'Radio frecuencia comunitaria Bear\'s Reserve',
-      resumen: 'Vehículo rural con dificultad de paso en tramo destapado tras lluvias recientes.',
-      fecha: hoy,
-      creadoEn: ahora,
-      expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
-      esEmergenciaGrave: false,
-      atencionOficialPresente: false,
-      esNoticiaWebReal: false,
-      recomendacionGema: 'intervenir_urgente',
-      justificacionGema: 'Evaluar despacho de unidad 4x4 desde Finca El Guadual.',
-    })
+    }
+    elegidos.push(nuevo)
+    acumulados.push(nuevo)
   }
 
   return elegidos

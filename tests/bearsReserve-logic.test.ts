@@ -20,6 +20,8 @@ import {
 import {
   conductorDeRutaEnCuadrante,
   empleadosEnTurnoAhora,
+  esEventoRedundante,
+  esFechaNoticiaReciente,
   filtrarEventosRadarVigentes,
   generarTurnosSemanalesIA,
   investigarFichaVehiculoIA,
@@ -271,6 +273,74 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
 
     const vigentes = filtrarEventosRadarVigentes(eventos, ahora)
     expect(vigentes.map((e) => e.id)).toEqual(['vigente'])
+  })
+
+  it('valida estrictamente fechaPublicacion de noticias web (rechaza noticias de >2 días o inválidas)', () => {
+    expect(esFechaNoticiaReciente('2026-11-21', '2026-11-21', 2)).toBe(true)
+    expect(esFechaNoticiaReciente('2026-11-20', '2026-11-21', 2)).toBe(true)
+    expect(esFechaNoticiaReciente('2026-11-19', '2026-11-21', 2)).toBe(true)
+    expect(esFechaNoticiaReciente('2026-11-18', '2026-11-21', 2)).toBe(false)
+    expect(esFechaNoticiaReciente('2026-10-01', '2026-11-21', 2)).toBe(false)
+    expect(esFechaNoticiaReciente('2026-02-31', '2026-03-01', 2)).toBe(false)
+    expect(esFechaNoticiaReciente(undefined, '2026-11-21', 2)).toBe(false)
+  })
+
+  it('evita llamadas comunitarias repetidas en la misma vereda o con la misma temática', () => {
+    const existentes: EventoRadarLocal[] = [
+      {
+        id: 'ev-1',
+        titulo: 'Rescate de camión lechero atascado en barro',
+        lugar: 'Vereda Bajo Tablazo · Manizales',
+        departamento: 'Caldas',
+        fuenteNoticia: 'Llamada comunitaria',
+        resumen: 'Camión lechero atrapado en lodazal',
+        fecha: '2026-11-21',
+        esEmergenciaGrave: false,
+        atencionOficialPresente: false,
+        esNoticiaWebReal: false,
+        recomendacionGema: 'intervenir_urgente',
+        justificacionGema: 'Winche',
+      },
+    ]
+
+    // Misma temática (camión lechero) en otra vereda -> redundante
+    expect(
+      esEventoRedundante(
+        {
+          titulo: 'Atollamiento de camión lechero en sector La Siria',
+          lugar: 'Vereda El Rosario · Manizales',
+          resumen: 'Camión recolector de leche varado',
+          esNoticiaWebReal: false,
+        },
+        existentes
+      )
+    ).toBe(true)
+
+    // Misma vereda (Bajo Tablazo) aunque sea otro tema -> redundante
+    expect(
+      esEventoRedundante(
+        {
+          titulo: 'Árbol caído en sendero veredal',
+          lugar: 'Vereda Bajo Tablazo',
+          resumen: 'Tronco bloquea camino peatonal',
+          esNoticiaWebReal: false,
+        },
+        existentes
+      )
+    ).toBe(true)
+
+    // Otra vereda y otro tema -> permitido
+    expect(
+      esEventoRedundante(
+        {
+          titulo: 'Árbol caído bloquea acueducto rural',
+          lugar: 'Vereda San Peregrino · Manizales',
+          resumen: 'Tronco rompió manguera de agua',
+          esNoticiaWebReal: false,
+        },
+        existentes
+      )
+    ).toBe(false)
   })
 
   it('los chips de Gema rotan turnos y consultan alertas viales correctamente', () => {

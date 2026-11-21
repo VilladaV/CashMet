@@ -1,10 +1,10 @@
 /**
  * Motor de Inteligencia Artificial Gemini para Bear's Reserve 💎🐻
- * - Radio conversacional real con Gema (contexto completo en vivo + acciones)
- * - Consulta en vivo de precios de combustible en Colombia (Google Search Grounding)
- * - Escaneo real de noticias viales/emergencias en Caldas y Eje Cafetero (1–2 días TTL)
- * - Generación dinámica de llamadas comunitarias veredales frescas (24–36h TTL)
+ * - Pipeline en 2 pasos (Google Search Grounding -> Estructuración JSON) para precios reales y noticias web
+ * - Filtro estricto por fecha real de publicación (máximo 48 horas; jamás deja pasar noticias viejas)
+ * - Anti-repetición de veredas y temáticas en llamadas comunitarias veredales (TTL ~28h)
  * - Resolución autónoma y realista de misiones + redacción de crónicas humanas
+ * - Radio conversacional real con Gema (contexto completo en vivo + acciones)
  */
 
 import {
@@ -13,8 +13,14 @@ import {
   llamarGemini,
   llamarGeminiConBusqueda,
 } from '@/ai/gemini'
-import { hoyISO } from '@/lib/fechas'
+import { hoyISO, isoLocal } from '@/lib/fechas'
 import { BASE_BEARS_RESERVE, resolverCoordenadasLugar } from './geo'
+import {
+  detectarTemaEvento,
+  esEventoRedundante,
+  esFechaNoticiaReciente,
+  extraerClaveVereda,
+} from './gemaEngine'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
@@ -34,6 +40,7 @@ interface GeminiCandidateResponse {
   candidates?: Array<{
     content?: { parts?: Array<{ text?: string }> }
     groundingMetadata?: {
+      webSearchQueries?: string[]
       groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>
     }
   }>
@@ -42,6 +49,7 @@ interface GeminiCandidateResponse {
 function extraerTextoYFuentes(data: GeminiCandidateResponse): {
   texto: string
   fuentesWeb: Array<{ title: string; uri: string }>
+  consultasWeb: string[]
 } {
   const cand = data.candidates?.[0]
   const texto = (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('')
@@ -51,48 +59,81 @@ function extraerTextoYFuentes(data: GeminiCandidateResponse): {
       uri: String(c.web?.uri || '').trim(),
     }))
     .filter((f) => Boolean(f.uri))
-  return { texto, fuentesWeb }
+  const consultasWeb = cand?.groundingMetadata?.webSearchQueries ?? []
+  return { texto, fuentesWeb, consultasWeb }
+}
+
+function haceNDiasISO(dias: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() - dias)
+  return isoLocal(d)
 }
 
 /**
- * 1. PRECIOS REALES DE COMBUSTIBLE EN COLOMBIA (Manizales / Caldas)
- * Usa Gemini con Google Search Grounding para consultar precios vigentes CREG / MinMinas.
+ * 1. PRECIOS REALES DE COMBUSTIBLE EN COLOMBIA (Manizales / Caldas) — Pipeline en 2 pasos
+ * Paso 1: Gemini + Google Search Grounding en texto natural (sin forzar JSON).
+ * Paso 2: Extracción JSON estricta sobre el texto verificado en web.
  */
 export async function consultarPreciosCombustibleRealesAI(): Promise<PreciosCombustible | null> {
   if (!geminiDisponible) return null
 
   const hoy = hoyISO()
-  const prompt = `Fecha actual: ${hoy}.
-Busca los precios vigentes ACTUALES del combustible por galón en pesos colombianos (COP) en Manizales / Caldas (o promedio principales ciudades de Colombia según CREG / Ministerio de Minas y Energía):
-1. Gasolina Corriente (corrientePorGalon)
-2. ACPM / Diésel (dieselPorGalon)
-3. Gasolina Extra (extraPorGalon)
 
-Responde ÚNICAMENTE con un JSON válido, sin bloques de código ni texto adicional:
+  try {
+    // PASO 1: Búsqueda web en vivo (texto libre para que Google Search Grounding siempre se ejecute)
+    const promptBusqueda = `Fecha actual: ${hoy}.
+Consulta en internet los precios VIGENTES hoy del combustible por galón en pesos colombianos (COP) en Manizales, Caldas (o el promedio oficial CREG / Ministerio de Minas y Energía de Colombia si Manizales no aparece desglosado):
+- Gasolina Corriente (COP/galón)
+- ACPM / Diésel (COP/galón)
+- Gasolina Extra (COP/galón)
+Indica las cifras exactas y la fuente oficial o medio colombiano que reporta la tarifa vigente.`
+
+    const { res: resPaso1, usoBusqueda } = await llamarGeminiConBusqueda(
+      {
+        contents: [{ role: 'user', parts: [{ text: promptBusqueda }] }],
+        generationConfig: { temperature: 0.1 },
+      },
+      true
+    )
+    if (!resPaso1) return null
+
+    const data1 = (await resPaso1.json()) as GeminiCandidateResponse
+    const { texto: textoInvestigado, fuentesWeb, consultasWeb } = extraerTextoYFuentes(data1)
+    if (!textoInvestigado) return null
+
+    const tuvoGroundingReal = usoBusqueda && (fuentesWeb.length > 0 || consultasWeb.length > 0)
+
+    // PASO 2: Estructurar la investigación en JSON limpio
+    const promptJson = `Extrae del siguiente texto los precios vigentes por galón en COP para Colombia/Manizales.
+Texto investigado:
+"""
+${textoInvestigado}
+"""
+Fuentes web detectadas: ${fuentesWeb.map((f) => f.title).join(', ') || 'ninguna'}
+
+Responde ÚNICAMENTE con un JSON válido:
 {
-  "corrientePorGalon": 15850,
-  "dieselPorGalon": 10700,
-  "extraPorGalon": 20100,
+  "corrientePorGalon": 16000,
+  "dieselPorGalon": 10800,
+  "extraPorGalon": 20500,
   "fuente": "CREG / MinMinas Colombia (Manizales)"
 }`
 
-  try {
-    const { res, usoBusqueda } = await llamarGeminiConBusqueda({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.1 },
+    const { res: resPaso2 } = await llamarGemini({
+      contents: [{ role: 'user', parts: [{ text: promptJson }] }],
+      generationConfig: { temperature: 0, responseMimeType: 'application/json' },
     })
-    if (!res) return null
+    if (!resPaso2) return null
 
-    const data = (await res.json()) as GeminiCandidateResponse
-    const { texto, fuentesWeb } = extraerTextoYFuentes(data)
-    if (!texto) return null
+    const data2 = (await resPaso2.json()) as GeminiCandidateResponse
+    const { texto: textoJson } = extraerTextoYFuentes(data2)
+    if (!textoJson) return null
 
-    const parsed = JSON.parse(limpiarJson(texto)) as Partial<PreciosCombustible>
+    const parsed = JSON.parse(limpiarJson(textoJson)) as Partial<PreciosCombustible>
     const corr = Math.round(Number(parsed.corrientePorGalon))
     const dies = Math.round(Number(parsed.dieselPorGalon))
     const ext = Math.round(Number(parsed.extraPorGalon))
 
-    // Validación de rangos realistas en Colombia (COP por galón)
     if (
       !Number.isFinite(corr) ||
       corr < 10000 ||
@@ -118,10 +159,10 @@ Responde ÚNICAMENTE con un JSON válido, sin bloques de código ni texto adicio
       corrientePorGalon: corr,
       dieselPorGalon: dies,
       extraPorGalon: ext,
-      actualizado: `${hoy} ${hora} · ${usoBusqueda ? 'Sincronizado en vivo (Web)' : 'Actualizado por Gemini IA'}`,
+      actualizado: `${hoy} ${hora} · ${tuvoGroundingReal ? 'Sincronizado en vivo (Google Search)' : 'Estimación Gemini (sin grounding web)'}`,
       fuente: fuenteTexto,
       consultadoEn: ahora,
-      esFuenteReal: usoBusqueda,
+      esFuenteReal: tuvoGroundingReal,
       urlFuente: primeraFuente?.uri,
       editadoManualmente: false,
     }
@@ -133,63 +174,182 @@ Responde ÚNICAMENTE con un JSON válido, sin bloques de código ni texto adicio
 
 /**
  * 2. NOTICIAS REALES EN VIVO DE VÍAS Y EMERGENCIAS (Manizales, Caldas y Eje Cafetero)
- * Usa Gemini + Google Search Grounding. Cada noticia nace con caducidad de 36 horas.
+ * Pipeline en 2 pasos:
+ * - Paso 1: Google Search Grounding en texto libre (exige grounding real, SIN fallback inventado).
+ * - Paso 2: Estructuración JSON exigiendo `fechaPublicacion` real (YYYY-MM-DD) y rechazando
+ *           por código cualquier artículo publicado hace más de 2 días.
  */
+export interface ResultadoBusquedaNoticiasWeb {
+  eventos: EventoRadarLocal[]
+  busquedaWebActiva: boolean
+  descartadasPorViejas: number
+  diagnostico: string
+}
+
 export async function buscarNoticiasVialesRealesAI(
-  titulosExistentes: string[] = []
-): Promise<EventoRadarLocal[]> {
-  if (!geminiDisponible) return []
+  eventosExistentes: EventoRadarLocal[] = []
+): Promise<ResultadoBusquedaNoticiasWeb> {
+  if (!geminiDisponible) {
+    return {
+      eventos: [],
+      busquedaWebActiva: false,
+      descartadasPorViejas: 0,
+      diagnostico: 'Falta configurar VITE_GEMINI_API_KEY para buscar noticias en internet.',
+    }
+  }
 
   const hoy = hoyISO()
-  const prompt = `Fecha de hoy: ${hoy}.
-Busca noticias REALES y RECIENTES (últimas 24 a 48 horas) sobre estado de vías, derrumbes, cierres viales, accidentes graves, lluvias o emergencias comunitarias en Manizales, Caldas, Villamaría, Chinchiná, Neira, Vía a Letras / Fresno, Risaralda o Eje Cafetero (fuentes como La Patria Manizales, Invías, Gestión del Riesgo Caldas, Caracol, RCN, El Tiempo).
-NO inventes noticias viejas ni eventos ficticios. Si hay 1 a 3 novedades reales recientes, devuélvelas.
-Evita repetir estos títulos ya registrados: ${titulosExistentes.slice(0, 8).join(' | ') || 'ninguno'}.
+  const desdeISO = haceNDiasISO(2)
+  const titulosExistentes = eventosExistentes.map((e) => e.titulo)
+
+  try {
+    // PASO 1: Búsqueda real en Google Search (texto natural, SIN responseMimeType JSON)
+    const promptBusqueda = `Hoy es ${hoy}. Necesito un boletín de noticias REALES publicadas únicamente entre ${desdeISO} y ${hoy} (últimas 48 horas) sobre:
+- Derrumbes, cierres viales, paso restringido, pérdida de banca, accidentes de tránsito relevantes, fuertes lluvias, inundaciones o emergencias comunitarias.
+- Zonas prioritarias: Manizales, Caldas (Villamaría, Chinchiná, Neira, Palestina, Salamina, Aranzazu, Vía Manizales - Alto de Letras - Fresno, Autopista del Café, Pacífico 3, vía antigua a Chinchiná) y Eje Cafetero cercano (Santa Rosa de Cabal, Pereira, Risaralda).
+- Consulta medios reales como La Patria (Manizales), Invías, Gestión del Riesgo de Caldas, Caracol Radio Manizales, RCN, El Tiempo o prensa regional.
+
+Para cada noticia REAL encontrada dentro de estas últimas 48 horas, escribe:
+1. Título exacto de la noticia
+2. Fecha exacta de publicación (formato YYYY-MM-DD)
+3. Municipio/sector y departamento
+4. Medio o fuente oficial
+5. Resumen real en 1-2 frases
+
+REGLA ESTRICTA: Si no encuentras ninguna novedad vial o emergencia publicada entre ${desdeISO} y ${hoy}, responde explícitamente "SIN_NOVEDADES_RECIENTES" y NO incluyas noticias de semanas o meses anteriores.`
+
+    const { res: resPaso1, usoBusqueda, errorBusqueda } = await llamarGeminiConBusqueda(
+      {
+        contents: [{ role: 'user', parts: [{ text: promptBusqueda }] }],
+        generationConfig: { temperature: 0.1 },
+      },
+      false // Jamás usar memoria sin Google Search para noticias web reales
+    )
+
+    if (!resPaso1 || !usoBusqueda) {
+      return {
+        eventos: [],
+        busquedaWebActiva: false,
+        descartadasPorViejas: 0,
+        diagnostico: `Búsqueda web no disponible (${errorBusqueda || 'sin acceso a Google Search Grounding'}).`,
+      }
+    }
+
+    const data1 = (await resPaso1.json()) as GeminiCandidateResponse
+    const { texto: textoBuscado, fuentesWeb, consultasWeb } = extraerTextoYFuentes(data1)
+
+    if (!textoBuscado || (fuentesWeb.length === 0 && consultasWeb.length === 0)) {
+      return {
+        eventos: [],
+        busquedaWebActiva: false,
+        descartadasPorViejas: 0,
+        diagnostico: 'Google Search no devolvió resultados verificables para esta consulta.',
+      }
+    }
+
+    if (textoBuscado.includes('SIN_NOVEDADES_RECIENTES')) {
+      return {
+        eventos: [],
+        busquedaWebActiva: true,
+        descartadasPorViejas: 0,
+        diagnostico: `Web consultada (${hoy}): sin cierres ni emergencias viales publicadas en las últimas 48h en Caldas/Eje Cafetero.`,
+      }
+    }
+
+    // PASO 2: Convertir hallazgos reales en JSON verificando fechaPublicacion estricta
+    const fuentesResumen = fuentesWeb
+      .slice(0, 8)
+      .map((f, i) => `[${i}] ${f.title} — ${f.uri}`)
+      .join('\n')
+
+    const promptEstructura = `Extrae las noticias REALES de vías/emergencias del siguiente boletín obtenido de Google Search.
+Hoy es ${hoy}. Ventana válida: únicamente noticias publicadas entre ${desdeISO} y ${hoy}.
+NO inventes hechos ni cambies fechas: si una noticia no tiene fecha reciente (${desdeISO} a ${hoy}), déjala con su fecha real o descártala.
+Evita repetir estos títulos ya en radar: ${titulosExistentes.slice(0, 8).join(' | ') || 'ninguno'}.
+
+BOLETÍN INVESTIGADO:
+"""
+${textoBuscado}
+"""
+
+FUENTES WEB ENCONTRADAS:
+${fuentesResumen || 'Ninguna'}
 
 Responde ÚNICAMENTE con un JSON válido:
 {
   "eventos": [
     {
-      "titulo": "Título concreto de la novedad vial o emergencia real",
-      "lugar": "Sector / Municipio específico",
+      "titulo": "Título real conciso",
+      "fechaPublicacion": "YYYY-MM-DD",
+      "lugar": "Sector / Municipio",
       "departamento": "Caldas",
       "lat": 5.07,
       "lng": -75.52,
-      "fuenteNoticia": "Nombre del medio o entidad (ej: La Patria / Invías)",
-      "urlFuente": "https://...",
-      "resumen": "Resumen real de 1-2 frases de lo que ocurre",
+      "fuenteNoticia": "Nombre del medio (ej: La Patria / Invías)",
+      "indiceFuenteWeb": 0,
+      "resumen": "Resumen real de 1-2 frases",
       "esEmergenciaGrave": true,
       "atencionOficialPresente": true,
       "recomendacionGema": "apoyo_logistico",
-      "justificacionGema": "Criterio breve de Bear's Reserve (base en San Peregrino, Manizales)"
+      "justificacionGema": "Criterio operativo desde Finca El Guadual (San Peregrino, Manizales)"
     }
   ]
 }`
 
-  try {
-    const { res, usoBusqueda } = await llamarGeminiConBusqueda({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2 },
+    const { res: resPaso2 } = await llamarGemini({
+      contents: [{ role: 'user', parts: [{ text: promptEstructura }] }],
+      generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
     })
-    if (!res || !usoBusqueda) return []
+    if (!resPaso2) {
+      return {
+        eventos: [],
+        busquedaWebActiva: true,
+        descartadasPorViejas: 0,
+        diagnostico: 'Se consultó internet pero no se pudo estructurar la respuesta.',
+      }
+    }
 
-    const data = (await res.json()) as GeminiCandidateResponse
-    const { texto, fuentesWeb } = extraerTextoYFuentes(data)
-    if (!texto) return []
+    const data2 = (await resPaso2.json()) as GeminiCandidateResponse
+    const { texto: textoJson } = extraerTextoYFuentes(data2)
+    if (!textoJson) {
+      return {
+        eventos: [],
+        busquedaWebActiva: true,
+        descartadasPorViejas: 0,
+        diagnostico: `Web consultada (${hoy}): sin emergencias viales recientes en las últimas 48h.`,
+      }
+    }
 
-    const parsed = JSON.parse(limpiarJson(texto)) as { eventos?: Array<Partial<EventoRadarLocal>> }
+    const parsed = JSON.parse(limpiarJson(textoJson)) as {
+      eventos?: Array<
+        Partial<EventoRadarLocal> & { fechaPublicacion?: string; indiceFuenteWeb?: number }
+      >
+    }
     const crudos = Array.isArray(parsed.eventos) ? parsed.eventos : []
     const ahora = Date.now()
-    const existentesLower = new Set(titulosExistentes.map((t) => t.toLowerCase().trim()))
-
+    const acumulados = [...eventosExistentes]
     const resultados: EventoRadarLocal[] = []
+    let descartadasPorViejas = 0
+
     for (let i = 0; i < crudos.length && resultados.length < 3; i++) {
       const e = crudos[i]
       const titulo = String(e.titulo || '').trim()
-      if (!titulo || existentesLower.has(titulo.toLowerCase())) continue
+      if (!titulo) continue
+
+      // Candado estricto en código: rechazar noticias sin fecha o publicadas hace más de 2 días
+      const fechaPub = String(e.fechaPublicacion || e.fecha || '').trim().slice(0, 10)
+      if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) {
+        descartadasPorViejas++
+        continue
+      }
 
       const lugar = String(e.lugar || 'Manizales · Caldas').trim()
       const departamento = String(e.departamento || 'Caldas').trim()
+      const resumen = String(e.resumen || 'Reporte vial verificado en prensa regional.').trim()
+
+      const candidatoBase = { titulo, lugar, resumen, esNoticiaWebReal: true }
+      if (esEventoRedundante(candidatoBase, acumulados)) continue
+
       const coordsFallback = resolverCoordenadasLugar(lugar, departamento)
       const latNum = Number(e.lat)
       const lngNum = Number(e.lng)
@@ -201,6 +361,20 @@ Responde ÚNICAMENTE con un JSON válido:
         lngNum >= -79 &&
         lngNum <= -67
 
+      const idxFuente =
+        typeof e.indiceFuenteWeb === 'number' &&
+        e.indiceFuenteWeb >= 0 &&
+        e.indiceFuenteWeb < fuentesWeb.length
+          ? e.indiceFuenteWeb
+          : i
+      const fuenteObj = fuentesWeb[idxFuente] || fuentesWeb[0]
+
+      // Caducidad calculada desde la fecha real de publicación (máx 48h desde el día publicado)
+      const [yP, mP, dP] = fechaPub.split('-').map(Number)
+      const pubFinDiaMs = new Date(yP, mP - 1, dP, 23, 59, 0).getTime()
+      const expiraDesdePub = pubFinDiaMs + 24 * 60 * 60 * 1000 // Máx hasta el final del día siguiente
+      const expiraEn = Math.max(ahora + 12 * 60 * 60 * 1000, Math.min(ahora + TTL_NOTICIA_WEB_MS, expiraDesdePub))
+
       const rec =
         e.recomendacionGema === 'intervenir_urgente' ||
         e.recomendacionGema === 'apoyo_logistico' ||
@@ -208,64 +382,101 @@ Responde ÚNICAMENTE con un JSON válido:
           ? e.recomendacionGema
           : 'apoyo_logistico'
 
-      resultados.push({
+      const nuevoEvento: EventoRadarLocal = {
         id: `rad-web-${ahora}-${i}`,
         titulo,
         lugar,
         departamento,
         lat: coordsValidas ? Number(latNum.toFixed(5)) : coordsFallback.lat,
         lng: coordsValidas ? Number(lngNum.toFixed(5)) : coordsFallback.lng,
-        fuenteNoticia: String(e.fuenteNoticia || fuentesWeb[i]?.title || 'Prensa Regional / Invías').trim(),
-        urlFuente: String(e.urlFuente || fuentesWeb[i]?.uri || '').trim() || undefined,
-        resumen: String(e.resumen || 'Reporte vial y comunitario verificado en prensa regional.').trim(),
-        fecha: hoy,
+        fuenteNoticia: String(e.fuenteNoticia || fuenteObj?.title || 'Prensa Regional / Invías').trim(),
+        urlFuente: fuenteObj?.uri || undefined,
+        resumen,
+        fecha: fechaPub,
         creadoEn: ahora,
-        expiraEn: ahora + TTL_NOTICIA_WEB_MS,
+        expiraEn,
         esEmergenciaGrave: Boolean(e.esEmergenciaGrave),
         atencionOficialPresente: e.atencionOficialPresente !== false,
         esNoticiaWebReal: true,
         recomendacionGema: rec,
         justificacionGema:
           String(e.justificacionGema || '').trim() ||
-          'Situación reportada en prensa regional. Evaluar cercanía a Finca El Guadual antes de despachar.',
-      })
+          'Novedad reportada en prensa regional. Evaluar cercanía a Finca El Guadual antes de despachar.',
+      }
+
+      resultados.push(nuevoEvento)
+      acumulados.push(nuevoEvento)
     }
 
-    return resultados
+    const horaTxt = new Date(ahora).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+    const diagnostico =
+      resultados.length > 0
+        ? `🌐 Web verificada (${horaTxt}): ${resultados.length} noticia(s) real(es) de las últimas 48h.`
+        : descartadasPorViejas > 0
+          ? `🌐 Web verificada (${horaTxt}): sin noticias nuevas de las últimas 48h (se filtraron ${descartadasPorViejas} antiguas).`
+          : `🌐 Web verificada (${horaTxt}): sin emergencias viales recientes (<48h) en Caldas / Eje Cafetero.`
+
+    return {
+      eventos: resultados,
+      busquedaWebActiva: true,
+      descartadasPorViejas,
+      diagnostico,
+    }
   } catch (err) {
     console.warn('Error buscando noticias viales reales con Gemini:', err)
-    return []
+    return {
+      eventos: [],
+      busquedaWebActiva: false,
+      descartadasPorViejas: 0,
+      diagnostico: 'Error de red consultando noticias web en vivo.',
+    }
   }
 }
 
 /**
  * 3. GENERACIÓN DINÁMICA DE LLAMADAS COMUNITARIAS VEREDALES FRESCAS (TTL ~28h)
- * Genera solicitudes campesinas realistas y variadas en veredas de Manizales y Caldas.
+ * Evita repetir veredas y temáticas ya activas en el radar.
  */
 export async function generarLlamadasComunitariasIA(
-  titulosExistentes: string[] = [],
+  eventosExistentes: EventoRadarLocal[] = [],
   cantidad = 2
 ): Promise<EventoRadarLocal[]> {
   if (!geminiDisponible) return []
 
   const hoy = hoyISO()
+  const activos = eventosExistentes.filter((e) => !e.despachado)
+  const veredasOcupadas = Array.from(
+    new Set(activos.map((e) => extraerClaveVereda(e.lugar)).filter(Boolean))
+  )
+  const temasOcupados = Array.from(
+    new Set(activos.map((e) => detectarTemaEvento(e)).filter((t): t is string => Boolean(t)))
+  )
+  const titulosExistentes = eventosExistentes.map((e) => e.titulo)
+
   const prompt = `Fecha: ${hoy}. Eres Gema, oficial de operaciones de Bear's Reserve (base en Finca El Guadual, Vereda San Peregrino, Manizales, Caldas).
-Genera exactamente ${cantidad} llamadas comunitarias veredales REALISTAS, variadas y cotidianas de campesinos, juntas de acción comunal o conductores rurales en Manizales / Caldas (veredas como San Peregrino, La Cabaña, La Linda, Morrogacho, El Desquite, El Rosario, Bajo Tablazo, La Trinidad, Gallinazo, Neira, Chinchiná).
-Ejemplos de variedad: desvare de campero cafetero, rescate de camión lechero en barro, trasteo solidario en trocha, caída de árbol en camino veredal, traslado de insumos/tejas, auxilio a adulto mayor o escuela rural.
-NO repitas estos títulos: ${titulosExistentes.slice(0, 10).join(' | ') || 'ninguno'}.
+Genera exactamente ${cantidad} llamada(s) comunitaria(s) veredal(es) REALISTAS y DISTINTAS entre sí en zona rural de Manizales / Caldas.
+
+VEREDAS DISPONIBLES (elige veredas DIFERENTES entre sí):
+San Peregrino, La Cabaña, La Linda, Morrogacho, El Desquite, El Rosario, Bajo Tablazo, La Trinidad, Gallinazo (Villamaría), Alto Bonito, Cuchilla del Salado, Kilómetro 41, La Violeta, Neira rural, Chinchiná rural, Palestina rural.
+
+RESTRICCIONES ESTRICTAS ANTI-REPETICIÓN:
+- PROHIBIDO repetir estas veredas que ya están activas en el radar: ${veredasOcupadas.join(', ') || 'ninguna'}.
+- PROHIBIDO repetir estas temáticas que ya están activas: ${temasOcupados.join(', ') || 'ninguna'}.
+- PROHIBIDO repetir estos títulos: ${titulosExistentes.slice(0, 10).join(' | ') || 'ninguno'}.
+- Varía entre temas distintos: desvare mecánico de jeep cafetero, traslado de adulto mayor a cita médica, caída de árbol sobre camino/acueducto, trasteo solidario de familia campesina, transporte de cosecha de plátano/aguacate, despeje de cuneta/vado tras lluvia, apoyo a camión lechero (solo si "lechero" no está prohibido).
 
 Responde ÚNICAMENTE con un JSON válido:
 {
   "llamadas": [
     {
-      "titulo": "Título concreto",
-      "lugar": "Vereda o sector real de Caldas",
+      "titulo": "Título concreto y diferente",
+      "lugar": "Vereda específica · Manizales o municipio de Caldas",
       "departamento": "Caldas",
       "fuenteNoticia": "Llamada comunitaria / JAC / Radio veredal",
       "resumen": "Detalle humano concreto (1-2 frases)",
       "esEmergenciaGrave": false,
       "recomendacionGema": "intervenir_urgente",
-      "justificacionGema": "Por qué y qué tipo de vehículo/equipo conviene"
+      "justificacionGema": "Qué vehículo/equipo conviene despachar desde Finca El Guadual"
     }
   ]
 }`
@@ -284,46 +495,56 @@ Responde ÚNICAMENTE con un JSON válido:
     const parsed = JSON.parse(limpiarJson(texto)) as { llamadas?: Array<Partial<EventoRadarLocal>> }
     const crudos = Array.isArray(parsed.llamadas) ? parsed.llamadas : []
     const ahora = Date.now()
-    const existentesLower = new Set(titulosExistentes.map((t) => t.toLowerCase().trim()))
+    const acumulados = [...eventosExistentes]
+    const elegidas: EventoRadarLocal[] = []
 
-    return crudos
-      .filter((c) => {
-        const t = String(c.titulo || '').trim()
-        return Boolean(t) && !existentesLower.has(t.toLowerCase())
-      })
-      .slice(0, cantidad)
-      .map((c, idx) => {
-        const lugar = String(c.lugar || 'Vereda San Peregrino · Manizales').trim()
-        const departamento = String(c.departamento || 'Caldas').trim()
-        const coords = resolverCoordenadasLugar(lugar, departamento)
-        const rec =
-          c.recomendacionGema === 'intervenir_urgente' ||
-          c.recomendacionGema === 'apoyo_logistico' ||
-          c.recomendacionGema === 'monitorear_sin_intervenir'
-            ? c.recomendacionGema
-            : 'intervenir_urgente'
+    for (let idx = 0; idx < crudos.length && elegidas.length < cantidad; idx++) {
+      const c = crudos[idx]
+      const titulo = String(c.titulo || '').trim()
+      if (!titulo) continue
+      const lugar = String(c.lugar || 'Vereda San Peregrino · Manizales').trim()
+      const departamento = String(c.departamento || 'Caldas').trim()
+      const resumen = String(c.resumen || 'Solicitud de apoyo comunitario en zona rural.').trim()
 
-        return {
-          id: `rad-com-${ahora}-${idx}`,
-          titulo: String(c.titulo || '').trim(),
-          lugar,
-          departamento,
-          lat: coords.lat,
-          lng: coords.lng,
-          fuenteNoticia: String(c.fuenteNoticia || 'Llamada directa a la Central Bear\'s Reserve').trim(),
-          resumen: String(c.resumen || 'Solicitud de apoyo comunitario en zona rural.').trim(),
-          fecha: hoy,
-          creadoEn: ahora,
-          expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
-          esEmergenciaGrave: Boolean(c.esEmergenciaGrave),
-          atencionOficialPresente: false,
-          esNoticiaWebReal: false,
-          recomendacionGema: rec,
-          justificacionGema:
-            String(c.justificacionGema || '').trim() ||
-            'Apoyo rural directo sin cobertura oficial. Evaluar despliegue desde Finca El Guadual.',
-        }
-      })
+      // Doble filtro en código contra vereda o temática repetida
+      if (esEventoRedundante({ titulo, lugar, resumen, esNoticiaWebReal: false }, acumulados)) {
+        continue
+      }
+
+      const coords = resolverCoordenadasLugar(lugar, departamento)
+      const rec =
+        c.recomendacionGema === 'intervenir_urgente' ||
+        c.recomendacionGema === 'apoyo_logistico' ||
+        c.recomendacionGema === 'monitorear_sin_intervenir'
+          ? c.recomendacionGema
+          : 'intervenir_urgente'
+
+      const nueva: EventoRadarLocal = {
+        id: `rad-com-${ahora}-${idx}`,
+        titulo,
+        lugar,
+        departamento,
+        lat: coords.lat,
+        lng: coords.lng,
+        fuenteNoticia: String(c.fuenteNoticia || 'Llamada directa a la Central Bear\'s Reserve').trim(),
+        resumen,
+        fecha: hoy,
+        creadoEn: ahora,
+        expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
+        esEmergenciaGrave: Boolean(c.esEmergenciaGrave),
+        atencionOficialPresente: false,
+        esNoticiaWebReal: false,
+        recomendacionGema: rec,
+        justificacionGema:
+          String(c.justificacionGema || '').trim() ||
+          'Apoyo rural directo sin cobertura oficial. Evaluar despliegue desde Finca El Guadual.',
+      }
+
+      elegidas.push(nueva)
+      acumulados.push(nueva)
+    }
+
+    return elegidas
   } catch (err) {
     console.warn('Error generando llamadas comunitarias con Gemini:', err)
     return []
@@ -332,8 +553,6 @@ Responde ÚNICAMENTE con un JSON válido:
 
 /**
  * 4. RESOLUCIÓN AUTÓNOMA DE MISIONES POR IA 🤖
- * Evalúa el desenlace realista según dificultad del terreno, idoneidad de flota/tripulación
- * y genera una crónica narrativa humana y única.
  */
 export interface ResolucionMisionIA {
   resultado: 'exito' | 'parcial' | 'fallida_dificultad'
@@ -576,7 +795,6 @@ export async function conversarConGemaAI(
   const snapshot = construirSnapshotGema(contexto)
   const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = []
 
-  // Últimos 10 mensajes de historial para continuidad conversacional
   for (const m of historial.slice(-10)) {
     const t = String(m.texto || '').trim()
     if (!t || m.id === 'gema-init') continue

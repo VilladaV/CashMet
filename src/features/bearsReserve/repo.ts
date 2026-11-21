@@ -72,6 +72,7 @@ export interface EstadoBearsCompleto {
   misiones: MisionComunitaria[]
   eventosRadar: EventoRadarLocal[]
   ultimoEscaneoRadarEn: number
+  ultimoDiagnosticoRadar: string
   tarjetaCombustible: TarjetaCombustibleReserva
   historialTarjetas: TarjetaCombustibleReserva[]
   preciosCombustible: PreciosCombustible
@@ -169,6 +170,7 @@ function estadoInicialVacio(): EstadoBearsCompleto {
     misiones: [],
     eventosRadar: [],
     ultimoEscaneoRadarEn: 0,
+    ultimoDiagnosticoRadar: '',
     tarjetaCombustible: nuevaTarjetaMes(mesActual),
     historialTarjetas: [],
     preciosCombustible: { ...PRECIOS_COMBUSTIBLE_BASE_COLOMBIA },
@@ -335,6 +337,7 @@ async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> 
     misiones: estado.misiones.slice(0, 250),
     eventosRadar: estado.eventosRadar,
     ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
+    ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
   })
 }
 
@@ -388,6 +391,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
         base.misiones = Array.isArray(d.misiones) ? d.misiones : []
         base.eventosRadar = filtrarEventosRadarVigentes(d.eventosRadar || [])
         base.ultimoEscaneoRadarEn = Number(d.ultimoEscaneoRadarEn) || 0
+        base.ultimoDiagnosticoRadar = String(d.ultimoDiagnosticoRadar || '')
       }
 
       if (snapComb.exists()) {
@@ -940,6 +944,10 @@ export function leerEventosRadar(): EventoRadarLocal[] {
   return filtrarEventosRadarVigentes(obtenerCacheSincrono().eventosRadar)
 }
 
+export function leerDiagnosticoRadar(): string {
+  return obtenerCacheSincrono().ultimoDiagnosticoRadar || ''
+}
+
 export async function guardarEventosRadar(eventos: EventoRadarLocal[]): Promise<void> {
   const estado = await hidratarEstadoBears()
   estado.eventosRadar = filtrarEventosRadarVigentes(eventos)
@@ -969,13 +977,14 @@ export async function agregarEventoRadarManual(evento: EventoRadarLocal): Promis
 
 /**
  * Purga eventos expirados (> 1–2 días) y, si toca refresco periódico (cada 6h) o lo pide el usuario:
- * 1. Busca noticias viales reales recientes con Gemini + Google Search Grounding.
- * 2. Regenera llamadas comunitarias veredales frescas cuando faltan o caducaron.
+ * 1. Busca noticias viales reales recientes (<48h) con Gemini + Google Search Grounding en 2 pasos.
+ * 2. Regenera llamadas comunitarias veredales frescas evitando repetir veredas ni temáticas ya activas.
  */
 export async function sincronizarRadarAutomatico(forzar = false): Promise<{
   eventos: EventoRadarLocal[]
   noticiasRealesAgregadas: number
   llamadasAgregadas: number
+  diagnosticoWeb: string
 }> {
   const estado = await hidratarEstadoBears()
   const ahora = Date.now()
@@ -995,32 +1004,32 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
       eventos: estado.eventosRadar,
       noticiasRealesAgregadas: 0,
       llamadasAgregadas: 0,
+      diagnosticoWeb: estado.ultimoDiagnosticoRadar || '',
     }
   }
 
-  const titulosExistentes = estado.eventosRadar.map((e) => e.titulo)
   const noticiasVigentes = estado.eventosRadar.filter((e) => e.esNoticiaWebReal && !e.despachado)
   const llamadasVigentes = estado.eventosRadar.filter((e) => !e.esNoticiaWebReal && !e.despachado)
 
   let noticiasReales: EventoRadarLocal[] = []
   let llamadasNuevas: EventoRadarLocal[] = []
+  let diagnosticoWeb = estado.ultimoDiagnosticoRadar || ''
 
-  // Buscar noticias web reales (solo cuando se fuerza o hay menos de 2 noticias vigentes)
+  // 1. Buscar noticias web reales (<48h) en 2 pasos con Google Search Grounding
   if (forzar || noticiasVigentes.length < 2) {
-    noticiasReales = await buscarNoticiasVialesRealesAI(titulosExistentes)
+    const resWeb = await buscarNoticiasVialesRealesAI(estado.eventosRadar)
+    noticiasReales = resWeb.eventos
+    diagnosticoWeb = resWeb.diagnostico
   }
 
-  // Regenerar llamadas comunitarias frescas (si hay menos de 2 vigentes o si el usuario pide escanear)
-  if (forzar || llamadasVigentes.length < 2) {
-    const cantNecesaria = forzar ? 1 : Math.max(1, 2 - llamadasVigentes.length)
-    const titulosConWeb = [...titulosExistentes, ...noticiasReales.map((n) => n.titulo)]
-    llamadasNuevas = await generarLlamadasComunitariasIA(titulosConWeb, cantNecesaria)
+  // 2. Regenerar llamadas comunitarias frescas (máx 3 activas al tiempo, sin repetir vereda ni tema)
+  const faltanLlamadas = Math.max(0, 3 - llamadasVigentes.length)
+  if (faltanLlamadas > 0) {
+    const cantNecesaria = forzar ? 1 : Math.min(2, faltanLlamadas)
+    const existentesConWeb = [...estado.eventosRadar, ...noticiasReales]
+    llamadasNuevas = await generarLlamadasComunitariasIA(existentesConWeb, cantNecesaria)
     if (llamadasNuevas.length === 0) {
-      llamadasNuevas = generarLlamadasComunitariasRespaldo(
-        [...estado.eventosRadar, ...noticiasReales],
-        cantNecesaria,
-        ahora
-      )
+      llamadasNuevas = generarLlamadasComunitariasRespaldo(existentesConWeb, cantNecesaria, ahora)
     }
   }
 
@@ -1029,12 +1038,14 @@ export async function sincronizarRadarAutomatico(forzar = false): Promise<{
     ahora
   ).slice(0, 12)
   estado.ultimoEscaneoRadarEn = ahora
+  estado.ultimoDiagnosticoRadar = diagnosticoWeb
 
   await persistirOperaciones(estado)
   return {
     eventos: estado.eventosRadar,
     noticiasRealesAgregadas: noticiasReales.length,
     llamadasAgregadas: llamadasNuevas.length,
+    diagnosticoWeb,
   }
 }
 

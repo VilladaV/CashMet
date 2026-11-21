@@ -18,6 +18,7 @@ import {
   investigarVehiculoIndividualIA,
   investigarVehiculosPendientesIA,
   leerChatGema,
+  leerDiagnosticoRadar,
   leerEventosRadar,
   leerHistorialTarjetas,
   leerPreciosCombustible,
@@ -91,6 +92,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
   const [misiones, setMisiones] = useState<MisionComunitaria[]>([])
   const [rutasHabituales, setRutasHabituales] = useState<RutaHabitual[]>([])
   const [eventosRadar, setEventosRadar] = useState<EventoRadarLocal[]>([])
+  const [diagnosticoRadar, setDiagnosticoRadar] = useState<string>('')
   const [tarjetaCombustible, setTarjetaCombustible] =
     useState<TarjetaCombustibleReserva>(leerTarjetaCombustible)
   const [historialTarjetas, setHistorialTarjetas] = useState<TarjetaCombustibleReserva[]>([])
@@ -160,6 +162,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     setMisiones(listarMisiones())
     setRutasHabituales(rutas)
     setEventosRadar(leerEventosRadar())
+    setDiagnosticoRadar(leerDiagnosticoRadar())
     setTarjetaCombustible(leerTarjetaCombustible())
     setHistorialTarjetas(leerHistorialTarjetas())
     setPreciosCombustible(leerPreciosCombustible())
@@ -215,6 +218,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
             setPreciosCombustible(resPrecios.precios)
           }
           setEventosRadar(resRadar.eventos)
+          if (resRadar.diagnosticoWeb) setDiagnosticoRadar(resRadar.diagnosticoWeb)
         }
       } catch (err) {
         console.warn('Error inicializando Bear\'s Reserve:', err)
@@ -383,6 +387,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
   const escanearRadarReal = async () => {
     const res = await sincronizarRadarAutomatico(true)
     setEventosRadar(res.eventos)
+    if (res.diagnosticoWeb) setDiagnosticoRadar(res.diagnosticoWeb)
     return res
   }
 
@@ -558,6 +563,7 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
                 turnos={turnos}
                 rutasHabituales={rutasHabituales}
                 eventosRadar={eventosRadar}
+                diagnosticoRadar={diagnosticoRadar}
                 onCrearMision={despacharMision}
                 onIniciarMisionProgramada={arrancarMisionProgramada}
                 onCancelarMisionProgramada={eliminarMisionProgramada}

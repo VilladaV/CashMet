@@ -132,23 +132,46 @@ export async function llamarGemini(body: unknown): Promise<{ res: Response | nul
 
 /**
  * Llama a Gemini activando Google Search Grounding (datos en vivo de internet).
- * Prioriza modelos que soportan la herramienta `google_search`.
+ * Prioriza modelos con soporte completo de `google_search` (gemini-2.5-flash, 2.0-flash, etc.)
+ * y devuelve el motivo exacto si ninguno pudo activar la búsqueda web.
  */
 export async function llamarGeminiConBusqueda(
-  bodySinTools: Record<string, unknown>
-): Promise<{ res: Response | null; cuotaAgotada: boolean; usoBusqueda: boolean }> {
-  if (!API_KEY) return { res: null, cuotaAgotada: false, usoBusqueda: false }
-  const candidatosBusqueda = [MODELO, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'].filter(
-    (m, i, a) => m && a.indexOf(m) === i
-  )
-  let cuotaAgotada = false
+  bodySinTools: Record<string, unknown>,
+  permitirFallbackSinBusqueda = true
+): Promise<{
+  res: Response | null
+  cuotaAgotada: boolean
+  usoBusqueda: boolean
+  modeloUsado?: string
+  errorBusqueda?: string
+}> {
+  if (!API_KEY) {
+    return {
+      res: null,
+      cuotaAgotada: false,
+      usoBusqueda: false,
+      errorBusqueda: 'Falta VITE_GEMINI_API_KEY en la configuración.',
+    }
+  }
 
-  // Nota: responseMimeType: 'application/json' no siempre es compatible con google_search; lo omitimos al buscar.
+  // Priorizamos modelos con mejor soporte de Google Search Grounding
+  const candidatosBusqueda = [
+    'gemini-2.5-flash',
+    MODELO,
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash',
+  ].filter((m, i, a) => m && a.indexOf(m) === i)
+
+  let cuotaAgotada = false
+  const errores: string[] = []
+
+  // Nunca enviar responseMimeType/responseSchema junto con google_search (evita rechazo o desactivación silenciosa)
   const genCfg =
     bodySinTools.generationConfig && typeof bodySinTools.generationConfig === 'object'
       ? { ...(bodySinTools.generationConfig as Record<string, unknown>) }
       : {}
   delete genCfg.responseMimeType
+  delete genCfg.responseSchema
 
   const bodyBusqueda = {
     ...bodySinTools,
@@ -163,19 +186,39 @@ export async function llamarGeminiConBusqueda(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(bodyBusqueda),
       })
-      if (r.ok) return { res: r, cuotaAgotada: false, usoBusqueda: true }
+      if (r.ok) {
+        return { res: r, cuotaAgotada: false, usoBusqueda: true, modeloUsado: modelo }
+      }
       if (r.status === 429) cuotaAgotada = true
-    } catch {
-      /* intenta siguiente modelo */
+      let detalle = `HTTP ${r.status}`
+      try {
+        const errJson = (await r.json()) as { error?: { message?: string } }
+        if (errJson?.error?.message) {
+          detalle = `${r.status}: ${errJson.error.message.slice(0, 120)}`
+        }
+      } catch {
+        /* ignore */
+      }
+      errores.push(`${modelo} (${detalle})`)
+    } catch (err) {
+      errores.push(`${modelo} (${err instanceof Error ? err.message : 'red'})`)
     }
   }
 
-  // Fallback sin google_search si ningún modelo aceptó la tool
+  const errorBusqueda = errores.join(' | ') || 'Sin respuesta de Google Search Grounding'
+  console.warn('[Gemini Google Search] No se pudo activar búsqueda web:', errorBusqueda)
+
+  if (!permitirFallbackSinBusqueda) {
+    return { res: null, cuotaAgotada, usoBusqueda: false, errorBusqueda }
+  }
+
+  // Fallback sin google_search si el llamador lo permite (ej: precios o fichas técnicas)
   const sinBusq = await llamarGemini(bodySinTools)
   return {
     res: sinBusq.res,
     cuotaAgotada: sinBusq.cuotaAgotada || cuotaAgotada,
     usoBusqueda: false,
+    errorBusqueda,
   }
 }
 

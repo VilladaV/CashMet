@@ -75,6 +75,7 @@ interface Props {
   turnos?: TurnoSemanal[]
   rutasHabituales: RutaHabitual[]
   eventosRadar: EventoRadarLocal[]
+  diagnosticoRadar?: string
   onCrearMision: (mision: MisionComunitaria) => Promise<void> | void
   onIniciarMisionProgramada?: (id: string) => Promise<void>
   onCancelarMisionProgramada?: (id: string) => Promise<void>
@@ -85,6 +86,7 @@ interface Props {
     eventos: EventoRadarLocal[]
     noticiasRealesAgregadas: number
     llamadasAgregadas: number
+    diagnosticoWeb?: string
   }>
   onActualizarEventosRadar?: (eventos: EventoRadarLocal[]) => Promise<void> | void
   onAgregarEventoRadar?: (ev: EventoRadarLocal) => Promise<void> | void
@@ -99,6 +101,7 @@ export default function MisionesTab({
   turnos = [],
   rutasHabituales,
   eventosRadar,
+  diagnosticoRadar,
   onCrearMision,
   onIniciarMisionProgramada,
   onCancelarMisionProgramada,
@@ -151,12 +154,13 @@ export default function MisionesTab({
       if (partes.length > 0) {
         mostrarFeedback(
           'ok',
-          `📡 Radar actualizado: ${partes.join(' y ')} (vigencia automática de 1–2 días).`
+          `📡 Radar actualizado: ${partes.join(' y ')}. ${res.diagnosticoWeb || ''}`.trim()
         )
       } else {
         mostrarFeedback(
           'ok',
-          '📡 Frecuencias escaneadas. Se purgaron eventos vencidos; no hay alertas nuevas adicionales por ahora.'
+          res.diagnosticoWeb ||
+            '📡 Frecuencias escaneadas. Se purgaron eventos vencidos; no hay alertas nuevas adicionales por ahora.'
         )
       }
     } catch {
@@ -742,8 +746,13 @@ export default function MisionesTab({
                     Radar de Eventos, Noticias Reales y Llamadas Veredales
                   </h2>
                   <p className="text-[11px] text-mist-400">
-                    Actualización automática con caducidad de 1–2 días (nunca se quedan alertas viejas).
+                    Zonas: Manizales, Caldas (vías veredales, Letras, Autopista del Café, Pacífico 3) y Eje Cafetero · Caducidad máx. 48h.
                   </p>
+                  {diagnosticoRadar && (
+                    <p className="mt-0.5 text-[10px] font-semibold text-sky-300/90">
+                      {diagnosticoRadar}
+                    </p>
+                  )}
                 </div>
               </div>
 
