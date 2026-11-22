@@ -7,7 +7,26 @@ import { login } from '@/lib/firebase/auth'
 import CashMetLogo from '@/components/brand/CashMetLogo'
 import { ShieldCheck, ArrowRight, Lock, Mail, Sparkles } from 'lucide-react'
 
-export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+function mensajeErrorAuth(code?: string): string {
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Correo o contraseña incorrectos. Verifica tus datos e inténtalo de nuevo.'
+    case 'auth/invalid-email':
+      return 'El formato del correo electrónico no es válido.'
+    case 'auth/user-disabled':
+      return 'Esta cuenta ha sido deshabilitada.'
+    case 'auth/too-many-requests':
+      return 'Demasiados intentos fallidos. Espera unos minutos antes de volver a intentar.'
+    case 'auth/network-request-failed':
+      return 'Sin conexión a internet. Verifica tu red e inténtalo de nuevo.'
+    default:
+      return 'No se pudo iniciar sesión. Inténtalo de nuevo.'
+  }
+}
+
+export default function LoginPage({ onSuccess }: { onSuccess?: () => void }) {
   const [email, setEmail] = useState('')
   const [pass, setPass] = useState('')
   const [err, setErr] = useState('')
@@ -18,10 +37,10 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
     setErr('')
     setBusy(true)
     try {
-      await login(email, pass)
-      onSuccess()
+      await login(email.trim(), pass)
+      onSuccess?.()
     } catch (e: any) {
-      setErr(e?.message || 'Error al autenticar')
+      setErr(mensajeErrorAuth(e?.code))
     } finally {
       setBusy(false)
     }
@@ -52,7 +71,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
           <div className="h-1 w-full bg-gradient-to-r from-sky-500 via-teal-400 to-emerald-400" />
           <CardContent className="space-y-5 p-6 sm:p-8">
             <div className="space-y-1">
-              <h2 className="text-xl font-black tracking-tight text-white">Iniciar sesión</h2>
+              <h1 className="text-xl font-black tracking-tight text-white">Iniciar sesión</h1>
               <p className="text-xs text-mist-500">
                 Ingresa tus credenciales para acceder a tus finanzas y chat IA.
               </p>
@@ -60,12 +79,14 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
 
             <form onSubmit={submit} className="space-y-4">
               <div className="space-y-1.5">
-                <label className="flex items-center gap-1.5 text-xs font-bold text-mist-300">
+                <label htmlFor="login-email" className="flex items-center gap-1.5 text-xs font-bold text-mist-300">
                   <Mail className="h-3.5 w-3.5 text-mist-600" />
                   Correo electrónico
                 </label>
                 <Input
+                  id="login-email"
                   type="email"
+                  autoComplete="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="usuario@ejemplo.com"
@@ -75,12 +96,14 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
               </div>
 
               <div className="space-y-1.5">
-                <label className="flex items-center gap-1.5 text-xs font-bold text-mist-300">
+                <label htmlFor="login-password" className="flex items-center gap-1.5 text-xs font-bold text-mist-300">
                   <Lock className="h-3.5 w-3.5 text-mist-600" />
                   Contraseña
                 </label>
                 <Input
+                  id="login-password"
                   type="password"
+                  autoComplete="current-password"
                   value={pass}
                   onChange={(e) => setPass(e.target.value)}
                   placeholder="••••••••"
@@ -91,7 +114,10 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }) {
               </div>
 
               {err && (
-                <div className="rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 text-xs text-red-300">
+                <div
+                  role="alert"
+                  className="rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 text-xs text-red-300"
+                >
                   {err}
                 </div>
               )}

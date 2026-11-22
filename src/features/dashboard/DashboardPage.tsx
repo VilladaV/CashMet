@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -8,13 +8,15 @@ import {
   actualizarMovimiento,
   eliminarMovimiento,
   exportarMovimientosCompacto,
-  listarCuentasBanco,
   listarTodosLosMovimientos,
   obtenerResumenSaldos,
   type CuentaBanco,
   type MovimientoDoc,
   type TipoMovimiento,
 } from '@/lib/firebase/movimientosRepo'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
+import { parseFechaLocal } from '@/lib/fechas'
+import { desformatearCifra } from '@/lib/utils'
 import {
   Wallet,
   ArrowDownLeft,
@@ -37,7 +39,7 @@ import {
   ArrowUpDown,
 } from 'lucide-react'
 
-const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
+const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')} COP`
 
 const TIPOS: TipoMovimiento[] = [
   'gasto',
@@ -63,8 +65,15 @@ const ETIQUETA_TIPO: Record<TipoMovimiento, string> = {
   otro: 'Otro',
 }
 
+function normalizar(texto: string): string {
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
 function getCategoriaIcon(cat = '', tipo = '') {
-  const c = cat.toLowerCase()
+  const c = normalizar(cat)
   if (tipo === 'ingreso' || c.includes('sueldo') || c.includes('salario') || c.includes('nomina')) return Briefcase
   if (c.includes('comida') || c.includes('restaurante') || c.includes('almuerzo') || c.includes('cena')) return Utensils
   if (c.includes('mercado') || c.includes('compra')) return ShoppingBag
@@ -81,6 +90,7 @@ interface EdicionForm {
   monto: string
   categoria: string
   cuentaBancoId: string
+  cuentaDestinoId: string
 }
 
 const contenedor = {
@@ -104,87 +114,134 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
   const [editandoId, setEditandoId] = useState<string | null>(null)
   const [form, setForm] = useState<EdicionForm | null>(null)
   const [guardando, setGuardando] = useState(false)
+  const [eliminandoId, setEliminandoId] = useState<string | null>(null)
   const [cargando, setCargando] = useState(false)
   const [exportando, setExportando] = useState(false)
   const [busqueda, setBusqueda] = useState('')
   const [filtroTipo, setFiltroTipo] = useState<string>('todos')
   const [ordenAsc, setOrdenAsc] = useState(false)
+  const reqIdRef = useRef(0)
+
+  const cuentasMap = useMemo(() => new Map(cuentas.map((c) => [c.id, c])), [cuentas])
 
   const cargar = useCallback(async () => {
+    const reqId = ++reqIdRef.current
     setError('')
     setCargando(true)
     try {
-      const [{ cuentas: cuentasRes, total: totalRes }, movimientos, cuentasLista] = await Promise.all([
+      const [{ cuentas: cuentasRes, total: totalRes }, movimientos] = await Promise.all([
         obtenerResumenSaldos(),
         listarTodosLosMovimientos(),
-        listarCuentasBanco(),
       ])
+      if (reqId !== reqIdRef.current) return
       setTotal(totalRes)
       setNumCuentas(cuentasRes.length)
       setMovs(movimientos)
-      setCuentas(cuentasLista)
+      setCuentas(cuentasRes)
 
       const ahora = new Date()
       const prefijoMes = `${ahora.getFullYear()}-${String(ahora.getMonth() + 1).padStart(2, '0')}`
       let ing = 0
       let gas = 0
       for (const m of movimientos) {
+        if (m.estado === 'anulado') continue
         if (!m.fecha?.startsWith(prefijoMes)) continue
         if (m.tipo === 'ingreso') ing += Number(m.monto) || 0
         else if (m.tipo !== 'transferencia') gas += Number(m.monto) || 0
       }
       setIngresosMes(ing)
       setGastosMes(gas)
-    } catch {
-      setError('No se pudieron cargar los datos financieros.')
+    } catch (e: any) {
+      if (reqId !== reqIdRef.current) return
+      setError(e?.message || 'No se pudieron cargar los datos financieros.')
     } finally {
-      setCargando(false)
+      if (reqId === reqIdRef.current) setCargando(false)
     }
   }, [])
 
   useEffect(() => {
-    void Promise.resolve().then(() => cargar())
-  }, [cargar])
-
-  const borrar = async (id: string) => {
-    if (!confirm('¿Eliminar este movimiento? Si tenía cuenta bancaria asociada, su saldo se revertirá automáticamente.')) return
-    try {
-      await eliminarMovimiento(id)
-      if (editandoId === id) cerrarEdicion()
-      cargar()
-    } catch {
-      setError('No se pudo eliminar el movimiento.')
-    }
-  }
-
-  const abrirEdicion = (m: MovimientoDoc) => {
-    setEditandoId(m.id)
-    setError('')
-    setForm({
-      fecha: m.fecha || '',
-      tipo: m.tipo,
-      concepto: m.concepto || '',
-      monto: String(m.monto ?? ''),
-      categoria: m.categoria || '',
-      cuentaBancoId: m.cuentaBancoId || cuentas[0]?.id || '',
+    let cancelado = false
+    void Promise.resolve().then(() => {
+      if (!cancelado) void cargar()
     })
-  }
+    return () => {
+      cancelado = true
+    }
+  }, [cargar])
 
   const cerrarEdicion = () => {
     setEditandoId(null)
     setForm(null)
   }
 
+  const borrar = async (m: MovimientoDoc) => {
+    if (eliminandoId) return
+    const esVinculado = Boolean(m.deudaId || m.impuestoId)
+    const avisoVinculo = esVinculado
+      ? ' Atención: este movimiento está vinculado a una deuda o impuesto; al eliminarlo se revertirá el saldo bancario, pero deberás revisar manualmente el estado de la deuda/impuesto.'
+      : ''
+    if (
+      !confirm(
+        `¿Eliminar este movimiento? Si tenía cuenta bancaria asociada, su saldo se revertirá automáticamente.${avisoVinculo}`
+      )
+    ) {
+      return
+    }
+    setEliminandoId(m.id)
+    setError('')
+    try {
+      await eliminarMovimiento(m.id)
+      invalidarSnapshotFinanciero()
+      if (editandoId === m.id) cerrarEdicion()
+      await cargar()
+    } catch (e: any) {
+      setError(e?.message || 'No se pudo eliminar el movimiento.')
+    } finally {
+      setEliminandoId(null)
+    }
+  }
+
+  const abrirEdicion = (m: MovimientoDoc) => {
+    setEditandoId(m.id)
+    setError('')
+    const origen = m.cuentaBancoId || cuentas[0]?.id || ''
+    const destinoDefault =
+      m.cuentaDestinoId || cuentas.find((c) => c.id !== origen)?.id || ''
+    setForm({
+      fecha: m.fecha || '',
+      tipo: m.tipo,
+      concepto: m.concepto || '',
+      monto: String(m.monto ?? ''),
+      categoria: m.categoria || '',
+      cuentaBancoId: origen,
+      cuentaDestinoId: destinoDefault,
+    })
+  }
+
   const guardarEdicion = async () => {
     if (!editandoId || !form) return
-    const monto = Number(String(form.monto).replace(/[^\d.-]/g, ''))
-    if (!form.fecha || !form.concepto.trim() || !form.categoria.trim() || !Number.isFinite(monto) || monto <= 0) {
+    const monto = desformatearCifra(form.monto)
+    if (!parseFechaLocal(form.fecha)) {
+      setError('Selecciona una fecha válida (YYYY-MM-DD).')
+      return
+    }
+    if (!form.concepto.trim() || !form.categoria.trim() || !Number.isFinite(monto) || monto <= 0) {
       setError('Completa fecha, concepto, categoría y un monto válido mayor a 0.')
       return
     }
     if (!form.cuentaBancoId) {
       setError('Debes elegir la cuenta bancaria asociada al movimiento.')
       return
+    }
+    if (form.tipo === 'transferencia') {
+      if (!form.cuentaDestinoId) {
+        setError('Debes elegir la cuenta destino de la transferencia.')
+        return
+      }
+      if (form.cuentaDestinoId === form.cuentaBancoId) {
+        setError('La cuenta de origen y la cuenta destino deben ser distintas.')
+        return
+      }
     }
     setGuardando(true)
     setError('')
@@ -193,14 +250,16 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
         fecha: form.fecha,
         tipo: form.tipo,
         concepto: form.concepto.trim(),
-        monto,
+        monto: Math.round(monto),
         categoria: form.categoria.trim(),
         cuentaBancoId: form.cuentaBancoId,
+        cuentaDestinoId: form.tipo === 'transferencia' ? form.cuentaDestinoId : undefined,
       })
+      invalidarSnapshotFinanciero()
       cerrarEdicion()
-      cargar()
-    } catch {
-      setError('No se pudo actualizar el movimiento.')
+      await cargar()
+    } catch (e: any) {
+      setError(e?.message || 'No se pudo actualizar el movimiento.')
     } finally {
       setGuardando(false)
     }
@@ -211,31 +270,34 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
     setError('')
     try {
       const { nombre, contenido } = await exportarMovimientosCompacto()
-      const blob = new Blob([contenido], { type: 'text/csv;charset=utf-8' })
+      const blob = new Blob(['\uFEFF', contenido], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = nombre
       a.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      setError('No se pudieron exportar los movimientos.')
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e: any) {
+      setError(e?.message || 'No se pudieron exportar los movimientos.')
     } finally {
       setExportando(false)
     }
   }
 
   const movsFiltrados = useMemo(() => {
-    const q = busqueda.trim().toLowerCase()
+    const q = normalizar(busqueda.trim())
     const base = ordenAsc ? [...movs].reverse() : movs
     return base.filter((m) => {
       if (filtroTipo !== 'todos' && m.tipo !== filtroTipo) return false
       if (!q) return true
-      const cuentaNombre = cuentas.find((c) => c.id === m.cuentaBancoId)?.nombre ?? ''
-      const texto = `${m.fecha} ${m.concepto} ${m.categoria} ${m.descripcion ?? ''} ${cuentaNombre} ${m.monto}`.toLowerCase()
+      const cuentaNombre = m.cuentaBancoId ? cuentasMap.get(m.cuentaBancoId)?.nombre ?? '' : ''
+      const destinoNombre = m.cuentaDestinoId ? cuentasMap.get(m.cuentaDestinoId)?.nombre ?? '' : ''
+      const texto = normalizar(
+        `${m.fecha} ${m.concepto} ${m.categoria} ${m.descripcion ?? ''} ${cuentaNombre} ${destinoNombre} ${m.monto}`
+      )
       return texto.includes(q)
     })
-  }, [movs, busqueda, filtroTipo, ordenAsc, cuentas])
+  }, [movs, busqueda, filtroTipo, ordenAsc, cuentasMap])
 
   const balanceMes = ingresosMes - gastosMes
 
@@ -261,15 +323,16 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                   onClick={onAbrirBears}
                   className="h-8 cursor-pointer gap-1.5 border-amber-400/25 bg-amber-400/[0.08] px-2.5 text-xs font-bold text-amber-300 hover:bg-amber-400/20 hover:text-white"
                   title="Abrir Bear's Reserve"
+                  aria-label="Abrir Bear's Reserve"
                 >
-                  <span>🐻</span>
+                  <span aria-hidden="true">🐻</span>
                   <span className="hidden sm:inline">Bear&apos;s Reserve</span>
                 </Button>
               )}
               <Button
                 size="sm"
                 variant="outline"
-                onClick={cargar}
+                onClick={() => void cargar()}
                 disabled={cargando}
                 className="h-8 cursor-pointer gap-1.5 border-white/10 bg-white/[0.05] px-3 text-xs text-mist-300 hover:bg-white/10 hover:text-white"
               >
@@ -364,7 +427,10 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
       </div>
 
       {error && (
-        <div className="rounded-2xl border border-red-400/25 bg-red-500/10 p-3 text-xs font-medium text-red-300">
+        <div
+          role="alert"
+          className="rounded-2xl border border-red-400/25 bg-red-500/10 p-3 text-xs font-medium text-red-300"
+        >
           {error}
         </div>
       )}
@@ -396,7 +462,14 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                   <select
                     className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
                     value={form.tipo}
-                    onChange={(e) => setForm({ ...form, tipo: e.target.value as TipoMovimiento })}
+                    onChange={(e) => {
+                      const nuevoTipo = e.target.value as TipoMovimiento
+                      const destinoSugerido =
+                        nuevoTipo === 'transferencia' && (!form.cuentaDestinoId || form.cuentaDestinoId === form.cuentaBancoId)
+                          ? cuentas.find((c) => c.id !== form.cuentaBancoId)?.id || ''
+                          : form.cuentaDestinoId
+                      setForm({ ...form, tipo: nuevoTipo, cuentaDestinoId: destinoSugerido })
+                    }}
                   >
                     {TIPOS.map((t) => (
                       <option key={t} value={t}>
@@ -434,9 +507,10 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                   />
                 </label>
 
-                <label className="flex flex-col gap-1 sm:col-span-2">
+                <label className={`flex flex-col gap-1 ${form.tipo === 'transferencia' ? '' : 'sm:col-span-2'}`}>
                   <span className="font-bold text-mist-300">
-                    Cuenta bancaria <span className="text-red-300">*</span>
+                    {form.tipo === 'transferencia' ? 'Cuenta origen' : 'Cuenta bancaria'}{' '}
+                    <span className="text-red-300">*</span>
                   </span>
                   <select
                     className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
@@ -451,6 +525,28 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                     ))}
                   </select>
                 </label>
+
+                {form.tipo === 'transferencia' && (
+                  <label className="flex flex-col gap-1">
+                    <span className="font-bold text-mist-300">
+                      Cuenta destino <span className="text-red-300">*</span>
+                    </span>
+                    <select
+                      className="field-dark h-9 rounded-xl px-2 text-xs font-medium outline-none"
+                      value={form.cuentaDestinoId}
+                      onChange={(e) => setForm({ ...form, cuentaDestinoId: e.target.value })}
+                    >
+                      <option value="">Selecciona cuenta destino...</option>
+                      {cuentas
+                        .filter((c) => c.id !== form.cuentaBancoId)
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.nombre} (Saldo: ${c.saldoActual?.toLocaleString('es-CO')})
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                )}
               </div>
 
               <div className="flex gap-2 border-t border-white/[0.06] pt-3">
@@ -458,7 +554,7 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                   size="sm"
                   className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
                   disabled={guardando}
-                  onClick={guardarEdicion}
+                  onClick={() => void guardarEdicion()}
                 >
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   <span>{guardando ? 'Guardando...' : 'Aplicar cambios'}</span>
@@ -505,7 +601,7 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                 <Button
                   size="sm"
                   disabled={exportando || movs.length === 0}
-                  onClick={exportarMovs}
+                  onClick={() => void exportarMovs()}
                   className="h-8 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-3 text-xs font-bold text-[#04241a] hover:brightness-110"
                   title="Exporta todos los movimientos con todos sus datos usando el mínimo de tokens"
                 >
@@ -529,6 +625,7 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                 <select
                   value={filtroTipo}
                   onChange={(e) => setFiltroTipo(e.target.value)}
+                  aria-label="Filtrar por tipo de movimiento"
                   className="field-dark h-9 rounded-xl px-2.5 text-xs font-medium outline-none"
                 >
                   <option value="todos">Todos los tipos</option>
@@ -560,6 +657,8 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                   const IconCat = getCategoriaIcon(m.categoria, m.tipo)
                   const esIng = m.tipo === 'ingreso'
                   const esTransf = m.tipo === 'transferencia'
+                  const nombreCuenta = m.cuentaBancoId ? cuentasMap.get(m.cuentaBancoId)?.nombre || 'Cuenta' : ''
+                  const nombreDestino = m.cuentaDestinoId ? cuentasMap.get(m.cuentaDestinoId)?.nombre || 'Cuenta' : ''
                   return (
                     <li
                       key={m.id}
@@ -585,8 +684,11 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                             <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 font-semibold">
                               {m.categoria || 'General'}
                             </span>
-                            {m.cuentaBancoId && (
-                              <span>· {cuentas.find((c) => c.id === m.cuentaBancoId)?.nombre || 'Cuenta'}</span>
+                            {nombreCuenta && (
+                              <span>
+                                · {nombreCuenta}
+                                {esTransf && nombreDestino ? ` → ${nombreDestino}` : ''}
+                              </span>
                             )}
                             {m.descripcion && <span className="text-mist-600">· {m.descripcion}</span>}
                           </div>
@@ -606,18 +708,22 @@ export default function DashboardPage({ onAbrirBears }: { onAbrirBears?: () => v
                           <Button
                             size="icon"
                             variant="ghost"
+                            disabled={eliminandoId === m.id}
                             className="h-8 w-8 cursor-pointer text-mist-600 hover:bg-white/[0.06] hover:text-white"
                             onClick={() => (editandoId === m.id ? cerrarEdicion() : abrirEdicion(m))}
                             title="Editar movimiento"
+                            aria-label="Editar movimiento"
                           >
                             <Edit2 className="h-3.5 w-3.5" />
                           </Button>
                           <Button
                             size="icon"
                             variant="ghost"
+                            disabled={eliminandoId !== null}
                             className="h-8 w-8 cursor-pointer text-mist-600 hover:bg-red-500/10 hover:text-red-300"
-                            onClick={() => borrar(m.id)}
+                            onClick={() => void borrar(m)}
                             title="Eliminar movimiento"
+                            aria-label="Eliminar movimiento"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>

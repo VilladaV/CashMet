@@ -10,6 +10,7 @@ import {
   orderBy,
   query,
   runTransaction,
+  setDoc,
   updateDoc,
 } from 'firebase/firestore'
 import { db } from './config'
@@ -123,8 +124,10 @@ function validarEntradaMovimiento(input: MovimientoInput): number {
 
 export function datosMovimiento(input: MovimientoInput, ahora = Date.now()): Record<string, unknown> {
   const monto = validarEntradaMovimiento(input)
+  const { cuentaDestinoId, ...resto } = input
   return limpio({
-    ...input,
+    ...resto,
+    ...(input.tipo === 'transferencia' ? { cuentaDestinoId } : {}),
     monto,
     etiquetas: input.etiquetas ?? [],
     fuente: input.fuente ?? 'chat_IA',
@@ -140,7 +143,7 @@ export async function crearMovimiento(input: MovimientoInput): Promise<string> {
   const movRef = doc(collection(db, COLLECTIONS.MOVIMIENTOS))
 
   if (!input.cuentaBancoId) {
-    await addDoc(collection(db, COLLECTIONS.MOVIMIENTOS), data)
+    await setDoc(movRef, data)
     return movRef.id
   }
 
@@ -177,6 +180,7 @@ export async function crearMovimiento(input: MovimientoInput): Promise<string> {
 
 export type ErrorTransferencia =
   | 'monto_invalido'
+  | 'fecha_invalida'
   | 'misma_cuenta'
   | 'cuenta_no_encontrada'
   | 'saldo_insuficiente'
@@ -205,13 +209,12 @@ export type ResultadoTransferencia =
     }
 
 export async function transferirEntreCuentas(input: EntradaTransferencia): Promise<ResultadoTransferencia> {
-  const monto = Math.round(Number(input.monto) || 0)
+  const montoRaw = Number(input.monto)
+  const monto = Number.isFinite(montoRaw) ? Math.round(montoRaw) : 0
   if (monto <= 0) return { ok: false, error: 'monto_invalido' }
   if (!input.origenId || !input.destinoId) return { ok: false, error: 'cuenta_no_encontrada' }
   if (input.origenId === input.destinoId) return { ok: false, error: 'misma_cuenta' }
-  if (!parseFechaLocal(input.fecha)) {
-    throw new Error('fecha_invalida: la fecha debe existir y usar el formato YYYY-MM-DD')
-  }
+  if (!parseFechaLocal(input.fecha)) return { ok: false, error: 'fecha_invalida' }
 
   const origenRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.origenId)
   const destinoRef = doc(db, COLLECTIONS.CUENTAS_BANCO, input.destinoId)

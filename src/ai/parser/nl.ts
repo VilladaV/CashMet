@@ -51,22 +51,32 @@ function normalizarMonto(numStr: string, sufijo?: string): number | null {
     else s = s.replace(',', '.')
   }
   let n = parseFloat(s)
-  if (Number.isNaN(n)) return null
+  if (!Number.isFinite(n)) return null
   if (sufijo) {
     const sfx = sufijo.toLowerCase()
-    if (sfx.startsWith('k') || sfx.startsWith('mil')) n *= 1000
-    else if (sfx.startsWith('m')) n *= 1_000_000
+    if (sfx.startsWith('millon') || sfx === 'mm' || sfx === 'm') n *= 1_000_000
+    else if (sfx.startsWith('k') || sfx === 'mil') n *= 1000
   }
   return Math.round(n)
 }
 
+function quitarNoMontos(texto: string): string {
+  return texto
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/g, ' ')
+    .replace(/\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+de(?:l)?\s+\d{4})?\b/g, ' ')
+    .replace(/\b(?:modelo|ano)\s+(?:19|20)\d{2}\b/g, ' ')
+    .replace(/\b\d{2,4}\s*(?:cc|cil)\b/g, ' ')
+}
+
 export function parseMontoCO(texto: string): number | null {
-  const t = normalizarTexto(texto)
+  const t = quitarNoMontos(normalizarTexto(texto))
   const patrones: RegExp[] = [
-    /\$\s*([\d][\d.,]*)\s*(k|m|mm|millones?|mil)?/,
-    /([\d][\d.,]{2,})\s*(k|m|mm|millones?|mil)?/,
-    /(\d+)\s*(k|m|mm|millones?|mil)\b/,
-    /(\d{3,})\b/,
+    /(?:us\$|r\$|s\/|[$€£])\s*([\d][\d.,]*)(?:\s*(millones?|mm|mil|k|m)\b)?/,
+    /\b([\d][\d.,]*)(?:\s*(millones?|mm|mil|k|m)\b)?\s*(?:[€£]|(?:usd|eur|gbp|mxn|brl|pen|ars|clp|cad|aud|chf|jpy|cny|dolares?|dolar|euros?|libras?\s+esterlinas?|soles?\s+peruanos?|reales?\s+brasilenos?|pesos?)\b)/,
+    /\b([\d][\d.,]*)\s*(millones?|mm|mil|k|m)\b/,
+    /\b([\d][\d.,]{2,})\b(?!\s*(?:kg|g|gr|km|mts|metros|cm|litros?|galones?|cc|cil|horas?|minutos?|dias?)\b)/,
+    /\b(\d{3,})\b(?!\s*(?:kg|g|gr|km|mts|metros|cm|litros?|galones?|cc|cil|horas?|minutos?|dias?)\b)/,
   ]
   for (const re of patrones) {
     const m = t.match(re)
@@ -84,6 +94,7 @@ export function parseFecha(texto: string): string {
   if (/\banteayer\b/.test(t)) return isoFecha(sumarDias(hoy, -2))
   if (/\bayer\b/.test(t)) return isoFecha(sumarDias(hoy, -1))
   if (/\bmanana\b/.test(t)) return isoFecha(sumarDias(hoy, 1))
+  if (/\bhoy\b/.test(t)) return isoFecha(hoy)
 
   // Fecha ISO explícita (YYYY-MM-DD); se valida que el día exista.
   const iso = t.match(/\b(\d{4})-(\d{2})-(\d{2})\b/)
@@ -104,13 +115,26 @@ export function parseFecha(texto: string): string {
     }
   }
 
-  const m2 = t.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/)
-  if (m2) {
-    const dia = parseInt(m2[1], 10)
-    const mes = parseInt(m2[2], 10)
-    let anio = m2[3] ? parseInt(m2[3], 10) : hoy.getFullYear()
+  // DD/MM/YYYY o DD-MM-YYYY con año explícito
+  const m2ConAnio = t.match(/\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b/)
+  if (m2ConAnio) {
+    const dia = parseInt(m2ConAnio[1], 10)
+    const mes = parseInt(m2ConAnio[2], 10)
+    let anio = parseInt(m2ConAnio[3], 10)
     if (anio < 100) anio += 2000
     if (fechaExiste(anio, mes, dia)) {
+      return isoFecha(new Date(anio, mes - 1, dia))
+    }
+  }
+
+  // DD/MM sin año solo si viene con contexto explícito de fecha o es toda la cadena
+  // (evita falsos positivos con fracciones como 1/2, 24/7, 3/12).
+  const m2SinAnio = t.match(/(?:^|\b(?:el|del|dia|fecha|para el|hasta el)\s+)(\d{1,2})[/-](\d{1,2})\b/)
+  if (m2SinAnio) {
+    const dia = parseInt(m2SinAnio[1], 10)
+    const mes = parseInt(m2SinAnio[2], 10)
+    const anio = hoy.getFullYear()
+    if (!(dia === 24 && mes === 7) && fechaExiste(anio, mes, dia)) {
       return isoFecha(new Date(anio, mes - 1, dia))
     }
   }
@@ -119,8 +143,14 @@ export function parseFecha(texto: string): string {
 
 export function parseTipo(texto: string): 'gasto' | 'ingreso' {
   const t = normalizarTexto(texto)
+  if (
+    /\b(pague|pagar|gaste|gastar|compre|comprar)\b/.test(t) &&
+    !/\b(me pagaron|me consignaron|me depositaron|me abonaron|me regalaron|me dieron)\b/.test(t)
+  ) {
+    return 'gasto'
+  }
   const ingreso =
-    /\b(ingres\w*|recib\w*|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion|me regalaron|me regalo|regalaron|me invitaron|invitaron|gane|premio|bono|loteria|me dieron)\b/
+    /\b(ingres\w*|recibi\w*|recibimos|reciben|recibir\w*|me pagaron|me consignaron|consignaron|abono|abonaron|vendi|venta|salario|nomina|honorarios|entraron|entro|depositaron|devolucion|me regalaron|me regalo|regalaron|me invitaron|invitaron|gane|premio|bono|loteria|me dieron)\b/
   return ingreso.test(t) ? 'ingreso' : 'gasto'
 }
 
@@ -150,11 +180,13 @@ export function parseCategoria(texto: string, tipo: 'gasto' | 'ingreso'): string
 
 export function limpiarConcepto(texto: string): string {
   let s = texto.trim()
-  s = s.replace(/\$\s*[\d.,]+\s*(k|m|mm|millones?|mil)?/gi, ' ')
-  s = s.replace(/\b\d[\d.,]*\s*(k|m|mm|millones?|mil)\b/gi, ' ')
-  s = s.replace(/\b(registra|registrar|anota|anotar|agrega|agregar|añade|añadir|guardar|guarda)\b/gi, ' ')
-  s = s.replace(/\b(compre|compré|pague|pagué|gaste|gasté|recibi|recibí|vendi|vendí|me regalaron|me dieron)\b/gi, ' ')
-  s = s.replace(/\b(hoy|ayer|anteayer|manana|mañana)\b/gi, ' ')
+  s = s.replace(/(?:us\$|r\$|s\/|[$€£])\s*[\d.,]+(?:\s*(?:millones?|mm|mil|k|m)\b)?/gi, ' ')
+  s = s.replace(/\b\d[\d.,]*\s*(?:millones?|mm|mil|k|m)\b/gi, ' ')
+  s = s.replace(/\b\d{1,3}(?:[.,]\d{3})+\b/g, ' ')
+  s = s.replace(/\b\d[\d.,]*\s*(?:[€£]|usd|eur|gbp|mxn|brl|pen|dolares?|dólares?|dolar|dólar|euros?|pesos?|cop)\b/gi, ' ')
+  s = s.replace(/(?<![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])(registra|registrar|anota|anotar|agrega|agregar|añade|añadir|guardar|guarda)(?![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])/gi, ' ')
+  s = s.replace(/(?<![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])(compre|compré|pague|pagué|gaste|gasté|recibi|recibí|vendi|vendí|me regalaron|me dieron|me pagaron|me consignaron)(?![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])/gi, ' ')
+  s = s.replace(/(?<![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])(hoy|ayer|anteayer|manana|mañana)(?![a-zA-ZáéíóúñüÁÉÍÓÚÑÜ])/gi, ' ')
   s = s.replace(/\b(por|en|de|con|para)\s*$/i, ' ')
   s = s.replace(/\s+/g, ' ').trim()
   // Quita preposiciones y artículos iniciales que quedan tras eliminar el

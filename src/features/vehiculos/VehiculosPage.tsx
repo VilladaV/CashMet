@@ -9,8 +9,10 @@ import VehiculoForm from './VehiculoForm'
 import {
   claseEstado,
   claseVigencia,
+  diasParaVencer,
   formatoFecha,
   formatoKm,
+  progresoTarea,
   vigenciaDe,
   type Vigencia,
 } from './vehiculoUtils'
@@ -42,16 +44,53 @@ const FILTROS: Array<{ id: Filtro; label: string }> = [
 
 const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
 
-function proximaTarea(v: Vehiculo): { texto: string; fecha?: string } | null {
+function esVehiculoActivo(v: Vehiculo): boolean {
+  return v.activo !== false && v.estado !== 'Vendido'
+}
+
+function proximaTarea(v: Vehiculo): { texto: string; fecha?: string; vencida?: boolean } | null {
   const tareas = v.mantenimiento?.tareas ?? []
   if (!tareas.length) return null
-  const conFecha = tareas
-    .filter((t) => t.proximaFecha)
-    .sort((a, b) => String(a.proximaFecha).localeCompare(String(b.proximaFecha)))
-  if (conFecha.length) return { texto: conFecha[0].nombre, fecha: conFecha[0].proximaFecha }
-  const conKm = tareas.filter((t) => t.proximoKm !== undefined).sort((a, b) => (a.proximoKm ?? 0) - (b.proximoKm ?? 0))
-  if (conKm.length) return { texto: `${conKm[0].nombre} · ${formatoKm(conKm[0].proximoKm)}` }
-  return null
+  const kmActual = v.mantenimiento?.kilometrajeActual
+
+  const evaluadas = tareas
+    .filter((t) => Boolean(t.proximaFecha) || t.proximoKm !== undefined)
+    .map((t) => {
+      const dias = diasParaVencer(t.proximaFecha)
+      const prog = t.proximoKm !== undefined ? progresoTarea(t, kmActual) : 0
+      const kmVencida = t.proximoKm !== undefined && prog >= 100
+      const fechaVencida = dias !== null && dias < 0
+      const vencida = fechaVencida || kmVencida
+      const pronta = !vencida && ((dias !== null && dias <= 30) || (t.proximoKm !== undefined && prog >= 85))
+      const tier = vencida ? 0 : pronta ? 1 : 2
+      const kmRestantes =
+        t.proximoKm !== undefined ? t.proximoKm - (kmActual ?? t.ultimoKm ?? 0) : Number.POSITIVE_INFINITY
+      return { t, dias, prog, vencida, tier, kmRestantes }
+    })
+
+  if (!evaluadas.length) return null
+
+  evaluadas.sort((a, b) => {
+    if (a.tier !== b.tier) return a.tier - b.tier
+    if (a.tier === 0) {
+      if (a.dias !== null && b.dias !== null && a.dias !== b.dias) return a.dias - b.dias
+      if (a.kmRestantes !== b.kmRestantes) return a.kmRestantes - b.kmRestantes
+    }
+    if (a.dias !== null && b.dias !== null && a.dias !== b.dias) return a.dias - b.dias
+    if (a.dias !== null && b.dias === null) return -1
+    if (a.dias === null && b.dias !== null) return 1
+    if (a.prog !== b.prog) return b.prog - a.prog
+    return a.kmRestantes - b.kmRestantes
+  })
+
+  const top = evaluadas[0]
+  const mostrarKm =
+    top.t.proximoKm !== undefined && (!top.t.proximaFecha || (top.prog >= 100 && (top.dias === null || top.dias >= 0)))
+  return {
+    texto: mostrarKm ? `${top.t.nombre} · ${formatoKm(top.t.proximoKm)}` : top.t.nombre,
+    fecha: top.t.proximaFecha,
+    vencida: top.vencida,
+  }
 }
 
 function Stat({ icon: Icon, label, value, tone }: { icon: LucideIcon; label: string; value: string; tone?: string }) {
@@ -86,6 +125,7 @@ function VehiculoCard({
   onSeleccionar: () => void
   onEditar: () => void
 }) {
+  const [imgErrorUrl, setImgErrorUrl] = useState<string | null>(null)
   const soat = vigenciaDe(vehiculo.soat?.fechaVencimiento)
   const tm = vigenciaDe(vehiculo.tecnicomecanica?.fechaVencimiento)
   const str = vigenciaDe(vehiculo.seguroTodoRiesgo?.fechaVencimiento)
@@ -94,95 +134,108 @@ function VehiculoCard({
   const km = vehiculo.mantenimiento?.kilometrajeActual
   const estado = vehiculo.estado ?? 'Disponible'
   const tieneDocs = Boolean(vehiculo.soat || vehiculo.tecnicomecanica || vehiculo.seguroTodoRiesgo?.tiene)
+  const mostrarFoto = Boolean(vehiculo.fotoUrl && imgErrorUrl !== vehiculo.fotoUrl)
 
   return (
     <motion.div
       layout
-      role="button"
-      tabIndex={0}
-      aria-pressed={seleccionado}
-      onClick={onSeleccionar}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSeleccionar()
-        }
-      }}
-      className={`group relative cursor-pointer overflow-hidden rounded-2xl border p-3 text-left transition-all ${
+      className={`group relative overflow-hidden rounded-2xl border transition-all ${
         seleccionado
           ? 'border-emerald-400/45 bg-emerald-400/[0.07] shadow-[0_0_0_1px_rgba(52,211,153,0.2),0_18px_40px_-24px_rgba(16,185,129,0.5)]'
           : 'border-white/[0.07] bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]'
       }`}
     >
-      <div className="flex gap-3">
-        <div className="flex h-16 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/[0.07] bg-gradient-to-br from-white/[0.06] to-white/[0.01]">
-          {vehiculo.fotoUrl ? (
-            <img src={vehiculo.fotoUrl} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <Car className="h-7 w-7 text-mist-500" />
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="truncate text-sm font-extrabold text-white">
-                {vehiculo.marca} {vehiculo.linea}
-              </div>
-              <div className="truncate text-[11px] text-mist-500">
-                {vehiculo.modelo ? `${vehiculo.modelo} · ` : ''}{vehiculo.tipo}
-                {vehiculo.placa ? ` · ${vehiculo.placa}` : ''}
-              </div>
-            </div>
-            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-bold ${claseEstado(estado)}`}>
-              {estado}
-            </span>
+      <button
+        type="button"
+        aria-pressed={seleccionado}
+        onClick={onSeleccionar}
+        className="block w-full cursor-pointer p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400/60"
+      >
+        <div className="flex gap-3">
+          <div className="flex h-16 w-20 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-white/[0.07] bg-gradient-to-br from-white/[0.06] to-white/[0.01]">
+            {mostrarFoto ? (
+              <img
+                src={vehiculo.fotoUrl}
+                alt=""
+                onError={() => setImgErrorUrl(vehiculo.fotoUrl ?? null)}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <Car className="h-7 w-7 text-mist-500" />
+            )}
           </div>
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            {vehiculo.soat && <BadgeDocumento label="SOAT" vigencia={soat} fecha={vehiculo.soat.fechaVencimiento} />}
-            {vehiculo.tecnicomecanica && (
-              <BadgeDocumento label="TM" vigencia={tm} fecha={vehiculo.tecnicomecanica.fechaVencimiento} />
-            )}
-            {vehiculo.seguroTodoRiesgo?.tiene && (
-              <BadgeDocumento label="STR" vigencia={str} fecha={vehiculo.seguroTodoRiesgo.fechaVencimiento} />
-            )}
-            {!tieneDocs && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-bold text-mist-500">
-                Sin documentos
+          <div className="min-w-0 flex-1">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-extrabold text-white">
+                  {vehiculo.marca} {vehiculo.linea}
+                </div>
+                <div className="truncate text-[11px] text-mist-500">
+                  {vehiculo.modelo ? `${vehiculo.modelo} · ` : ''}{vehiculo.tipo}
+                  {vehiculo.placa ? ` · ${vehiculo.placa}` : ''}
+                </div>
+              </div>
+              <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-bold ${claseEstado(estado)}`}>
+                {estado}
+              </span>
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {vehiculo.soat && <BadgeDocumento label="SOAT" vigencia={soat} fecha={vehiculo.soat.fechaVencimiento} />}
+              {vehiculo.tecnicomecanica && (
+                <BadgeDocumento label="TM" vigencia={tm} fecha={vehiculo.tecnicomecanica.fechaVencimiento} />
+              )}
+              {vehiculo.seguroTodoRiesgo?.tiene && (
+                <BadgeDocumento label="STR" vigencia={str} fecha={vehiculo.seguroTodoRiesgo.fechaVencimiento} />
+              )}
+              {!tieneDocs && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[9px] font-bold text-mist-500">
+                  Sin documentos
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {proxima && (
+          <div
+            className={`mt-2 flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] ${
+              proxima.vencida
+                ? 'border-red-400/25 bg-red-500/10 text-red-200'
+                : 'border-white/[0.06] bg-white/[0.02] text-mist-400'
+            }`}
+          >
+            <Wrench className={`h-3 w-3 shrink-0 ${proxima.vencida ? 'text-red-300' : 'text-amber-300/80'}`} />
+            <span className="truncate">
+              {proxima.vencida ? 'Vencido: ' : 'Próximo: '}
+              {proxima.texto}
+            </span>
+            {proxima.fecha && (
+              <span className={`ml-auto shrink-0 ${proxima.vencida ? 'text-red-300' : 'text-mist-500'}`}>
+                {formatoFecha(proxima.fecha)}
               </span>
             )}
           </div>
-        </div>
-      </div>
+        )}
 
-      {proxima && (
-        <div className="mt-2 flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[10px] text-mist-400">
-          <Wrench className="h-3 w-3 shrink-0 text-amber-300/80" />
-          <span className="truncate">Próximo: {proxima.texto}</span>
-          {proxima.fecha && <span className="ml-auto shrink-0 text-mist-500">{formatoFecha(proxima.fecha)}</span>}
+        <div className="mt-2 flex items-center justify-between gap-2 pr-10 text-[11px] text-mist-500">
+          <span className="inline-flex items-center gap-1">
+            <Gauge className="h-3 w-3" />
+            {formatoKm(km)}
+          </span>
+          <span className="inline-flex items-center gap-1 font-semibold text-emerald-300">
+            <CircleDollarSign className="h-3 w-3" />
+            {COD(costo)}/mes
+          </span>
         </div>
-      )}
-
-      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-mist-500">
-        <span className="inline-flex items-center gap-1">
-          <Gauge className="h-3 w-3" />
-          {formatoKm(km)}
-        </span>
-        <span className="inline-flex items-center gap-1 font-semibold text-emerald-300">
-          <CircleDollarSign className="h-3 w-3" />
-          {COD(costo)}/mes
-        </span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation()
-            onEditar()
-          }}
-          onKeyDown={(e) => e.stopPropagation()}
-          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-mist-400 transition hover:bg-white/[0.08] hover:text-white"
-          aria-label="Editar vehículo"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </button>
-      </div>
+      </button>
+      <button
+        type="button"
+        onClick={onEditar}
+        className="absolute bottom-2.5 right-3 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-mist-400 transition hover:bg-white/[0.08] hover:text-white"
+        aria-label={`Editar ${vehiculo.marca} ${vehiculo.linea}`}
+      >
+        <Pencil className="h-3.5 w-3.5" />
+      </button>
     </motion.div>
   )
 }
@@ -197,6 +250,25 @@ export default function VehiculosPage() {
   const [formAbierto, setFormAbierto] = useState(false)
   const [editando, setEditando] = useState<Vehiculo | null>(null)
   const detalleRef = useRef<HTMLDivElement | null>(null)
+  const timeoutRef = useRef<number | null>(null)
+
+  const programarScrollDetalle = useCallback((ms: number) => {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current)
+    }
+    timeoutRef.current = window.setTimeout(() => {
+      timeoutRef.current = null
+      detalleRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, ms)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current)
+      }
+    }
+  }, [])
 
   const cargar = useCallback(async () => {
     try {
@@ -217,10 +289,7 @@ export default function VehiculosPage() {
     })
   }, [cargar])
 
-  const activos = useMemo(
-    () => vehiculos.filter((v) => v.activo !== false && v.estado !== 'Vendido'),
-    [vehiculos]
-  )
+  const activos = useMemo(() => vehiculos.filter(esVehiculoActivo), [vehiculos])
 
   const stats = useMemo(() => {
     const costo = activos.reduce((s, v) => s + calcularGastosMensuales(v), 0)
@@ -243,14 +312,15 @@ export default function VehiculosPage() {
     return vehiculos.filter((v) => {
       const texto = `${v.marca ?? ''} ${v.linea ?? ''} ${v.placa ?? ''} ${v.modelo ?? ''} ${v.color ?? ''}`.toLowerCase()
       if (q && !texto.includes(q)) return false
+      const activo = esVehiculoActivo(v)
       const soat = vigenciaDe(v.soat?.fechaVencimiento)
       const tm = vigenciaDe(v.tecnicomecanica?.fechaVencimiento)
       const str = v.seguroTodoRiesgo?.tiene ? vigenciaDe(v.seguroTodoRiesgo.fechaVencimiento) : 'vigente'
-      if (filtro === 'activos') return v.activo !== false && v.estado !== 'Vendido'
-      if (filtro === 'vendidos') return v.estado === 'Vendido' || v.activo === false
-      if (filtro === 'soat') return soat === 'vencido' || soat === 'por-vencer'
-      if (filtro === 'tm') return tm === 'vencido' || tm === 'por-vencer'
-      if (filtro === 'alertas') return [soat, tm, str].some((x) => x === 'vencido' || x === 'por-vencer')
+      if (filtro === 'activos') return activo
+      if (filtro === 'vendidos') return !activo
+      if (filtro === 'soat') return activo && (soat === 'vencido' || soat === 'por-vencer')
+      if (filtro === 'tm') return activo && (tm === 'vencido' || tm === 'por-vencer')
+      if (filtro === 'alertas') return activo && [soat, tm, str].some((x) => x === 'vencido' || x === 'por-vencer')
       return true
     })
   }, [vehiculos, busqueda, filtro])
@@ -279,7 +349,7 @@ export default function VehiculosPage() {
     cerrarForm()
     await cargar()
     setSeleccionId(id)
-    window.setTimeout(() => detalleRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
+    programarScrollDetalle(120)
   }
 
   const alEliminar = async () => {
@@ -291,7 +361,7 @@ export default function VehiculosPage() {
   const seleccionar = (id: string) => {
     setSeleccionId(id)
     if (window.innerWidth < 1280) {
-      window.setTimeout(() => detalleRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
+      programarScrollDetalle(60)
     }
   }
 
@@ -362,6 +432,7 @@ export default function VehiculosPage() {
               />
               {busqueda && (
                 <button
+                  type="button"
                   onClick={() => setBusqueda('')}
                   className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full text-mist-500 hover:bg-white/[0.06] hover:text-white"
                   aria-label="Limpiar búsqueda"
@@ -374,6 +445,8 @@ export default function VehiculosPage() {
               {FILTROS.map((f) => (
                 <button
                   key={f.id}
+                  type="button"
+                  aria-pressed={filtro === f.id}
                   onClick={() => setFiltro(f.id)}
                   className={`cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
                     filtro === f.id

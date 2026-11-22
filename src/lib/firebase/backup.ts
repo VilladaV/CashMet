@@ -22,11 +22,13 @@ const MAX_DOCUMENTOS = 20000
 const TAMANO_LOTE = 400
 
 export async function exportarBackup(): Promise<{ nombre: string; contenido: string }> {
-  const copia: Record<string, unknown[]> = {}
-  for (const col of COLECCIONES) {
-    const snap = await getDocs(collection(db, col))
-    copia[col] = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
-  }
+  const resultados = await Promise.all(
+    COLECCIONES.map(async (col) => {
+      const snap = await getDocs(collection(db, col))
+      return [col, snap.docs.map((d) => ({ id: d.id, ...d.data() }))] as const
+    })
+  )
+  const copia: Record<string, unknown[]> = Object.fromEntries(resultados)
   const fecha = hoyISO()
   return {
     nombre: `cashmet-backup-${fecha}.json`,
@@ -57,11 +59,12 @@ export async function importarBackup(jsonText: string): Promise<number> {
     throw new Error('formato_invalido: el backup debe ser un objeto JSON')
   }
 
-  const crudo = (data as Record<string, unknown>).copia
-  const copia = (crudo ?? data) as Record<string, unknown>
-  if (!copia || typeof copia !== 'object' || Array.isArray(copia)) {
+  const raiz = data as Record<string, unknown>
+  const copiaCruda = 'copia' in raiz ? raiz.copia : raiz
+  if (!copiaCruda || typeof copiaCruda !== 'object' || Array.isArray(copiaCruda)) {
     throw new Error('formato_invalido: el backup debe incluir un objeto "copia"')
   }
+  const copia = copiaCruda as Record<string, unknown>
 
   const operaciones: OperacionImportacion[] = []
 
@@ -84,11 +87,12 @@ export async function importarBackup(jsonText: string): Promise<number> {
       if (typeof id !== 'string' && typeof id !== 'number') {
         throw new Error('documento_invalido: cada documento debe tener un id válido')
       }
-      if (!String(id).trim()) {
-        throw new Error('documento_invalido: el id del documento no puede estar vacío')
+      const idStr = String(id).trim()
+      if (!idStr || idStr.includes('/') || idStr === '.' || idStr === '..') {
+        throw new Error('documento_invalido: el id del documento no es válido')
       }
       const { id: _id, ...datos } = registro
-      operaciones.push({ coleccion, id: String(id), datos })
+      operaciones.push({ coleccion, id: idStr, datos })
       if (operaciones.length > MAX_DOCUMENTOS) {
         throw new Error(`límite_excedido: el backup supera el máximo de ${MAX_DOCUMENTOS} documentos`)
       }

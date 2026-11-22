@@ -19,6 +19,9 @@ const MENSAJE_CUOTA =
 const AVISO_SIN_TASA =
   'No pude consultar la tasa de cambio en este momento, así que dejé el monto para que lo escribas en pesos antes de confirmar. 🙏'
 
+const AVISO_ACCION_CANCELADA_SIN_TASA =
+  'No pude consultar la tasa de cambio en este momento, así que no ejecuté la operación para evitar registrar un monto equivocado en pesos. Intenta de nuevo o dime el valor en COP. 🙏'
+
 function esExtranjera(moneda: unknown): boolean {
   const m = String(moneda ?? 'COP').trim().toUpperCase()
   return m !== '' && m !== 'COP'
@@ -30,20 +33,29 @@ async function convertirExtranjeras(interp: Interpretacion): Promise<Interpretac
     ...(interp.lote ?? []).flatMap((a) => (a.borrador ? [a.borrador] : [])),
   ].filter((b) => esExtranjera(b.moneda) && b.monto > 0)
 
+  // Omitimos acciones que ya traen borrador para evitar doble conversión.
   const accionesConMoneda = (interp.lote ?? []).filter(
-    (a) => a.params && esExtranjera(a.params.moneda) && Number(a.params.monto) > 0,
+    (a) => !a.borrador && a.params && esExtranjera(a.params.moneda) && Number(a.params.monto) > 0
   )
 
-  if (!borradores.length && !accionesConMoneda.length) return interp
+  const tieneRaizConMoneda =
+    !interp.borrador &&
+    Boolean(interp.params) &&
+    esExtranjera(interp.params?.moneda) &&
+    Number(interp.params?.monto) > 0 &&
+    !interp.acciones.includes('consulta_conversion')
 
-  let fallo = false
+  if (!borradores.length && !accionesConMoneda.length && !tieneRaizConMoneda) return interp
+
+  let falloBorrador = false
+  let canceladaAccion = false
 
   for (const b of borradores) {
     const conv = await convertirACOP(b.monto, String(b.moneda))
     if (!conv) {
       b.montoOriginal = b.monto
       b.monto = 0
-      fallo = true
+      falloBorrador = true
       continue
     }
     b.montoOriginal = b.monto
@@ -51,20 +63,50 @@ async function convertirExtranjeras(interp: Interpretacion): Promise<Interpretac
     b.monto = conv.montoCOP
   }
 
-  for (const a of accionesConMoneda) {
-    const params = a.params as Record<string, unknown>
-    const original = Number(params.monto)
-    const conv = await convertirACOP(original, String(params.moneda))
+  if (tieneRaizConMoneda && interp.params) {
+    const original = Number(interp.params.monto)
+    const conv = await convertirACOP(original, String(interp.params.moneda))
     if (!conv) {
-      fallo = true
-      continue
+      canceladaAccion = true
+      interp.acciones = []
+      interp.params = undefined
+    } else {
+      interp.params.montoOriginal = original
+      interp.params.tasaCambio = conv.tasa
+      interp.params.monto = conv.montoCOP
+      if ('valor' in interp.params) interp.params.valor = conv.montoCOP
     }
-    params.montoOriginal = original
-    params.tasaCambio = conv.tasa
-    params.monto = conv.montoCOP
   }
 
-  if (fallo) interp.respuesta = `${AVISO_SIN_TASA}\n\n${interp.respuesta}`
+  if (accionesConMoneda.length && interp.lote) {
+    const accionesFallidas = new Set<(typeof accionesConMoneda)[number]>()
+    for (const a of accionesConMoneda) {
+      if (a.nombre === 'consulta_conversion') continue
+      const params = a.params as Record<string, unknown>
+      const original = Number(params.monto)
+      const conv = await convertirACOP(original, String(params.moneda))
+      if (!conv) {
+        canceladaAccion = true
+        accionesFallidas.add(a)
+        continue
+      }
+      params.montoOriginal = original
+      params.tasaCambio = conv.tasa
+      params.monto = conv.montoCOP
+      if ('valor' in params) params.valor = conv.montoCOP
+    }
+    if (accionesFallidas.size > 0) {
+      interp.lote = interp.lote.filter((a) => !accionesFallidas.has(a))
+      interp.acciones = interp.lote.map((a) => a.nombre)
+      if (!interp.lote.length) interp.lote = undefined
+    }
+  }
+
+  if (canceladaAccion) {
+    interp.respuesta = AVISO_ACCION_CANCELADA_SIN_TASA
+  } else if (falloBorrador) {
+    interp.respuesta = `${AVISO_SIN_TASA}\n\n${interp.respuesta}`
+  }
   return interp
 }
 
@@ -92,11 +134,6 @@ export async function interpretar(mensaje: string, contexto: ContextoChat): Prom
   } else {
     interp =
       interpretarTransferencia(mensaje, contexto.cuentas) ?? interpretarLote(mensaje) ?? interpretarMensaje(mensaje)
-  }
-
-  if (!interp.acciones.length && !interp.lote?.length) {
-    const transferencia = interpretarTransferencia(mensaje, contexto.cuentas)
-    if (transferencia) interp = transferencia
   }
 
   return convertirExtranjeras(interp)

@@ -3,10 +3,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
 import type { CuentaBanco } from '@/lib/firebase/movimientosRepo'
+import { parseFechaLocal } from '@/lib/fechas'
+import { desformatearCifra } from '@/lib/utils'
 import { CheckCircle2, XCircle, ArrowDownLeft, ArrowUpRight, Wallet, Tag, Calendar as CalendarIcon } from 'lucide-react'
 
 export interface MovimientoConfirmado extends BorradorMovimiento {
   cuentaBancoId: string
+  descripcion?: string
 }
 
 interface Props {
@@ -21,13 +24,30 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
   const [tipo, setTipo] = useState(borrador.tipo)
   const [fecha, setFecha] = useState(borrador.fecha)
   const [concepto, setConcepto] = useState(borrador.concepto)
-  const [monto, setMonto] = useState(String(borrador.monto))
+  const [monto, setMonto] = useState(String(Math.round(borrador.monto)))
   const [categoria, setCategoria] = useState(borrador.categoria)
   const [cuentaIdManual, setCuentaIdManual] = useState('')
-  const cuentaBancoId = cuentaIdManual || cuentas[0]?.id || ''
 
-  const montoNum = Number(monto.replace(/[^\d.]/g, '')) || 0
+  const cuentaBancoId =
+    (cuentaIdManual && cuentas.some((c) => c.id === cuentaIdManual) ? cuentaIdManual : cuentas[0]?.id) || ''
+
+  const montoNum = desformatearCifra(monto)
+  const fechaValida = Boolean(parseFechaLocal(fecha))
   const esIngreso = tipo === 'ingreso'
+  const tieneFx = Boolean(borrador.moneda && borrador.montoOriginal != null)
+  const montoEditadoManualmente = tieneFx && montoNum !== Math.round(borrador.monto)
+
+  const construirDescripcionFx = (): string | undefined => {
+    if (!tieneFx || !borrador.moneda || borrador.montoOriginal == null) return undefined
+    const base = `Original: ${borrador.moneda} ${borrador.montoOriginal.toLocaleString('es-CO')}`
+    if (montoEditadoManualmente) return `${base} (monto ajustado manualmente)`
+    if (borrador.tasaCambio) {
+      return `${base} · tasa 1 ${borrador.moneda} = $${borrador.tasaCambio.toLocaleString('es-CO', {
+        maximumFractionDigits: 2,
+      })} COP`
+    }
+    return base
+  }
 
   return (
     <div className="space-y-3 rounded-2xl border border-emerald-400/25 bg-gradient-to-b from-emerald-400/[0.1] to-transparent p-4">
@@ -42,12 +62,14 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
           </div>
         </div>
 
-        <div className={`rounded-full border px-2.5 py-1 text-xs font-black ${
-          esIngreso
-            ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-            : 'border-red-400/30 bg-red-400/10 text-red-200'
-        }`}>
-          ${montoNum.toLocaleString('es-CO')} COP
+        <div
+          className={`rounded-full border px-2.5 py-1 text-xs font-black ${
+            esIngreso
+              ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+              : 'border-red-400/30 bg-red-400/10 text-red-200'
+          }`}
+        >
+          ${Math.max(0, Math.round(montoNum)).toLocaleString('es-CO')} COP
         </div>
       </div>
 
@@ -72,6 +94,7 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
             type="date"
             value={fecha}
             onChange={(e) => setFecha(e.target.value)}
+            aria-invalid={!fechaValida}
             className="field-dark h-9 text-xs shadow-none"
           />
         </label>
@@ -92,18 +115,21 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
             cifra
             value={monto}
             onChange={(e) => setMonto(e.target.value)}
+            aria-invalid={montoNum <= 0}
             className="field-dark h-9 text-xs font-bold shadow-none"
           />
         </label>
 
-        {borrador.moneda && borrador.montoOriginal != null && (
+        {tieneFx && borrador.montoOriginal != null && (
           <p className="col-span-2 -mt-1 rounded-lg bg-amber-400/10 px-2 py-1.5 text-[11px] font-semibold text-amber-200">
             Monto original: {borrador.moneda} {borrador.montoOriginal.toLocaleString('es-CO')}
-            {borrador.tasaCambio
-              ? ` · tasa: 1 ${borrador.moneda} = $${borrador.tasaCambio.toLocaleString('es-CO', {
-                  maximumFractionDigits: 2,
-                })} COP`
-              : ' · no se pudo obtener la tasa, escribe el valor en pesos'}
+            {montoEditadoManualmente
+              ? ' · monto en COP ajustado manualmente'
+              : borrador.tasaCambio
+                ? ` · tasa: 1 ${borrador.moneda} = $${borrador.tasaCambio.toLocaleString('es-CO', {
+                    maximumFractionDigits: 2,
+                  })} COP`
+                : ' · no se pudo obtener la tasa, escribe el valor en pesos'}
           </p>
         )}
 
@@ -137,19 +163,30 @@ export default function ConfirmacionCard({ borrador, cuentas, guardando, onConfi
         </label>
       </div>
 
+      {!fechaValida && (
+        <p className="text-[11px] font-medium text-red-300">Selecciona una fecha válida (YYYY-MM-DD).</p>
+      )}
+      {montoNum <= 0 && (
+        <p className="text-[11px] font-medium text-red-300">El monto debe ser un número positivo mayor a cero.</p>
+      )}
+
       <div className="flex items-center gap-2 border-t border-white/[0.07] pt-2.5">
         <Button
           size="sm"
           className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 text-xs font-bold text-[#04241a] hover:brightness-110"
-          disabled={guardando || montoNum <= 0 || !concepto.trim() || !cuentaBancoId}
+          disabled={guardando || montoNum <= 0 || !fechaValida || !concepto.trim() || !cuentaBancoId}
           onClick={() =>
             onConfirm({
               tipo,
               fecha,
               concepto: concepto.trim(),
-              monto: montoNum,
+              monto: Math.round(montoNum),
               categoria: categoria.trim() || 'Otros',
               cuentaBancoId,
+              moneda: borrador.moneda,
+              montoOriginal: borrador.montoOriginal,
+              tasaCambio: borrador.tasaCambio,
+              descripcion: construirDescripcionFx(),
             })
           }
         >

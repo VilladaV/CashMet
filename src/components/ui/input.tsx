@@ -5,13 +5,66 @@ export interface InputProps extends React.ComponentProps<'input'> {
   cifra?: boolean
 }
 
-function Input({ className, type, cifra, value, onChange, ...props }: InputProps) {
+function contarDigitosAntes(texto: string, indice: number): { digitos: number; signo: boolean } {
+  const prefijo = texto.slice(0, Math.max(0, indice))
+  const digitos = (prefijo.match(/\d/g) ?? []).length
+  const signo = prefijo.startsWith('-')
+  return { digitos, signo }
+}
+
+function indiceParaDigitos(texto: string, objetivoDigitos: number, mantenerSigno: boolean): number {
+  if (objetivoDigitos === 0) {
+    return mantenerSigno && texto.startsWith('-') ? 1 : 0
+  }
+  let vistos = 0
+  for (let i = 0; i < texto.length; i++) {
+    if (/\d/.test(texto[i])) {
+      vistos++
+      if (vistos === objetivoDigitos) return i + 1
+    }
+  }
+  return texto.length
+}
+
+function Input({ className, type, cifra, value, onChange, inputMode, ref, ...props }: InputProps) {
+  const innerRef = React.useRef<HTMLInputElement | null>(null)
+  const caretPendienteRef = React.useRef<number | null>(null)
+
   const displayValue =
     cifra && value !== undefined && value !== null ? formatearCifra(value as string | number) : value
 
+  React.useLayoutEffect(() => {
+    if (!cifra || caretPendienteRef.current === null || !innerRef.current) return
+    const pos = caretPendienteRef.current
+    caretPendienteRef.current = null
+    try {
+      innerRef.current.setSelectionRange(pos, pos)
+    } catch {
+      /* tipos de input sin selección */
+    }
+  }, [cifra, displayValue])
+
+  const asignarRef = React.useCallback(
+    (node: HTMLInputElement | null) => {
+      innerRef.current = node
+      if (typeof ref === 'function') {
+        ref(node)
+      } else if (ref && 'current' in ref) {
+        ;(ref as React.MutableRefObject<HTMLInputElement | null>).current = node
+      }
+    },
+    [ref]
+  )
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (cifra) {
-      const formatted = formatearCifra(e.target.value)
+      const crudo = e.target.value
+      const seleccion = e.target.selectionStart
+      const formatted = formatearCifra(crudo)
+      if (seleccion !== null) {
+        const { digitos, signo } = contarDigitosAntes(crudo, seleccion)
+        caretPendienteRef.current = indiceParaDigitos(formatted, digitos, signo)
+      }
       e.target.value = formatted
     }
     onChange?.(e)
@@ -19,8 +72,9 @@ function Input({ className, type, cifra, value, onChange, ...props }: InputProps
 
   return (
     <input
+      ref={asignarRef}
       type={cifra ? 'text' : type}
-      inputMode={cifra ? 'numeric' : props.inputMode}
+      inputMode={cifra ? 'numeric' : inputMode}
       value={displayValue}
       onChange={handleChange}
       data-slot="input"
@@ -36,4 +90,3 @@ function Input({ className, type, cifra, value, onChange, ...props }: InputProps
 }
 
 export { Input }
-

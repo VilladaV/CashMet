@@ -57,8 +57,8 @@ const STOP = new Set([
 ])
 
 function extraerPlaca(texto: string): string | undefined {
-  const m = texto.match(/\b([A-Za-z]{3}\d{2,3})\b/)
-  return m ? m[1].toUpperCase() : undefined
+  const m = texto.match(/\b([A-Za-z]{3})[-\s]?(\d{2}[A-Za-z\d])\b/)
+  return m ? `${m[1]}${m[2]}`.toUpperCase() : undefined
 }
 
 function extraerModelo(texto: string): number | undefined {
@@ -92,7 +92,7 @@ function extraerMarcaLinea(texto: string): { marca: string; linea: string } {
     if (STOP.has(low)) continue
     if (/^(19|20)\d{2}$/.test(tok)) break
     if (/^\d+$/.test(tok)) continue
-    if (/^[A-Za-z]{3}\d{2,3}$/.test(tok)) break
+    if (/^[A-Za-z]{3}\d{2}[A-Za-z\d]$/.test(tok)) break
     palabras.push(low)
     if (palabras.length >= 2) break
   }
@@ -125,7 +125,7 @@ function extraerDiaVencimiento(texto: string): number | undefined {
 function mesParam(texto: string): string | undefined {
   const t = normalizarTexto(texto)
   for (const nombre of Object.keys(MESES)) {
-    if (t.includes(nombre)) {
+    if (new RegExp(`\\b${nombre}\\b`).test(t)) {
       const anyo = extraerModelo(texto) ?? new Date().getFullYear()
       return `${anyo}-${String(MESES[nombre]).padStart(2, '0')}`
     }

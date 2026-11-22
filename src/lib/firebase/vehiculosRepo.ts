@@ -1,4 +1,4 @@
-import { addDoc, collection, deleteDoc, deleteField, doc, getDoc, getDocs, query, updateDoc, where } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, deleteField, doc, getDoc, getDocs, query, runTransaction, where } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
 import { limpio } from './repoUtils'
@@ -162,7 +162,11 @@ const FACTOR_MENSUAL: Record<PeriodicidadGasto, number> = {
 }
 
 export function nuevaTareaId(): string {
-  return `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`
+  const rand =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID().replace(/-/g, '').slice(0, 10)
+      : Math.random().toString(36).slice(2, 10)
+  return `t${Date.now().toString(36)}${rand}`
 }
 
 function mensualizar(valor: number, periodicidad?: string): number {
@@ -202,10 +206,21 @@ export function calcularGastosMensuales(v: VehiculoGastos): number {
   return detalleGastosVehiculo(v).totalMensual
 }
 
+function limpiarSubobjeto(obj: Record<string, unknown>): Record<string, unknown> {
+  const res: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined || v === '') continue
+    if (typeof v === 'number' && !Number.isFinite(v)) continue
+    res[k] = v
+  }
+  return res
+}
+
 function mezclarNested<T extends object>(actual: T | null | undefined, nuevo: T | null | undefined): T | null | undefined {
   if (nuevo === null) return null
   if (nuevo === undefined) return actual
-  return { ...(actual ?? {}), ...nuevo } as T
+  const combinado = limpiarSubobjeto({ ...(actual ?? {}), ...nuevo } as Record<string, unknown>)
+  return Object.keys(combinado).length > 0 ? (combinado as T) : null
 }
 
 function mezclarVehiculo(actual: Vehiculo | null, v: VehiculoUpdate): Partial<Vehiculo> {
@@ -241,35 +256,45 @@ export async function obtenerVehiculo(id: string): Promise<Vehiculo | null> {
 }
 
 export async function renovarSoat(id: string): Promise<{ fechaVencimiento: string; fechaInicioVigencia: string } | null> {
-  const actual = await obtenerVehiculo(id)
-  const vencimiento = actual?.soat?.fechaVencimiento
-  if (!vencimiento || !parseFechaLocal(vencimiento)) return null
-  const hoy = hoyISO()
-  const inicio = vencimiento > hoy ? vencimiento : hoy
-  const nueva = sumarAnio(inicio)
-  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), {
-    'soat.fechaInicioVigencia': inicio,
-    'soat.fechaVencimiento': nueva,
-    'soat.vigente': true,
-    actualizado: Date.now(),
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return null
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const vencimiento = actual?.soat?.fechaVencimiento
+    if (!vencimiento || !parseFechaLocal(vencimiento)) return null
+    const hoy = hoyISO()
+    const inicio = vencimiento > hoy ? vencimiento : hoy
+    const nueva = sumarAnio(inicio)
+    tx.update(ref, {
+      'soat.fechaInicioVigencia': inicio,
+      'soat.fechaVencimiento': nueva,
+      'soat.vigente': true,
+      actualizado: Date.now(),
+    })
+    return { fechaVencimiento: nueva, fechaInicioVigencia: inicio }
   })
-  return { fechaVencimiento: nueva, fechaInicioVigencia: inicio }
 }
 
 export async function renovarTecnicomecanica(id: string): Promise<{ fechaVencimiento: string; fechaExpedicion: string } | null> {
-  const actual = await obtenerVehiculo(id)
-  const vencimiento = actual?.tecnicomecanica?.fechaVencimiento
-  if (!vencimiento || !parseFechaLocal(vencimiento)) return null
-  const hoy = hoyISO()
-  const inicio = vencimiento > hoy ? vencimiento : hoy
-  const nueva = sumarAnio(inicio)
-  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), {
-    'tecnicomecanica.fechaExpedicion': inicio,
-    'tecnicomecanica.fechaVencimiento': nueva,
-    'tecnicomecanica.vigente': true,
-    actualizado: Date.now(),
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return null
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const vencimiento = actual?.tecnicomecanica?.fechaVencimiento
+    if (!vencimiento || !parseFechaLocal(vencimiento)) return null
+    const hoy = hoyISO()
+    const inicio = vencimiento > hoy ? vencimiento : hoy
+    const nueva = sumarAnio(inicio)
+    tx.update(ref, {
+      'tecnicomecanica.fechaExpedicion': inicio,
+      'tecnicomecanica.fechaVencimiento': nueva,
+      'tecnicomecanica.vigente': true,
+      actualizado: Date.now(),
+    })
+    return { fechaVencimiento: nueva, fechaExpedicion: inicio }
   })
-  return { fechaVencimiento: nueva, fechaExpedicion: inicio }
 }
 
 export async function crearVehiculo(v: VehiculoUpdate): Promise<string> {
@@ -286,24 +311,33 @@ export async function crearVehiculo(v: VehiculoUpdate): Promise<string> {
 }
 
 export async function actualizarVehiculo(id: string, v: VehiculoUpdate): Promise<void> {
-  const actual = await obtenerVehiculo(id)
-  if (!actual) throw new Error('vehiculo_no_encontrado: el vehículo que se quiere actualizar no existe')
-  const mezclado = mezclarVehiculo(actual, v)
-  const { id: _omitido, ...campos } = mezclado as Record<string, unknown>
-  const conCalculos: Record<string, unknown> = {
-    ...campos,
-    gastosMensualesCalculados: calcularGastosMensuales(mezclado),
-    actualizado: Date.now(),
-  }
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) {
+      throw new Error('vehiculo_no_encontrado: el vehículo que se quiere actualizar no existe')
+    }
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const mezclado = mezclarVehiculo(actual, v)
+    const { id: _omitido, ...campos } = mezclado as Record<string, unknown>
+    const conCalculos: Record<string, unknown> = {
+      ...campos,
+      gastosMensualesCalculados: calcularGastosMensuales(mezclado),
+      actualizado: Date.now(),
+    }
 
-  // null significa "borrar el bloque" (por ejemplo, quitar el SOAT), no
-  // escribir el literal null en Firestore.
-  const payload: Record<string, unknown> = {}
-  for (const [clave, valor] of Object.entries(conCalculos)) {
-    payload[clave] = valor === null ? deleteField() : valor
-  }
+    // null significa "borrar el bloque o campo" en Firestore (deleteField), no guardar literal null.
+    const payload: Record<string, unknown> = {}
+    for (const [clave, valor] of Object.entries(conCalculos)) {
+      if (valor === null) {
+        payload[clave] = deleteField()
+      } else if (valor !== undefined) {
+        payload[clave] = valor
+      }
+    }
 
-  await updateDoc(doc(db, COLLECTIONS.VEHICULOS, id), limpio(payload))
+    tx.update(ref, limpio(payload))
+  })
 }
 
 export async function eliminarVehiculo(id: string): Promise<void> {
@@ -321,39 +355,48 @@ export async function eliminarVehiculo(id: string): Promise<void> {
 export async function actualizarKilometraje(id: string, kilometrajeActual: number): Promise<void> {
   const n = Number(kilometrajeActual)
   if (!Number.isFinite(n)) return
-  const actual = await obtenerVehiculo(id)
-  const tareas = actual?.mantenimiento?.tareas ?? []
-  await updateDoc(
-    doc(db, COLLECTIONS.VEHICULOS, id),
-    limpio({
-      mantenimiento: { kilometrajeActual: Math.max(0, Math.round(n)), tareas },
-      actualizado: Date.now(),
-    })
-  )
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const tareas = actual?.mantenimiento?.tareas ?? []
+    tx.update(
+      ref,
+      limpio({
+        mantenimiento: { kilometrajeActual: Math.max(0, Math.round(n)), tareas },
+        actualizado: Date.now(),
+      })
+    )
+  })
 }
 
 export async function guardarTareaMantenimiento(id: string, tarea: TareaMantenimiento): Promise<void> {
-  const actual = await obtenerVehiculo(id)
-  const km = actual?.mantenimiento?.kilometrajeActual
-  const tareas = [...(actual?.mantenimiento?.tareas ?? [])]
-  const i = tareas.findIndex((t) => t.id === tarea.id)
-  const limpia = limpio({ ...tarea } as unknown as Record<string, unknown>) as unknown as TareaMantenimiento
-  if (i >= 0) tareas[i] = limpia
-  else tareas.push(limpia)
-  await updateDoc(
-    doc(db, COLLECTIONS.VEHICULOS, id),
-    limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() })
-  )
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const km = actual?.mantenimiento?.kilometrajeActual
+    const tareas = [...(actual?.mantenimiento?.tareas ?? [])]
+    const i = tareas.findIndex((t) => t.id === tarea.id)
+    const limpia = limpio({ ...tarea } as unknown as Record<string, unknown>) as unknown as TareaMantenimiento
+    if (i >= 0) tareas[i] = limpia
+    else tareas.push(limpia)
+    tx.update(ref, limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() }))
+  })
 }
 
 export async function eliminarTareaMantenimiento(id: string, tareaId: string): Promise<void> {
-  const actual = await obtenerVehiculo(id)
-  const km = actual?.mantenimiento?.kilometrajeActual
-  const tareas = (actual?.mantenimiento?.tareas ?? []).filter((t) => t.id !== tareaId)
-  await updateDoc(
-    doc(db, COLLECTIONS.VEHICULOS, id),
-    limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() })
-  )
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const km = actual?.mantenimiento?.kilometrajeActual
+    const tareas = (actual?.mantenimiento?.tareas ?? []).filter((t) => t.id !== tareaId)
+    tx.update(ref, limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() }))
+  })
 }
 
 export async function registrarServicioMantenimiento(
@@ -361,33 +404,40 @@ export async function registrarServicioMantenimiento(
   tareaId: string,
   servicio: { km?: number; fecha?: string }
 ): Promise<TareaMantenimiento | null> {
-  const actual = await obtenerVehiculo(id)
-  if (!actual) return null
-  const tareas = [...(actual?.mantenimiento?.tareas ?? [])]
-  const i = tareas.findIndex((t) => t.id === tareaId)
-  if (i < 0) return null
-  const t = { ...tareas[i] }
-  const kmNum =
-    servicio.km !== undefined && Number.isFinite(servicio.km)
-      ? Math.max(0, Math.round(servicio.km))
-      : undefined
-  if (kmNum !== undefined) {
-    t.ultimoKm = kmNum
-    t.proximoKm = t.intervaloKm && t.intervaloKm > 0 ? kmNum + t.intervaloKm : undefined
+  if (servicio.fecha && !parseFechaLocal(servicio.fecha)) {
+    throw new Error('fecha_invalida: la fecha del servicio no es válida')
   }
-  if (servicio.fecha) {
-    t.ultimaFecha = servicio.fecha
-    t.proximaFecha =
-      t.intervaloMeses && t.intervaloMeses > 0 ? sumarMeses(servicio.fecha, t.intervaloMeses) : undefined
-  }
-  tareas[i] = limpio({ ...t } as unknown as Record<string, unknown>) as unknown as TareaMantenimiento
-  const km =
-    kmNum !== undefined
-      ? Math.max(actual?.mantenimiento?.kilometrajeActual ?? 0, kmNum)
-      : actual?.mantenimiento?.kilometrajeActual
-  await updateDoc(
-    doc(db, COLLECTIONS.VEHICULOS, id),
-    limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() })
-  )
-  return tareas[i]
+  const ref = doc(db, COLLECTIONS.VEHICULOS, id)
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref)
+    if (!snap.exists()) return null
+    const actual = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Vehiculo
+    const tareas = [...(actual?.mantenimiento?.tareas ?? [])]
+    const i = tareas.findIndex((t) => t.id === tareaId)
+    if (i < 0) return null
+    const t = { ...tareas[i] }
+    const kmNum =
+      servicio.km !== undefined && Number.isFinite(servicio.km)
+        ? Math.max(0, Math.round(servicio.km))
+        : undefined
+    if (kmNum !== undefined) {
+      t.ultimoKm = kmNum
+      if (t.intervaloKm && t.intervaloKm > 0) {
+        t.proximoKm = kmNum + t.intervaloKm
+      }
+    }
+    if (servicio.fecha) {
+      t.ultimaFecha = servicio.fecha
+      if (t.intervaloMeses && t.intervaloMeses > 0) {
+        t.proximaFecha = sumarMeses(servicio.fecha, t.intervaloMeses)
+      }
+    }
+    tareas[i] = limpio({ ...t } as unknown as Record<string, unknown>) as unknown as TareaMantenimiento
+    const km =
+      kmNum !== undefined
+        ? Math.max(actual?.mantenimiento?.kilometrajeActual ?? 0, kmNum)
+        : actual?.mantenimiento?.kilometrajeActual
+    tx.update(ref, limpio({ mantenimiento: { kilometrajeActual: km, tareas }, actualizado: Date.now() }))
+    return tareas[i]
+  })
 }

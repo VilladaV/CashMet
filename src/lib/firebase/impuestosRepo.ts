@@ -1,7 +1,7 @@
 import { addDoc, collection, deleteDoc, doc, getDocs, increment, runTransaction, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
-import { limpio } from './repoUtils'
+import { limpio, limpioUpdate } from './repoUtils'
 import { hoyISO, parseFechaLocal } from '../fechas'
 
 export type TipoImpuesto = 'predial' | 'vehicular' | 'renta' | 'ica' | 'predial_bimestral' | 'otro'
@@ -41,23 +41,35 @@ export async function listarImpuestos(): Promise<Impuesto[]> {
 }
 
 export async function crearImpuesto(i: Partial<Impuesto>): Promise<string> {
+  const { id: _omitido, ...resto } = i as Record<string, unknown>
   const ref = await addDoc(
     collection(db, COLLECTIONS.IMPUESTOS),
-    limpio({ ...i, pagado: i.pagado ?? false, actualizado: Date.now() })
+    limpio({ ...resto, pagado: i.pagado ?? false, actualizado: Date.now() })
   )
   return ref.id
 }
 
 export async function actualizarImpuesto(id: string, data: Partial<Impuesto>): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.IMPUESTOS, id), limpio({ ...data, actualizado: Date.now() }))
+  const { id: _omitido, ...resto } = data as Record<string, unknown>
+  await updateDoc(doc(db, COLLECTIONS.IMPUESTOS, id), limpioUpdate({ ...resto, actualizado: Date.now() }))
 }
 
 export async function eliminarImpuesto(id: string): Promise<void> {
   await deleteDoc(doc(db, COLLECTIONS.IMPUESTOS, id))
 }
 
+export type ErrorPagoImpuesto =
+  | 'fecha_invalida'
+  | 'impuesto_no_encontrado'
+  | 'ya_pagado'
+  | 'monto_invalido'
+  | 'sin_cuenta'
+  | 'cuenta_no_encontrada'
+  | 'saldo_insuficiente'
+
 export interface ResultadoPagoImpuesto {
   ok: boolean
+  error?: ErrorPagoImpuesto
   movimientoId?: string
   monto?: number
   yaPagado?: boolean
@@ -68,22 +80,32 @@ export interface ResultadoPagoImpuesto {
 
 export async function registrarPagoImpuesto(
   id: string,
-  opts?: { cuentaBancoId?: string; fecha?: string; fuente?: 'manual' | 'automatico' | 'chat_IA' }
+  opts?: {
+    cuentaBancoId?: string
+    fecha?: string
+    fuente?: 'manual' | 'automatico' | 'chat_IA'
+    requerirCuenta?: boolean
+  }
 ): Promise<ResultadoPagoImpuesto> {
   const ref = doc(db, COLLECTIONS.IMPUESTOS, id)
-  const fecha = String(opts?.fecha ?? '').slice(0, 10) || hoyISO()
-  if (!parseFechaLocal(fecha)) throw new Error('fecha_invalida: la fecha debe existir y usar el formato YYYY-MM-DD')
+  const fechaRaw = String(opts?.fecha ?? '').trim()
+  const fecha = fechaRaw ? fechaRaw.slice(0, 10) : hoyISO()
+  if (!parseFechaLocal(fecha)) return { ok: false, error: 'fecha_invalida' }
 
   return runTransaction<ResultadoPagoImpuesto>(db, async (tx) => {
     const snap = await tx.get(ref)
-    if (!snap.exists()) return { ok: false }
+    if (!snap.exists()) return { ok: false, error: 'impuesto_no_encontrado' }
     const impuesto = { id: snap.id, ...(snap.data() as Record<string, unknown>) } as unknown as Impuesto
-    if (impuesto.pagado) return { ok: false, yaPagado: true }
+    if (impuesto.pagado) return { ok: false, error: 'ya_pagado', yaPagado: true }
 
     const monto = Math.round(Number(impuesto.valor) || 0)
-    if (monto <= 0) return { ok: false }
+    if (!Number.isFinite(monto) || monto <= 0) return { ok: false, error: 'monto_invalido' }
 
-    const cuentaId = opts?.cuentaBancoId ?? impuesto.cuentaBancoId
+    const cuentaId = (opts?.cuentaBancoId ?? impuesto.cuentaBancoId ?? '').trim() || undefined
+    if (opts?.requerirCuenta && !cuentaId) {
+      return { ok: false, error: 'sin_cuenta', monto }
+    }
+
     let saldoDisponible: number | undefined
     let cuentaNombre: string | undefined
     let cuentaRef: ReturnType<typeof doc> | null = null
@@ -91,12 +113,12 @@ export async function registrarPagoImpuesto(
     if (cuentaId) {
       cuentaRef = doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId)
       const cuentaSnap = await tx.get(cuentaRef)
-      if (!cuentaSnap.exists()) return { ok: false }
+      if (!cuentaSnap.exists()) return { ok: false, error: 'cuenta_no_encontrada', monto }
       const cuenta = cuentaSnap.data() as Record<string, unknown>
       saldoDisponible = Number(cuenta.saldoActual) || 0
       cuentaNombre = String(cuenta.nombre ?? '')
       if (saldoDisponible < monto) {
-        return { ok: false, saldoInsuficiente: true, saldoDisponible, cuentaNombre, monto }
+        return { ok: false, error: 'saldo_insuficiente', saldoInsuficiente: true, saldoDisponible, cuentaNombre, monto }
       }
     }
 

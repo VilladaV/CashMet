@@ -24,19 +24,24 @@ export async function leerPiloto(): Promise<PilotoConfig> {
 }
 
 export async function guardarSalarioPropio(s: SalarioPropio): Promise<void> {
+  const montoNum = Number(s.monto)
+  if (!Number.isFinite(montoNum) || montoNum < 0) {
+    throw new Error('monto_invalido: el monto del salario debe ser un número mayor o igual a cero')
+  }
+  const moneda = String(s.moneda ?? 'COP').trim().toUpperCase() || 'COP'
   const salario: Record<string, unknown> = {
-    activo: s.activo,
-    monto: Math.round(Number(s.monto) || 0),
+    activo: Boolean(s.activo),
+    monto: Math.round(montoNum),
+    moneda,
     dia: Math.min(31, Math.max(1, Math.round(Number(s.dia) || 1))),
   }
-  const moneda = String(s.moneda ?? 'COP').trim().toUpperCase()
-  if (moneda && moneda !== 'COP') salario.moneda = moneda
-  if (s.cuentaBancoId) salario.cuentaBancoId = s.cuentaBancoId
-  const concepto = (s.concepto ?? '').trim()
+  const cuentaId = String(s.cuentaBancoId ?? '').trim()
+  if (cuentaId) salario.cuentaBancoId = cuentaId
+  const concepto = String(s.concepto ?? '').trim()
   if (concepto) salario.concepto = concepto
   await setDoc(
     doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, ID_DOC),
     { salario, actualizado: Date.now() },
-    { merge: true }
+    { mergeFields: ['salario', 'actualizado'] }
   )
 }

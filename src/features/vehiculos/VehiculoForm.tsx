@@ -15,6 +15,7 @@ import {
   type VehiculoUpdate,
 } from '@/lib/firebase/vehiculosRepo'
 import { fechaFutura } from '@/lib/fechas'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
 import SelectorTarifa from './SelectorTarifa'
 import { Car, FileText, Gauge, Loader2, Save, ShieldCheck, StickyNote, Trash2, Wrench, X } from 'lucide-react'
 
@@ -28,7 +29,9 @@ interface Props {
 function numero(valor: string): number | undefined {
   const limpio = valor.trim()
   if (!limpio) return undefined
-  const n = Number(limpio.replace(/[^\d.-]/g, ''))
+  const soloNum = limpio.replace(/[^\d.-]/g, '')
+  if (!soloNum || !/\d/.test(soloNum)) return undefined
+  const n = Number(soloNum)
   return Number.isFinite(n) ? n : undefined
 }
 
@@ -92,6 +95,7 @@ function Campo({
   placeholder,
   span2,
   required,
+  disabled,
 }: {
   label: string
   valor: string
@@ -101,6 +105,7 @@ function Campo({
   placeholder?: string
   span2?: boolean
   required?: boolean
+  disabled?: boolean
 }) {
   return (
     <label className={span2 ? 'sm:col-span-2' : ''}>
@@ -112,9 +117,10 @@ function Campo({
         type={tipo}
         cifra={cifra}
         value={valor}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="field-dark h-9 text-xs"
+        className="field-dark h-9 text-xs disabled:cursor-not-allowed disabled:opacity-50"
       />
     </label>
   )
@@ -126,20 +132,23 @@ function Seleccion({
   onChange,
   children,
   span2,
+  disabled,
 }: {
   label: string
   valor: string
   onChange: (v: string) => void
   children: ReactNode
   span2?: boolean
+  disabled?: boolean
 }) {
   return (
     <label className={span2 ? 'sm:col-span-2' : ''}>
       <span className="mb-1 block text-[11px] font-semibold text-mist-400">{label}</span>
       <select
         value={valor}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="field-dark h-9 w-full rounded-lg px-3 text-xs"
+        className="field-dark h-9 w-full rounded-lg px-3 text-xs disabled:cursor-not-allowed disabled:opacity-50"
       >
         {children}
       </select>
@@ -165,6 +174,14 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
   const [error, setError] = useState('')
 
   useEffect(() => {
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prevOverflow
+    }
+  }, [])
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !busy) onCerrar()
     }
@@ -185,7 +202,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
         return 'El modelo debe ser un año válido.'
       }
     }
-    const placa = f.placa.trim().toUpperCase()
+    const placa = f.placa.trim().toUpperCase().replace(/[\s-]+/g, '')
     if (placa && !/^[A-Z0-9]{5,7}$/.test(placa)) return 'La placa debe tener entre 5 y 7 caracteres alfanuméricos.'
     const numeros: Array<[keyof ReturnType<typeof inicial>, string, boolean]> = [
       ['cilindraje', 'El cilindraje', true],
@@ -193,7 +210,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
       ['km', 'El kilometraje', true],
       ['soatPrima', 'La prima del SOAT', false],
       ['tmCosto', 'El costo de la tecnomecánica', false],
-      ['strPrima', 'La prima del todo riesgo', false],
+      ...(f.strTiene === 'si' ? ([['strPrima', 'La prima del todo riesgo', false]] as Array<[keyof ReturnType<typeof inicial>, string, boolean]>) : []),
     ]
     for (const [campo, etiqueta, entero] of numeros) {
       if (!f[campo].trim()) continue
@@ -222,7 +239,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
     setError('')
     setBusy(true)
     try {
-      const placa = f.placa.trim().toUpperCase()
+      const placa = f.placa.trim().toUpperCase().replace(/[\s-]+/g, '')
       const tieneSoat = [f.soatAseguradora, f.soatPoliza, f.soatInicio, f.soatVence, f.soatPrima].some(
         (x) => x.trim() !== ''
       )
@@ -291,9 +308,11 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
       } as VehiculoUpdate
       if (vehiculo) {
         await actualizarVehiculo(vehiculo.id, data)
+        invalidarSnapshotFinanciero()
         await onGuardado(vehiculo.id)
       } else {
         const id = await crearVehiculo(data)
+        invalidarSnapshotFinanciero()
         await onGuardado(id)
       }
     } catch (e) {
@@ -312,6 +331,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
     setError('')
     try {
       await eliminarVehiculo(vehiculo.id)
+      invalidarSnapshotFinanciero()
       await onEliminado(vehiculo.id)
     } catch (e) {
       setError(mensajeError(e))
@@ -349,6 +369,7 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
             </p>
           </div>
           <button
+            type="button"
             onClick={onCerrar}
             disabled={busy}
             className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-mist-300 transition hover:bg-white/[0.08] hover:text-white"
@@ -358,6 +379,14 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
           </button>
         </div>
 
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void guardar()
+          }}
+          noValidate
+          className="flex min-h-0 flex-1 flex-col"
+        >
         <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4 sm:px-6">
           {error && (
             <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
@@ -437,16 +466,45 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
                 <option value="no">No</option>
                 <option value="si">Sí</option>
               </Seleccion>
-              <Seleccion label="Periodicidad de la prima" valor={f.strPeriodicidad} onChange={(v) => set('strPeriodicidad', v)}>
+              <Seleccion
+                label="Periodicidad de la prima"
+                valor={f.strPeriodicidad}
+                disabled={f.strTiene === 'no'}
+                onChange={(v) => set('strPeriodicidad', v)}
+              >
                 <option value="anual">Anual</option>
                 <option value="semestral">Semestral</option>
                 <option value="trimestral">Trimestral</option>
+                <option value="bimestral">Bimestral</option>
                 <option value="mensual">Mensual</option>
               </Seleccion>
-              <Campo label="Aseguradora" valor={f.strAseguradora} onChange={(v) => set('strAseguradora', v)} />
-              <Campo label="Número de póliza" valor={f.strPoliza} onChange={(v) => set('strPoliza', v)} />
-              <Campo label="Vencimiento" valor={f.strVence} onChange={(v) => set('strVence', v)} tipo="date" />
-              <Campo label="Prima" valor={f.strPrima} onChange={(v) => set('strPrima', v)} cifra placeholder="0" />
+              <Campo
+                label="Aseguradora"
+                valor={f.strAseguradora}
+                disabled={f.strTiene === 'no'}
+                onChange={(v) => set('strAseguradora', v)}
+              />
+              <Campo
+                label="Número de póliza"
+                valor={f.strPoliza}
+                disabled={f.strTiene === 'no'}
+                onChange={(v) => set('strPoliza', v)}
+              />
+              <Campo
+                label="Vencimiento"
+                valor={f.strVence}
+                tipo="date"
+                disabled={f.strTiene === 'no'}
+                onChange={(v) => set('strVence', v)}
+              />
+              <Campo
+                label="Prima"
+                valor={f.strPrima}
+                cifra
+                disabled={f.strTiene === 'no'}
+                onChange={(v) => set('strPrima', v)}
+                placeholder="0"
+              />
             </div>
           </Seccion>
 
@@ -479,8 +537,9 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
           <div>
             {vehiculo && (
               <Button
+                type="button"
                 variant="ghost"
-                onClick={eliminar}
+                onClick={() => void eliminar()}
                 disabled={busy}
                 className="h-9 cursor-pointer text-red-300 hover:bg-red-500/10 hover:text-red-200"
               >
@@ -490,15 +549,16 @@ export default function VehiculoForm({ vehiculo, onCerrar, onGuardado, onElimina
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={onCerrar} disabled={busy} className="h-9 cursor-pointer">
+            <Button type="button" variant="ghost" onClick={onCerrar} disabled={busy} className="h-9 cursor-pointer">
               Cancelar
             </Button>
-            <Button onClick={guardar} disabled={busy} className="h-9 cursor-pointer">
+            <Button type="submit" disabled={busy} className="h-9 cursor-pointer">
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               {busy ? 'Guardando...' : 'Guardar'}
             </Button>
           </div>
         </div>
+        </form>
       </motion.div>
     </motion.div>
   )

@@ -1,13 +1,15 @@
 ﻿import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import ErrorBoundary from './components/ErrorBoundary.tsx'
 import AppAuth from './AppAuth.tsx'
 
-// Forzar actualización inmediata del Service Worker PWA para que nunca quede código viejo tras un despliegue
+// Forzar actualización inmediata del Service Worker PWA solo cuando reemplaza un SW previo
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  const teniaControlador = Boolean(navigator.serviceWorker.controller)
   let recargandoPorSw = false
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (recargandoPorSw) return
+    if (!teniaControlador || recargandoPorSw) return
     recargandoPorSw = true
     window.location.reload()
   })
@@ -21,6 +23,8 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AppAuth />
+    <ErrorBoundary>
+      <AppAuth />
+    </ErrorBoundary>
   </StrictMode>,
 )

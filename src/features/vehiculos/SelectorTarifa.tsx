@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   TARIFAS_SOAT_COLOMBIA,
   TARIFAS_TM_COLOMBIA,
@@ -27,6 +27,28 @@ export default function SelectorTarifa({
 }: Props) {
   const [abierto, setAbierto] = useState(false)
   const [filtroCategoria, setFiltroCategoria] = useState<string>('todas')
+  const contenedorRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!abierto) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (contenedorRef.current && !contenedorRef.current.contains(e.target as Node)) {
+        setAbierto(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setAbierto(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown, true)
+    }
+  }, [abierto])
 
   const tarifas = tipoTarifa === 'soat' ? TARIFAS_SOAT_COLOMBIA : TARIFAS_TM_COLOMBIA
   const sugerida =
@@ -35,22 +57,33 @@ export default function SelectorTarifa({
       : sugerirTarifaTM(tipoVehiculo, modelo)
 
   const categorias = Array.from(new Set(tarifas.map((t) => t.categoria)))
+  const filtroActivo =
+    filtroCategoria !== 'todas' && categorias.includes(filtroCategoria)
+      ? filtroCategoria
+      : 'todas'
 
   const tarifasFiltradas =
-    filtroCategoria === 'todas'
+    filtroActivo === 'todas'
       ? tarifas
-      : tarifas.filter((t) => t.categoria === filtroCategoria)
+      : tarifas.filter((t) => t.categoria === filtroActivo)
 
   const seleccionar = (t: TarifaVehiculo) => {
     onSeleccionar(t.valor, t.descripcion)
     setAbierto(false)
   }
 
+  const tituloSugerida =
+    tipoTarifa === 'soat'
+      ? 'Aplicar tarifa SOAT sugerida automáticamente según el tipo, cilindraje y modelo del vehículo'
+      : 'Aplicar tarifa de tecnomecánica sugerida automáticamente según el tipo y modelo del vehículo'
+
   return (
-    <div className="relative mt-1">
+    <div ref={contenedorRef} className="relative mt-1">
       <div className="flex flex-wrap items-center gap-1.5">
         <button
           type="button"
+          aria-expanded={abierto}
+          aria-label={`Elegir tarifa oficial de Colombia para ${tipoTarifa === 'soat' ? 'SOAT' : 'Tecnomecánica'}`}
           onClick={() => setAbierto((v) => !v)}
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-sky-400/25 bg-sky-400/[0.08] px-2.5 py-1 text-[11px] font-bold text-sky-200 transition hover:bg-sky-400/15"
         >
@@ -63,7 +96,7 @@ export default function SelectorTarifa({
           <button
             type="button"
             onClick={() => seleccionar(sugerida)}
-            title="Aplicar tarifa sugerida automáticamente según el tipo y cilindraje del vehículo"
+            title={tituloSugerida}
             className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-emerald-400/25 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold text-emerald-300 transition hover:bg-emerald-400/20"
           >
             <Sparkles className="h-3 w-3" />
@@ -79,7 +112,8 @@ export default function SelectorTarifa({
               Tarifas oficiales {tipoTarifa === 'soat' ? 'SOAT (Superfinanciera)' : 'Tecnomecánica CDA'}
             </span>
             <select
-              value={filtroCategoria}
+              aria-label="Filtrar tarifas por categoría"
+              value={filtroActivo}
               onChange={(e) => setFiltroCategoria(e.target.value)}
               className="field-dark h-7 rounded-lg px-2 text-[10px] font-medium"
             >
@@ -110,7 +144,7 @@ export default function SelectorTarifa({
                     <div className="flex items-center gap-1.5 font-bold text-white">
                       <span>{t.subcategoria}</span>
                       {esSugerida && (
-                        <span className="rounded-full bg-emerald-400/20 px-1.5 py-0.2 text-[9px] font-bold text-emerald-300">
+                        <span className="rounded-full bg-emerald-400/20 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">
                           Sugerida
                         </span>
                       )}

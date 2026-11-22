@@ -7,8 +7,9 @@ export function diasParaVencer(fecha?: string): number | null {
   const f = parseFechaLocal(fecha)
   if (!f) return null
   const hoy = new Date()
-  hoy.setHours(0, 0, 0, 0)
-  return Math.round((f.getTime() - hoy.getTime()) / 86400000)
+  const utcFecha = Date.UTC(f.getFullYear(), f.getMonth(), f.getDate())
+  const utcHoy = Date.UTC(hoy.getFullYear(), hoy.getMonth(), hoy.getDate())
+  return Math.round((utcFecha - utcHoy) / 86400000)
 }
 
 export function vigenciaDe(fecha?: string): Vigencia {
@@ -55,9 +56,15 @@ export function formatoFecha(fecha?: string): string {
 export function progresoTarea(tarea: TareaMantenimiento, kmActual?: number): number {
   const ultimo = tarea.ultimoKm ?? (tarea.proximoKm !== undefined && tarea.intervaloKm ? tarea.proximoKm - tarea.intervaloKm : undefined)
   if (ultimo === undefined || tarea.proximoKm === undefined) return 0
-  if (tarea.proximoKm <= ultimo) return 100
   const actual = kmActual ?? ultimo
+  if (tarea.proximoKm <= ultimo) return actual >= tarea.proximoKm ? 100 : 0
+  if (actual >= tarea.proximoKm) return 100
   const total = tarea.proximoKm - ultimo
   const avance = actual - ultimo
-  return Math.min(100, Math.max(0, Math.round((avance / total) * 100)))
+  return Math.min(99, Math.max(0, Math.round((avance / total) * 100)))
+}
+
+export function kmSobrepasadosTarea(tarea: TareaMantenimiento, kmActual?: number): number {
+  if (tarea.proximoKm === undefined || kmActual === undefined) return 0
+  return kmActual > tarea.proximoKm ? Math.round(kmActual - tarea.proximoKm) : 0
 }

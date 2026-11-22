@@ -291,8 +291,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-moto-reciente',
     categoria: 'Motocicletas',
-    subcategoria: 'Modelos recientes (2024–2026)',
-    descripcion: 'Motos modelos 2024 al presente',
+    subcategoria: 'Modelos recientes (0 a 2 años)',
+    descripcion: 'Motos con hasta 2 años de antigüedad',
     valor: 233100,
     tipoVehiculo: 'moto',
     antiguedadMax: 2,
@@ -300,8 +300,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-moto-intermedia',
     categoria: 'Motocicletas',
-    subcategoria: 'Modelos intermedios (2010–2023)',
-    descripcion: 'Motos modelos 2010 a 2023',
+    subcategoria: 'Modelos intermedios (3 a 16 años)',
+    descripcion: 'Motos de 3 a 16 años de antigüedad',
     valor: 233700,
     tipoVehiculo: 'moto',
     antiguedadMin: 3,
@@ -310,8 +310,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-moto-antigua',
     categoria: 'Motocicletas',
-    subcategoria: 'Modelos antiguos (2009 o anterior)',
-    descripcion: 'Motos modelos 2009 o anteriores',
+    subcategoria: 'Modelos antiguos (17+ años)',
+    descripcion: 'Motos de 17 o más años de antigüedad',
     valor: 233400,
     tipoVehiculo: 'moto',
     antiguedadMin: 17,
@@ -329,8 +329,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-liviano-reciente',
     categoria: 'Livianos Particulares',
-    subcategoria: 'Modelos recientes (2022–2026)',
-    descripcion: 'Carros particulares modelos 2022 al presente',
+    subcategoria: 'Modelos recientes (0 a 4 años)',
+    descripcion: 'Carros particulares con hasta 4 años de antigüedad',
     valor: 357200,
     tipoVehiculo: 'carro',
     antiguedadMax: 4,
@@ -338,8 +338,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-liviano-intermedio',
     categoria: 'Livianos Particulares',
-    subcategoria: 'Modelos intermedios (2010–2021)',
-    descripcion: 'Carros particulares modelos 2010 a 2021',
+    subcategoria: 'Modelos intermedios (5 a 16 años)',
+    descripcion: 'Carros particulares de 5 a 16 años de antigüedad',
     valor: 357900,
     tipoVehiculo: 'carro',
     antiguedadMin: 5,
@@ -348,8 +348,8 @@ export const TARIFAS_TM_COLOMBIA: TarifaVehiculo[] = [
   {
     id: 'tm-liviano-antiguo',
     categoria: 'Livianos Particulares',
-    subcategoria: 'Modelos antiguos (2009 o anterior)',
-    descripcion: 'Carros particulares modelos 2009 o anteriores',
+    subcategoria: 'Modelos antiguos (17+ años)',
+    descripcion: 'Carros particulares de 17 o más años de antigüedad',
     valor: 357500,
     tipoVehiculo: 'carro',
     antiguedadMin: 17,
@@ -400,16 +400,19 @@ export function sugerirTarifaSoat(
   cilindraje?: number | null,
   modelo?: number | null
 ): TarifaVehiculo | undefined {
+  if (tipo === 'otro') return undefined
   const anioActual = new Date().getFullYear()
   const antiguedad = modelo ? Math.max(0, anioActual - modelo) : undefined
 
   const tipoNormalizado =
-    tipo === 'moto' ? 'moto' : tipo === 'camion' ? 'camion' : 'carro'
+    tipo === 'moto' ? 'moto' : tipo === 'camion' ? 'camion' : tipo === 'carro' ? 'carro' : undefined
+  if (!tipoNormalizado) return undefined
 
   const candidatos = TARIFAS_SOAT_COLOMBIA.filter((t) => t.tipoVehiculo === tipoNormalizado)
 
   if (tipoNormalizado === 'moto') {
     if (!cilindraje) return candidatos.find((c) => c.id === 'soat-moto-100-200') ?? candidatos[0]
+    if (cilindraje <= 50) return candidatos.find((c) => c.id === 'soat-ciclomotor')
     if (cilindraje < 100) return candidatos.find((c) => c.id === 'soat-moto-menos-100')
     if (cilindraje <= 200) return candidatos.find((c) => c.id === 'soat-moto-100-200')
     return candidatos.find((c) => c.id === 'soat-moto-mas-200')
@@ -439,11 +442,13 @@ export function sugerirTarifaTM(
   tipo: string = 'carro',
   modelo?: number | null
 ): TarifaVehiculo | undefined {
+  if (tipo === 'otro') return undefined
   const anioActual = new Date().getFullYear()
   const antiguedad = modelo ? Math.max(0, anioActual - modelo) : undefined
 
   const tipoNormalizado =
-    tipo === 'moto' ? 'moto' : tipo === 'camion' ? 'camion' : 'carro'
+    tipo === 'moto' ? 'moto' : tipo === 'camion' ? 'camion' : tipo === 'carro' ? 'carro' : undefined
+  if (!tipoNormalizado) return undefined
 
   const candidatos = TARIFAS_TM_COLOMBIA.filter((t) => t.tipoVehiculo === tipoNormalizado)
 

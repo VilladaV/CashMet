@@ -21,7 +21,9 @@ import {
   estadoGoogleCalendar,
   googleCalendarConfigurado,
   sincronizarPendientes,
+  subirEvento,
 } from '@/lib/google/calendar'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
 import { hoyISO } from '@/lib/fechas'
 import {
   Calendar as CalendarIcon,
@@ -38,11 +40,12 @@ import {
   X,
 } from 'lucide-react'
 
-const ETIQUETA: Record<string, string> = {
+const ETIQUETA: Record<TipoEvento, string> = {
   soat: 'SOAT',
   tecnicomecanica: 'Tecnicomecánica',
   seguro_tr: 'Seguro',
-  prima_julio: 'Prima julio',
+  mantenimiento: 'Mantenimiento',
+  prima_julio: 'Prima junio',
   prima_diciembre: 'Prima diciembre',
   cuota_deuda: 'Cuota',
   predial: 'Predial',
@@ -53,21 +56,23 @@ const ETIQUETA: Record<string, string> = {
   personal: 'Personal',
 }
 
+const TIPOS_EVENTO = Object.keys(ETIQUETA) as TipoEvento[]
+
 const DIAS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
 
-const COLOR_TIPO: Record<string, string> = {
+const COLOR_TIPO: Partial<Record<TipoEvento, string>> = {
   soat: 'border-red-400/30 bg-red-400/10 text-red-200',
   tecnicomecanica: 'border-amber-400/30 bg-amber-400/10 text-amber-200',
   seguro_tr: 'border-orange-400/30 bg-orange-400/10 text-orange-200',
+  mantenimiento: 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200',
   cuota_deuda: 'border-sky-400/30 bg-sky-400/10 text-sky-200',
   prima_julio: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
   prima_diciembre: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
   personal: 'border-white/10 bg-white/[0.05] text-mist-300',
 }
 
-const HOY_ISO = hoyISO()
-
 export default function CalendarioPage() {
+  const hoyIso = hoyISO()
   const [generando, setGenerando] = useState(false)
   const [eventos, setEventos] = useState<EventoDoc[]>([])
   const [preview, setPreview] = useState<EventoInput[]>([])
@@ -116,6 +121,14 @@ export default function CalendarioPage() {
     }
     return mapa
   }, [eventos])
+
+  const resumenPreview = useMemo(() => {
+    const conteo = new Map<TipoEvento, number>()
+    for (const ev of preview) {
+      conteo.set(ev.tipo, (conteo.get(ev.tipo) ?? 0) + 1)
+    }
+    return [...conteo.entries()]
+  }, [preview])
 
   const celdas = useMemo(() => {
     const year = mesVista.getFullYear()
@@ -181,19 +194,21 @@ export default function CalendarioPage() {
     setGmsg('')
     try {
       const r = await sincronizarPendientes()
-      setGmsg(
-        r.subidos > 0
-          ? `Subidos ${r.subidos} evento(s) a Google Calendar${r.fallos ? ` (${r.fallos} fallaron)` : ''}.`
-          : 'No había eventos pendientes por subir.'
-      )
+      if (r.subidos > 0) {
+        setGmsg(`Subidos ${r.subidos} evento(s) a Google Calendar${r.fallos ? ` (${r.fallos} fallaron)` : ''}.`)
+      } else if (r.fallos > 0) {
+        setGmsg(`No se pudieron subir ${r.fallos} evento(s) a Google Calendar. Revisa tu conexión o vuelve a conectar.`)
+      } else {
+        setGmsg('No había eventos pendientes por subir.')
+      }
     } catch (e) {
       if (String((e as Error)?.message ?? '').includes('401')) {
-        setGconectado(false)
         setGmsg('La sesión con Google expiró. Vuelve a conectar.')
       } else {
         setGmsg('No se pudo sincronizar. Inténtalo de nuevo.')
       }
     } finally {
+      setGconectado(estadoGoogleCalendar().conectado)
       setGBusy(false)
     }
   }
@@ -210,6 +225,7 @@ export default function CalendarioPage() {
     setError('')
     try {
       const n = await guardarEventos(preview)
+      invalidarSnapshotFinanciero()
       setMsg(`¡Listo! Se guardaron ${n} eventos en Firestore.`)
       setPreview([])
       cargar()
@@ -236,6 +252,7 @@ export default function CalendarioPage() {
         recordatorios: [{ minutosAntes: 60 }],
         relacionado: {},
       })
+      invalidarSnapshotFinanciero()
       setNuevo({ fecha: '', titulo: '', tipo: 'personal', descripcion: '' })
       setMsg('Evento añadido al calendario.')
       cargar()
@@ -252,6 +269,7 @@ export default function CalendarioPage() {
     try {
       const ev = eventos.find((x) => x.id === id)
       await eliminarEvento(id)
+      invalidarSnapshotFinanciero()
       if (ev?.googleEventId) eliminarEventoGoogle(ev.googleEventId).catch(() => {})
       if (editandoId === id) cerrarEdicion()
       cargar()
@@ -285,12 +303,24 @@ export default function CalendarioPage() {
     setGuardando(true)
     setError('')
     try {
+      const evAnterior = eventos.find((x) => x.id === editandoId)
+      const descripcionLimpia = form.descripcion.trim()
       await actualizarEvento(editandoId, {
         fechaInicio: form.fecha,
         titulo: form.titulo.trim(),
         tipo: form.tipo,
-        descripcion: form.descripcion.trim() || undefined,
+        descripcion: (descripcionLimpia || null) as unknown as string | undefined,
       })
+      invalidarSnapshotFinanciero()
+      if (evAnterior?.googleEventId && estadoGoogleCalendar().conectado) {
+        subirEvento({
+          ...evAnterior,
+          fechaInicio: form.fecha,
+          titulo: form.titulo.trim(),
+          tipo: form.tipo,
+          descripcion: descripcionLimpia || undefined,
+        }).catch(() => {})
+      }
       cerrarEdicion()
       cargar()
     } catch {
@@ -329,7 +359,7 @@ export default function CalendarioPage() {
               size="sm"
               variant="outline"
               disabled={generando}
-              onClick={previsualizar}
+              onClick={() => void previsualizar()}
               className="h-9 flex-1 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white sm:flex-initial"
             >
               <Clock className="mr-1.5 h-3.5 w-3.5" />
@@ -338,7 +368,7 @@ export default function CalendarioPage() {
             <Button
               size="sm"
               disabled={generando || !preview.length}
-              onClick={guardar}
+              onClick={() => void guardar()}
               className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-3.5 text-xs font-bold text-[#04241a] hover:brightness-110 sm:flex-initial"
             >
               <Sparkles className="mr-1.5 h-3.5 w-3.5" />
@@ -346,6 +376,46 @@ export default function CalendarioPage() {
             </Button>
           </div>
         </CardContent>
+
+        {preview.length > 0 && (
+          <div className="mx-4 mb-3 space-y-2 rounded-2xl border border-sky-400/25 bg-sky-400/[0.07] p-3 text-xs sm:mx-5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-bold text-white">
+                Vista previa ({preview.length} eventos proyectados)
+              </span>
+              <button
+                type="button"
+                onClick={() => setPreview([])}
+                className="cursor-pointer text-[11px] font-semibold text-mist-400 hover:text-white"
+              >
+                Descartar
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {resumenPreview.map(([tipo, cantidad]) => (
+                <span
+                  key={tipo}
+                  className={`rounded-full border px-2 py-0.5 text-[10px] font-bold ${
+                    COLOR_TIPO[tipo] ?? 'border-white/10 bg-white/[0.05] text-mist-300'
+                  }`}
+                >
+                  {ETIQUETA[tipo]}: {cantidad}
+                </span>
+              ))}
+            </div>
+            <ul className="max-h-32 space-y-1 overflow-y-auto pt-1 text-[11px] text-mist-300">
+              {preview.slice(0, 8).map((ev, idx) => (
+                <li key={`${ev.fechaInicio}-${ev.titulo}-${idx}`} className="flex items-center justify-between gap-2">
+                  <span className="truncate">{ev.titulo}</span>
+                  <span className="shrink-0 font-mono text-mist-500">{ev.fechaInicio.slice(0, 10)}</span>
+                </li>
+              ))}
+              {preview.length > 8 && (
+                <li className="text-[10px] text-mist-500">… y {preview.length - 8} evento(s) más.</li>
+              )}
+            </ul>
+          </div>
+        )}
 
         {(msg || error) && (
           <div className="space-y-2 px-4 pb-3">
@@ -356,7 +426,10 @@ export default function CalendarioPage() {
               </div>
             )}
             {error && (
-              <div className="flex items-center gap-1.5 rounded-xl border border-red-400/25 bg-red-500/10 p-2 text-xs font-medium text-red-300">
+              <div
+                role="alert"
+                className="flex items-center gap-1.5 rounded-xl border border-red-400/25 bg-red-500/10 p-2 text-xs font-medium text-red-300"
+              >
                 <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                 <span>{error}</span>
               </div>
@@ -386,7 +459,7 @@ export default function CalendarioPage() {
               <Button
                 size="sm"
                 disabled={gBusy}
-                onClick={conectarGoogle}
+                onClick={() => void conectarGoogle()}
                 className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-sky-500 to-emerald-500 px-4 text-xs font-bold text-white hover:brightness-110 sm:flex-initial"
               >
                 <Cloud className="mr-1.5 h-3.5 w-3.5" />
@@ -397,7 +470,7 @@ export default function CalendarioPage() {
                 <Button
                   size="sm"
                   disabled={gBusy}
-                  onClick={sincronizarGoogle}
+                  onClick={() => void sincronizarGoogle()}
                   className="h-9 flex-1 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110 sm:flex-initial"
                 >
                   <Sparkles className="mr-1.5 h-3.5 w-3.5" />
@@ -409,6 +482,7 @@ export default function CalendarioPage() {
                   disabled={gBusy}
                   onClick={desconectarGoogle}
                   title="Desconectar"
+                  aria-label="Desconectar Google Calendar"
                   className="h-9 w-9 cursor-pointer border-white/10 bg-transparent text-mist-500 hover:bg-white/5 hover:text-white"
                 >
                   <X className="h-4 w-4" />
@@ -432,6 +506,7 @@ export default function CalendarioPage() {
               className="h-8 w-8 cursor-pointer border-white/10 bg-transparent text-mist-300 hover:bg-white/5 hover:text-white"
               onClick={() => cambiarMes(-1)}
               title="Mes anterior"
+              aria-label="Mes anterior"
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
@@ -453,6 +528,7 @@ export default function CalendarioPage() {
               className="h-8 w-8 cursor-pointer border-white/10 bg-transparent text-mist-300 hover:bg-white/5 hover:text-white"
               onClick={() => cambiarMes(1)}
               title="Mes siguiente"
+              aria-label="Mes siguiente"
             >
               <ChevronRight className="h-4 w-4" />
             </Button>
@@ -472,7 +548,7 @@ export default function CalendarioPage() {
             {celdas.map((c, i) => {
               if (!c) return <div key={`empty-${i}`} className="min-h-16 rounded-xl bg-white/[0.02] sm:min-h-20" />
               const evs = porDia[c.clave] ?? []
-              const esHoy = c.clave === HOY_ISO
+              const esHoy = c.clave === hoyIso
               const seleccionado = c.clave === diaSel
               return (
                 <button
@@ -483,8 +559,8 @@ export default function CalendarioPage() {
                     seleccionado
                       ? 'border-emerald-400/50 bg-emerald-400/10 shadow-[0_0_24px_-8px_rgba(16,185,129,0.5)]'
                       : esHoy
-                      ? 'border-sky-400/30 bg-sky-400/[0.07]'
-                      : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.14] hover:bg-white/[0.05]'
+                        ? 'border-sky-400/30 bg-sky-400/[0.07]'
+                        : 'border-white/[0.06] bg-white/[0.02] hover:border-white/[0.14] hover:bg-white/[0.05]'
                   }`}
                 >
                   <div className="mb-1 flex items-center justify-between">
@@ -497,16 +573,14 @@ export default function CalendarioPage() {
                     >
                       {c.dia}
                     </span>
-                    {evs.length > 0 && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                    )}
+                    {evs.length > 0 && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
                   </div>
 
                   <div className="space-y-0.5">
                     {evs.slice(0, 2).map((e) => (
                       <div
                         key={e.id}
-                        className={`truncate rounded-md border px-1 py-0.5 text-[9px] font-bold leading-tight sm:text-[10px] ${
+                        className={`truncate rounded-md border px-1 py-0.5 text-[9px] leading-tight font-bold sm:text-[10px] ${
                           COLOR_TIPO[e.tipo] ?? 'border-white/10 bg-white/[0.05] text-mist-300'
                         }`}
                         title={e.titulo}
@@ -558,6 +632,7 @@ export default function CalendarioPage() {
                           className="h-7 w-7 cursor-pointer text-mist-500 hover:bg-white/[0.06] hover:text-white"
                           onClick={() => abrirEdicion(e)}
                           title="Editar"
+                          aria-label="Editar evento"
                         >
                           <Edit2 className="h-3.5 w-3.5" />
                         </Button>
@@ -565,8 +640,9 @@ export default function CalendarioPage() {
                           size="icon"
                           variant="ghost"
                           className="h-7 w-7 cursor-pointer text-mist-500 hover:bg-red-500/10 hover:text-red-300"
-                          onClick={() => borrarEvento(e.id)}
+                          onClick={() => void borrarEvento(e.id)}
                           title="Eliminar"
+                          aria-label="Eliminar evento"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -608,7 +684,7 @@ export default function CalendarioPage() {
                     value={form.tipo}
                     onChange={(e) => setForm({ ...form, tipo: e.target.value as TipoEvento })}
                   >
-                    {Object.keys(ETIQUETA).map((k) => (
+                    {TIPOS_EVENTO.map((k) => (
                       <option key={k} value={k}>
                         {ETIQUETA[k]}
                       </option>
@@ -640,7 +716,7 @@ export default function CalendarioPage() {
                   size="sm"
                   className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 text-xs font-bold text-[#04241a] hover:brightness-110"
                   disabled={guardando}
-                  onClick={guardarEdicion}
+                  onClick={() => void guardarEdicion()}
                 >
                   <CheckCircle2 className="h-3.5 w-3.5" />
                   <span>{guardando ? 'Guardando...' : 'Guardar cambios'}</span>
@@ -686,7 +762,7 @@ export default function CalendarioPage() {
                 value={nuevo.tipo}
                 onChange={(e) => setNuevo({ ...nuevo, tipo: e.target.value as TipoEvento })}
               >
-                {Object.keys(ETIQUETA).map((k) => (
+                {TIPOS_EVENTO.map((k) => (
                   <option key={k} value={k}>
                     {ETIQUETA[k]}
                   </option>
@@ -719,7 +795,7 @@ export default function CalendarioPage() {
             <Button
               size="sm"
               disabled={creando || !nuevo.fecha || !nuevo.titulo.trim()}
-              onClick={crearManual}
+              onClick={() => void crearManual()}
               className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
               <span>{creando ? 'Creando...' : 'Crear recordatorio'}</span>

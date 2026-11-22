@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 function enLinea(texto: string): ReactNode[] {
-  const partes = texto.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g)
+  const partes = texto.split(/(\*\*[^\s*](?:[^*]*[^\s*])?\*\*|(?<!\*)\*[^\s*](?:[^*]*[^\s*])?\*(?!\*))/g)
   return partes.map((p, i) => {
     if (p.startsWith('**') && p.endsWith('**') && p.length > 4) {
       return (
@@ -21,7 +21,8 @@ function enLinea(texto: string): ReactNode[] {
   })
 }
 
-const RE_VINETA = /^\s*[-*•]\s+(.*)$/
+// No convertir montos negativos como "- 50.000" o "- $50.000" en viñetas de lista
+const RE_VINETA = /^\s*(?:[•*]\s+|-\s+(?!\$?\d))(.*)$/
 
 export default function TextoEnriquecido({ texto }: { texto: string }) {
   const lineas = texto.split('\n')
@@ -34,11 +35,11 @@ export default function TextoEnriquecido({ texto }: { texto: string }) {
       <ul key={`ul-${bloques.length}`} className="my-1 space-y-1 pl-1">
         {lista.map((item, i) => (
           <li key={i} className="flex gap-2">
-            <span className="text-emerald-500 mt-[2px] select-none">▪</span>
+            <span className="mt-[2px] text-emerald-500 select-none">▪</span>
             <span className="flex-1">{enLinea(item)}</span>
           </li>
         ))}
-      </ul>,
+      </ul>
     )
     lista = []
   }
@@ -56,7 +57,7 @@ export default function TextoEnriquecido({ texto }: { texto: string }) {
       bloques.push(
         <p key={`p-${idx}`} className="whitespace-pre-wrap">
           {enLinea(linea)}
-        </p>,
+        </p>
       )
     }
   })

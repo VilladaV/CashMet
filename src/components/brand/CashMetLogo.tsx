@@ -1,3 +1,4 @@
+import { useId } from 'react'
 
 interface CashMetLogoProps {
   className?: string
@@ -8,6 +9,11 @@ interface CashMetLogoProps {
 }
 
 export function CashMetEmblem({ size = 36, className = '' }: { size?: number; className?: string }) {
+  const uid = useId()
+  const ringGradId = `${uid}-ring-grad`
+  const arrowGradId = `${uid}-arrow-grad`
+  const shadowId = `${uid}-shadow`
+
   return (
     <svg
       width={size}
@@ -20,7 +26,7 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
     >
       <defs>
         {/* Gradiente para el aro circular azul/marino */}
-        <linearGradient id="cashmet-ring-grad" x1="15%" y1="85%" x2="85%" y2="15%">
+        <linearGradient id={ringGradId} x1="15%" y1="85%" x2="85%" y2="15%">
           <stop offset="0%" stopColor="#082142" />
           <stop offset="35%" stopColor="#0F3868" />
           <stop offset="70%" stopColor="#1B639B" />
@@ -28,7 +34,7 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
         </linearGradient>
 
         {/* Gradiente para la línea/flecha de crecimiento esmeralda-cyan */}
-        <linearGradient id="cashmet-arrow-grad" x1="10%" y1="90%" x2="95%" y2="10%">
+        <linearGradient id={arrowGradId} x1="10%" y1="90%" x2="95%" y2="10%">
           <stop offset="0%" stopColor="#047857" />
           <stop offset="25%" stopColor="#059669" />
           <stop offset="55%" stopColor="#10B981" />
@@ -37,7 +43,7 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
         </linearGradient>
 
         {/* Sombra suave interna / profundidad */}
-        <filter id="cashmet-shadow" x="-10%" y="-10%" width="130%" height="130%">
+        <filter id={shadowId} x="-10%" y="-10%" width="130%" height="130%">
           <feDropShadow dx="1" dy="2" stdDeviation="2" floodColor="#07192C" floodOpacity="0.25" />
         </filter>
       </defs>
@@ -47,11 +53,11 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
         cx="46"
         cy="54"
         r="32"
-        stroke="url(#cashmet-ring-grad)"
+        stroke={`url(#${ringGradId})`}
         strokeWidth="11"
         strokeLinecap="round"
         fill="none"
-        filter="url(#cashmet-shadow)"
+        filter={`url(#${shadowId})`}
       />
 
       {/* Arco secundario para profundidad 3D */}
@@ -67,7 +73,7 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
       {/* Trazo dinámico de crecimiento en 'M' + flecha alcista */}
       <path
         d="M 24 64 L 38 46 L 47 55 L 68 28"
-        stroke="url(#cashmet-arrow-grad)"
+        stroke={`url(#${arrowGradId})`}
         strokeWidth="9"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -77,16 +83,13 @@ export function CashMetEmblem({ size = 36, className = '' }: { size?: number; cl
       {/* Cabeza de flecha ascendente hacia arriba a la derecha */}
       <path
         d="M 57 24 L 75 23 L 73 41"
-        stroke="url(#cashmet-arrow-grad)"
+        stroke={`url(#${arrowGradId})`}
         strokeWidth="8"
         strokeLinecap="round"
         strokeLinejoin="round"
         fill="none"
       />
-      <polygon
-        points="75,23 58,25 64,31 71,31"
-        fill="url(#cashmet-arrow-grad)"
-      />
+      <polygon points="75,23 58,25 64,31 71,31" fill={`url(#${arrowGradId})`} />
     </svg>
   )
 }
@@ -123,30 +126,37 @@ export default function CashMetLogo({
     variant === 'dark'
       ? 'text-white'
       : variant === 'light'
-      ? 'text-[#0B2545]'
-      : 'text-[#0B2545] dark:text-white'
+        ? 'text-[#0B2545]'
+        : 'text-[#0B2545] dark:text-white'
+
+  const metCol =
+    variant === 'dark'
+      ? 'text-[#38BDF8]'
+      : variant === 'light'
+        ? 'text-[#0F3868]'
+        : 'text-[#0F3868] dark:text-[#38BDF8]'
 
   const subCol =
     variant === 'dark'
       ? 'text-slate-300'
       : variant === 'light'
-      ? 'text-[#475569]'
-      : 'text-[#475569] dark:text-slate-400'
+        ? 'text-[#475569]'
+        : 'text-[#475569] dark:text-slate-400'
 
   return (
     <div className={`inline-flex items-center gap-3 select-none ${className}`}>
-      <div className="relative shrink-0 flex items-center justify-center">
+      <div className="relative flex shrink-0 items-center justify-center">
         <CashMetEmblem size={pixelSizes[size]} />
       </div>
 
       {showText && (
         <div className="flex flex-col leading-none">
-          <div className={`font-black ${textSizes[size]} ${textCol} tracking-tight font-sans flex items-center`}>
+          <div className={`flex items-center font-sans font-black tracking-tight ${textSizes[size]} ${textCol}`}>
             <span>CASH</span>
-            <span className="text-[#0F3868] dark:text-[#38BDF8]">MET</span>
+            <span className={metCol}>MET</span>
           </div>
           {showSubtitle && (
-            <div className={`font-semibold uppercase ${subSizes[size]} ${subCol} mt-0.5 font-sans`}>
+            <div className={`mt-0.5 font-sans font-semibold uppercase ${subSizes[size]} ${subCol}`}>
               Financial Solutions
             </div>
           )}

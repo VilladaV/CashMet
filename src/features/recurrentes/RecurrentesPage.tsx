@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import CrudPage, { type CampoForm } from '@/components/CrudPage'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -16,10 +16,14 @@ import {
   type GastoRecurrente,
 } from '@/lib/firebase/recurrentesRepo'
 import { listarCuentasBanco, type CuentaBanco } from '@/lib/firebase/movimientosRepo'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
 import { hoyISO } from '@/lib/fechas'
+import { desformatearCifra } from '@/lib/utils'
 
 const num = (s: string) => {
-  const n = Number(String(s).replace(/[^\d.-]/g, ''))
+  const limpio = String(s ?? '').trim()
+  if (!limpio) return undefined
+  const n = desformatearCifra(limpio)
   return Number.isFinite(n) ? n : undefined
 }
 
@@ -35,16 +39,29 @@ const VACIO: Record<string, string> = {
 
 export default function RecurrentesPage() {
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
-  const [mes, setMes] = useState(mesActual())
+  const [mes, setMes] = useState(mesActual)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    listarCuentasBanco()
-      .then(setCuentas)
-      .catch(() => {})
+  const cargarCuentas = useCallback(async () => {
+    try {
+      const data = await listarCuentasBanco()
+      setCuentas(data)
+    } catch {
+      /* sin cuentas */
+    }
   }, [])
+
+  useEffect(() => {
+    let cancelado = false
+    void Promise.resolve().then(() => {
+      if (!cancelado) void cargarCuentas()
+    })
+    return () => {
+      cancelado = true
+    }
+  }, [cargarCuentas])
 
   const campos = useMemo<CampoForm[]>(
     () => [
@@ -54,6 +71,7 @@ export default function RecurrentesPage() {
       { key: 'periodicidad', label: 'Periodicidad', tipo: 'select', opciones: PERIODICIDADES.map((t) => ({ value: t, label: t })) },
       { key: 'diaVencimiento', label: 'Día de vencimiento (1-31)', tipo: 'number' },
       { key: 'fechaInicio', label: 'Fecha de inicio (para periodicidad)', tipo: 'date' },
+      { key: 'fechaFin', label: 'Fecha de fin (opcional)', tipo: 'date' },
       {
         key: 'cuentaBancoId',
         label: 'Cuenta para descontar',
@@ -78,6 +96,8 @@ export default function RecurrentesPage() {
     try {
       const movs = await generarMovimientosRecurrentes(mes)
       const evs = await generarEventosRecurrentes(mes)
+      invalidarSnapshotFinanciero()
+      await cargarCuentas()
       setMsg(`Mes ${mes}: ${movs} movimiento(s) y ${evs} evento(s) generados.`)
     } catch (e: any) {
       setError(e?.message || 'No se pudieron generar los recurrentes.')
@@ -113,7 +133,7 @@ export default function RecurrentesPage() {
           <Button
             size="sm"
             disabled={busy || !mes}
-            onClick={generar}
+            onClick={() => void generar()}
             className="h-10 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
           >
             {busy ? 'Generando...' : 'Generar movimientos y eventos'}
@@ -126,7 +146,10 @@ export default function RecurrentesPage() {
           </div>
         )}
         {error && (
-          <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 font-medium text-red-300">
+          <div
+            role="alert"
+            className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 font-medium text-red-300"
+          >
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span>{error}</span>
           </div>
@@ -146,29 +169,42 @@ export default function RecurrentesPage() {
   return (
     <CrudPage<GastoRecurrente>
       titulo="Gasto recurrente"
+      tituloPlural="Gastos recurrentes"
       descripcion="Gastos fijos (internet, luz, agua, arriendo...) para proyecciones, movimientos automáticos y recordatorios."
       campos={campos}
       vacio={vacio}
+      onMutate={() => invalidarSnapshotFinanciero()}
       listar={listarRecurrentes}
       crear={(d) => crearRecurrente(d)}
       actualizar={(id, d) => actualizarRecurrente(id, d)}
       eliminar={(id) => eliminarRecurrente(id)}
       extra={extra}
       transformar={(vals) => {
-        const doc: Record<string, unknown> = {
+        const valorNum = num(vals.valor)
+        if (valorNum === undefined || valorNum <= 0) {
+          throw new Error('El valor del gasto recurrente debe ser mayor a cero.')
+        }
+        let diaVencimiento: number | null = null
+        if (vals.diaVencimiento?.trim()) {
+          const dia = Number(vals.diaVencimiento.trim())
+          if (!Number.isInteger(dia) || dia < 1 || dia > 31) {
+            throw new Error('El día de vencimiento debe ser un número entero entre 1 y 31.')
+          }
+          diaVencimiento = dia
+        }
+        return {
           concepto: vals.concepto.trim(),
           categoria: vals.categoria || 'hogar',
-          valor: num(vals.valor),
+          valor: Math.round(valorNum),
           periodicidad: vals.periodicidad || 'mensual',
           autoGenerar: vals.autoGenerar !== 'no',
           activo: vals.activo !== 'no',
+          diaVencimiento,
+          fechaInicio: vals.fechaInicio?.trim() || null,
+          fechaFin: vals.fechaFin?.trim() || null,
+          cuentaBancoId: vals.cuentaBancoId || null,
+          notas: vals.notas?.trim() || null,
         }
-        const dia = num(vals.diaVencimiento as string)
-        if (dia !== undefined) doc.diaVencimiento = dia
-        if (vals.fechaInicio) doc.fechaInicio = vals.fechaInicio
-        if (vals.cuentaBancoId) doc.cuentaBancoId = vals.cuentaBancoId
-        if (vals.notas?.trim()) doc.notas = vals.notas.trim()
-        return doc
       }}
       aForm={(g) => ({
         concepto: g.concepto,
@@ -177,24 +213,30 @@ export default function RecurrentesPage() {
         periodicidad: g.periodicidad,
         diaVencimiento: g.diaVencimiento != null ? String(g.diaVencimiento) : '',
         fechaInicio: g.fechaInicio ?? '',
+        fechaFin: g.fechaFin ?? '',
         cuentaBancoId: g.cuentaBancoId ?? '',
         autoGenerar: g.autoGenerar === false ? 'no' : 'si',
         activo: g.activo === false ? 'no' : 'si',
         notas: g.notas ?? '',
       })}
-      renderItem={(g) => (
-        <div>
-          <div className="font-medium">
-            {g.concepto} <span className="text-muted-foreground">({g.categoria})</span>
-            {g.activo === false ? ' — inactivo' : ''}
-            {g.autoGenerar === false ? ' — no automático' : ''}
+      renderItem={(g) => {
+        const cuenta = cuentas.find((c) => c.id === g.cuentaBancoId)
+        return (
+          <div>
+            <div className="font-medium">
+              {g.concepto} <span className="text-muted-foreground">({g.categoria})</span>
+              {g.activo === false ? ' — inactivo' : ''}
+              {g.autoGenerar === false ? ' — no automático' : ''}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              ${(g.valor || 0).toLocaleString('es-CO')} / {g.periodicidad}
+              {g.diaVencimiento ? ` · Vence día ${g.diaVencimiento}` : ''}
+              {cuenta ? ` · Cuenta: ${cuenta.nombre}` : ''}
+              {g.fechaFin ? ` · Hasta ${g.fechaFin}` : ''}
+            </div>
           </div>
-          <div className="text-xs text-muted-foreground">
-            ${(g.valor || 0).toLocaleString('es-CO')} / {g.periodicidad}
-            {g.diaVencimiento ? ` · Vence día ${g.diaVencimiento}` : ''}
-          </div>
-        </div>
-      )}
+        )
+      }}
     />
   )
 }

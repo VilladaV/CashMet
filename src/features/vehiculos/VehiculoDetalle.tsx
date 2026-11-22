@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'motion/react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,6 +28,7 @@ import {
   etiquetaVigencia,
   formatoFecha,
   formatoKm,
+  kmSobrepasadosTarea,
   progresoTarea,
   vigenciaDe,
 } from './vehiculoUtils'
@@ -77,7 +78,9 @@ function txt(v: string): string | undefined {
 function num(v: string): number | undefined {
   const limpio = v.trim()
   if (!limpio) return undefined
-  const n = Number(limpio.replace(/[^\d.-]/g, ''))
+  const soloNum = limpio.replace(/[^\d.-]/g, '')
+  if (!soloNum || !/\d/.test(soloNum)) return undefined
+  const n = Number(soloNum)
   return Number.isFinite(n) ? n : undefined
 }
 
@@ -95,6 +98,7 @@ export default function VehiculoDetalle({
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
   const [docTab, setDocTab] = useState<string | null>(null)
+  const [imgErrorUrl, setImgErrorUrl] = useState<string | null>(null)
 
   const guardar = async (parcial: VehiculoUpdate, ok = 'Cambios guardados.') => {
     setBusy(true)
@@ -117,7 +121,7 @@ export default function VehiculoDetalle({
   const strV = vigenciaDe(vehiculo.seguroTodoRiesgo?.fechaVencimiento)
   const tareas = vehiculo.mantenimiento?.tareas ?? []
   const km = vehiculo.mantenimiento?.kilometrajeActual
-  const keyBase = vehiculo.actualizado ?? 0
+  const mostrarFoto = Boolean(vehiculo.fotoUrl && imgErrorUrl !== vehiculo.fotoUrl)
 
   return (
     <motion.div
@@ -130,10 +134,11 @@ export default function VehiculoDetalle({
         <div className="h-1 w-full bg-gradient-to-r from-sky-500 via-teal-400 to-emerald-400" />
         <CardHeader className="border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
           <CardTitle className="flex flex-wrap items-center gap-3 text-sm font-extrabold text-white sm:text-base">
-            {vehiculo.fotoUrl ? (
+            {mostrarFoto ? (
               <img
                 src={vehiculo.fotoUrl}
                 alt={`${vehiculo.marca} ${vehiculo.linea}`}
+                onError={() => setImgErrorUrl(vehiculo.fotoUrl ?? null)}
                 className="h-11 w-16 rounded-xl border border-white/10 object-cover"
               />
             ) : (
@@ -157,6 +162,7 @@ export default function VehiculoDetalle({
             </span>
             {onEditar && (
               <Button
+                type="button"
                 variant="ghost"
                 size="sm"
                 onClick={onEditar}
@@ -176,7 +182,12 @@ export default function VehiculoDetalle({
               return (
                 <button
                   key={t.id}
-                  onClick={() => setTab(t.id)}
+                  type="button"
+                  onClick={() => {
+                    setTab(t.id)
+                    setMsg('')
+                    setError('')
+                  }}
                   className={`flex cursor-pointer items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition-colors ${
                     activo
                       ? 'bg-emerald-400/15 text-emerald-200'
@@ -206,7 +217,7 @@ export default function VehiculoDetalle({
 
       {tab === 'resumen' && (
         <ResumenTab
-          key={`resumen-${keyBase}`}
+          key={`resumen-${vehiculo.id}`}
           vehiculo={vehiculo}
           busy={busy}
           soatV={soatV}
@@ -217,7 +228,7 @@ export default function VehiculoDetalle({
       )}
       {tab === 'documentos' && (
         <DocumentosTab
-          key={`docs-${keyBase}`}
+          key={`docs-${vehiculo.id}`}
           vehiculo={vehiculo}
           busy={busy}
           docAbierto={docTab}
@@ -226,7 +237,7 @@ export default function VehiculoDetalle({
         />
       )}
       {tab === 'tarjeta' && (
-        <TarjetaTab key={`tarjeta-${keyBase}`} vehiculo={vehiculo} busy={busy} onGuardar={guardar} />
+        <TarjetaTab key={`tarjeta-${vehiculo.id}`} vehiculo={vehiculo} busy={busy} onGuardar={guardar} />
       )}
       {tab === 'mantenimiento' && (
         <MantenimientoTab vehiculo={vehiculo} tareas={tareas} km={km} onCambio={onCambio} />
@@ -435,6 +446,7 @@ function CampoEditable({
   tipo = 'text',
   cifra,
   placeholder,
+  disabled,
 }: {
   label: string
   valor: string
@@ -442,6 +454,7 @@ function CampoEditable({
   tipo?: 'text' | 'number' | 'date'
   cifra?: boolean
   placeholder?: string
+  disabled?: boolean
 }) {
   return (
     <label className="flex flex-col gap-1.5">
@@ -450,9 +463,10 @@ function CampoEditable({
         type={tipo}
         cifra={cifra}
         value={valor}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="field-dark h-10 text-xs shadow-none"
+        className="field-dark h-10 text-xs shadow-none disabled:cursor-not-allowed disabled:opacity-50"
       />
     </label>
   )
@@ -506,7 +520,10 @@ function DocumentosTab({
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   const guardarTodo = () => {
-    const valores = [soat.valorPrimaAnual, tm.costoRevision, str.valorPrimaAnual]
+    const valores =
+      str.tiene === 'si'
+        ? [soat.valorPrimaAnual, tm.costoRevision, str.valorPrimaAnual]
+        : [soat.valorPrimaAnual, tm.costoRevision]
     if (valores.some((x) => x.trim() && (num(x) === undefined || (num(x) ?? 0) < 0))) {
       setError('Los valores deben ser números positivos.')
       return
@@ -626,6 +643,7 @@ function DocumentosTab({
           <span className="text-xs font-bold text-mist-100">{titulo}</span>
           <div className="flex gap-1.5">
             <button
+              type="button"
               onClick={() => onAbrir(abierto ? null : id)}
               className="cursor-pointer rounded-lg bg-white/[0.06] px-2.5 py-1 text-[11px] font-bold text-mist-200 hover:bg-white/[0.1]"
             >
@@ -726,19 +744,43 @@ function DocumentosTab({
               <span className="font-bold text-mist-300">Periodicidad de la prima</span>
               <select
                 value={str.periodicidad}
+                disabled={str.tiene === 'no'}
                 onChange={(e) => setStr({ ...str, periodicidad: e.target.value as PeriodicidadGasto })}
-                className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
+                className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <option value="anual">Anual</option>
                 <option value="semestral">Semestral</option>
                 <option value="trimestral">Trimestral</option>
+                <option value="bimestral">Bimestral</option>
                 <option value="mensual">Mensual</option>
               </select>
             </label>
-            <CampoEditable label="Aseguradora" valor={str.aseguradora} onChange={(v) => setStr({ ...str, aseguradora: v })} />
-            <CampoEditable label="Número de póliza" valor={str.numeroPoliza} onChange={(v) => setStr({ ...str, numeroPoliza: v })} />
-            <CampoEditable label="Vencimiento" valor={str.fechaVencimiento} tipo="date" onChange={(v) => setStr({ ...str, fechaVencimiento: v })} />
-            <CampoEditable label="Prima" valor={str.valorPrimaAnual} cifra onChange={(v) => setStr({ ...str, valorPrimaAnual: v })} />
+            <CampoEditable
+              label="Aseguradora"
+              valor={str.aseguradora}
+              disabled={str.tiene === 'no'}
+              onChange={(v) => setStr({ ...str, aseguradora: v })}
+            />
+            <CampoEditable
+              label="Número de póliza"
+              valor={str.numeroPoliza}
+              disabled={str.tiene === 'no'}
+              onChange={(v) => setStr({ ...str, numeroPoliza: v })}
+            />
+            <CampoEditable
+              label="Vencimiento"
+              valor={str.fechaVencimiento}
+              tipo="date"
+              disabled={str.tiene === 'no'}
+              onChange={(v) => setStr({ ...str, fechaVencimiento: v })}
+            />
+            <CampoEditable
+              label="Prima"
+              valor={str.valorPrimaAnual}
+              cifra
+              disabled={str.tiene === 'no'}
+              onChange={(v) => setStr({ ...str, valorPrimaAnual: v })}
+            />
           </div>
         </div>
 
@@ -874,6 +916,7 @@ function TarjetaTab({
         numChasis: txt(tec.numChasis) ?? null,
         capacidad: txt(tec.capacidad) ?? null,
         avaluoComercial: avaluo ?? null,
+        valorComercial: avaluo ?? null,
         licenciaTransito: licObj,
         propietarioDetalle: propObj,
       },
@@ -977,13 +1020,31 @@ function MantenimientoTab({
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
   const [cuentaId, setCuentaId] = useState('')
 
+  const recargarCuentas = useCallback(async () => {
+    try {
+      const data = await listarCuentasBanco()
+      setCuentas(data)
+      if (data.length > 0) setCuentaId((prev) => prev || data[0].id)
+    } catch {
+      setCuentas([])
+    }
+  }, [])
+
   useEffect(() => {
-    listarCuentasBanco()
-      .then((data) => {
+    let cancelado = false
+    void Promise.resolve().then(async () => {
+      try {
+        const data = await listarCuentasBanco()
+        if (cancelado) return
         setCuentas(data)
         if (data.length > 0) setCuentaId((prev) => prev || data[0].id)
-      })
-      .catch(() => setCuentas([]))
+      } catch {
+        if (!cancelado) setCuentas([])
+      }
+    })
+    return () => {
+      cancelado = true
+    }
   }, [])
 
   const recargar = async () => {
@@ -991,10 +1052,22 @@ function MantenimientoTab({
     await onCambio()
   }
 
+  const actualizarServicio = (id: string, campo: 'km' | 'fecha' | 'costo', valor: string) => {
+    setServicio((s) => {
+      const actual = s[id] ?? { km: '', fecha: '', costo: '' }
+      return { ...s, [id]: { ...actual, [campo]: valor } }
+    })
+  }
+
   const guardarKm = async () => {
-    const n = Number(String(nuevoKm).replace(/[^\d.-]/g, ''))
-    if (!Number.isFinite(n) || n < 0) {
-      setError('El kilometraje debe ser un número positivo.')
+    const limpio = nuevoKm.trim()
+    if (!limpio) {
+      setError('Ingresa un kilometraje válido.')
+      return
+    }
+    const n = num(limpio)
+    if (n === undefined || n < 0 || !Number.isInteger(n)) {
+      setError('El kilometraje debe ser un número entero positivo.')
       return
     }
     if (km !== undefined && n < km && !window.confirm('El kilometraje es menor al actual. ¿Guardarlo de todos modos?')) {
@@ -1025,19 +1098,26 @@ function MantenimientoTab({
       setError('Ya existe una tarea con ese nombre.')
       return
     }
-    const kmIntervalo = intervalo ? Number(String(intervalo).replace(/[^\d.-]/g, '')) : undefined
-    if (intervalo && (!Number.isFinite(kmIntervalo) || (kmIntervalo ?? 0) <= 0)) {
-      setError('El intervalo en kilómetros no es válido.')
+    const kmLimpio = intervalo.trim()
+    const kmIntervalo = kmLimpio ? num(kmLimpio) : undefined
+    if (kmLimpio && (kmIntervalo === undefined || !Number.isInteger(kmIntervalo) || kmIntervalo <= 0)) {
+      setError('El intervalo en kilómetros debe ser un número entero mayor a 0.')
       return
     }
-    const mesesIntervalo = intervaloMeses ? Number(intervaloMeses) : undefined
-    if (intervaloMeses && (!Number.isFinite(mesesIntervalo) || (mesesIntervalo ?? 0) <= 0)) {
-      setError('El intervalo en meses no es válido.')
+    const mesesLimpio = intervaloMeses.trim()
+    const mesesIntervalo = mesesLimpio ? num(mesesLimpio) : undefined
+    if (mesesLimpio && (mesesIntervalo === undefined || !Number.isInteger(mesesIntervalo) || mesesIntervalo <= 0)) {
+      setError('El intervalo en meses debe ser un número entero mayor a 0.')
+      return
+    }
+    const fechaLimpia = fechaProxima.trim()
+    if (!kmIntervalo && !mesesIntervalo && !fechaLimpia) {
+      setError('Define al menos un criterio: intervalo en km, intervalo en meses o próxima fecha.')
       return
     }
     const base = km ?? 0
     const proxima =
-      fechaProxima || (mesesIntervalo && mesesIntervalo > 0 ? sumarMeses(hoyISO(), mesesIntervalo) : undefined)
+      fechaLimpia || (mesesIntervalo && mesesIntervalo > 0 ? sumarMeses(hoyISO(), mesesIntervalo) : undefined)
     const tarea: TareaMantenimiento = {
       id: nuevaTareaId(),
       nombre: nombreLimpio,
@@ -1067,14 +1147,16 @@ function MantenimientoTab({
 
   const registrarServicio = async (t: TareaMantenimiento) => {
     const f = servicio[t.id] ?? { km: '', fecha: '', costo: '' }
-    const kmNum = f.km.trim() ? Number(String(f.km).replace(/[^\d.-]/g, '')) : undefined
-    if (kmNum !== undefined && (!Number.isFinite(kmNum) || kmNum < 0)) {
-      setError('El kilometraje del servicio no es válido.')
+    const kmLimpio = f.km.trim()
+    const kmNum = kmLimpio ? num(kmLimpio) : undefined
+    if (kmLimpio && (kmNum === undefined || kmNum < 0 || !Number.isInteger(kmNum))) {
+      setError('El kilometraje del servicio debe ser un número entero positivo.')
       return
     }
     const fecha = f.fecha || hoyISO()
-    const costo = f.costo.trim() ? Number(String(f.costo).replace(/[^\d.-]/g, '')) : undefined
-    if (costo !== undefined && (!Number.isFinite(costo) || costo < 0)) {
+    const costoLimpio = f.costo.trim()
+    const costo = costoLimpio ? num(costoLimpio) : undefined
+    if (costoLimpio && (costo === undefined || costo < 0)) {
       setError('El costo del servicio no es válido.')
       return
     }
@@ -1086,7 +1168,6 @@ function MantenimientoTab({
     setError('')
     setOk('')
     try {
-      await registrarServicioMantenimiento(vehiculo.id, t.id, { km: kmNum, fecha })
       if (costo && costo > 0) {
         await crearMovimiento({
           fecha,
@@ -1098,6 +1179,21 @@ function MantenimientoTab({
           cuentaBancoId: cuentaId,
           fuente: 'manual',
         })
+      }
+      try {
+        await registrarServicioMantenimiento(vehiculo.id, t.id, { km: kmNum, fecha })
+      } catch (errServicio) {
+        if (costo && costo > 0) {
+          await recargarCuentas()
+          setError(
+            `Se registró el gasto de ${COD(costo)}, pero no se pudo actualizar la tarea: ${mensajeError(errServicio)}`
+          )
+          return
+        }
+        throw errServicio
+      }
+      if (costo && costo > 0) {
+        await recargarCuentas()
       }
       setServicio((s) => ({ ...s, [t.id]: { km: '', fecha: '', costo: '' } }))
       setOk(`Servicio registrado${costo && costo > 0 ? ` y ${COD(costo)} descontados de la cuenta` : ''}.`)
@@ -1147,7 +1243,7 @@ function MantenimientoTab({
             />
             <Button
               size="sm"
-              disabled={busy || !nuevoKm}
+              disabled={busy || !nuevoKm.trim()}
               onClick={() => void guardarKm()}
               className="h-9 cursor-pointer bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
@@ -1257,6 +1353,7 @@ function MantenimientoTab({
           )}
           {tareas.map((t) => {
             const prog = progresoTarea(t, km)
+            const sobrepaso = kmSobrepasadosTarea(t, km)
             const f = servicio[t.id] ?? { km: '', fecha: '', costo: '' }
             const intervaloTexto = [
               t.intervaloKm ? `cada ${formatoKm(t.intervaloKm)}` : '',
@@ -1274,9 +1371,12 @@ function MantenimientoTab({
                     </div>
                   </div>
                   <button
+                    type="button"
+                    disabled={busy}
                     onClick={() => void borrarTarea(t)}
                     title="Eliminar tarea"
-                    className="cursor-pointer rounded-lg p-1.5 text-mist-600 hover:bg-red-500/10 hover:text-red-300"
+                    aria-label={`Eliminar tarea ${t.nombre}`}
+                    className="cursor-pointer rounded-lg p-1.5 text-mist-600 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
@@ -1295,31 +1395,40 @@ function MantenimientoTab({
                   <>
                     <div className="mt-2 h-2 overflow-hidden rounded-full bg-white/[0.07]">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-300 transition-all"
+                        className={`h-full rounded-full transition-all ${
+                          prog >= 100
+                            ? 'bg-gradient-to-r from-red-500 to-amber-400'
+                            : 'bg-gradient-to-r from-emerald-400 to-teal-300'
+                        }`}
                         style={{ width: `${prog}%` }}
                       />
                     </div>
-                    <div className="mt-1 text-right text-[11px] font-bold text-mist-500">{prog}%</div>
+                    <div className="mt-1 flex items-center justify-end gap-2 text-[11px] font-bold">
+                      {sobrepaso > 0 && (
+                        <span className="text-red-300">+{sobrepaso.toLocaleString('es-CO')} km vencido</span>
+                      )}
+                      <span className={prog >= 100 ? 'text-red-300' : 'text-mist-500'}>{prog}%</span>
+                    </div>
                   </>
                 )}
                 <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
                   <Input
                     cifra
                     value={f.km}
-                    onChange={(e) => setServicio((s) => ({ ...s, [t.id]: { ...f, km: e.target.value } }))}
+                    onChange={(e) => actualizarServicio(t.id, 'km', e.target.value)}
                     placeholder={`Km (${km !== undefined ? Math.round(km).toLocaleString('es-CO') : '?'})`}
                     className="field-dark h-9 text-xs shadow-none"
                   />
                   <Input
                     type="date"
                     value={f.fecha}
-                    onChange={(e) => setServicio((s) => ({ ...s, [t.id]: { ...f, fecha: e.target.value } }))}
+                    onChange={(e) => actualizarServicio(t.id, 'fecha', e.target.value)}
                     className="field-dark h-9 text-xs shadow-none"
                   />
                   <Input
                     cifra
                     value={f.costo}
-                    onChange={(e) => setServicio((s) => ({ ...s, [t.id]: { ...f, costo: e.target.value } }))}
+                    onChange={(e) => actualizarServicio(t.id, 'costo', e.target.value)}
                     placeholder="Costo $"
                     className="field-dark h-9 text-xs shadow-none"
                   />

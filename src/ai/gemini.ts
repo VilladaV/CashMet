@@ -1,10 +1,13 @@
 import type { AccionInterpretada, Interpretacion } from '@/features/chat/engine'
 import { normalizarMoneda } from '@/lib/fx'
+import { parseFechaLocal } from '@/lib/fechas'
 
 const API_KEY = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined)?.trim()
 const MODELO = (import.meta.env.VITE_GEMINI_MODEL as string | undefined)?.trim() || 'gemini-3.1-flash-lite'
 const MODELOS_FALLBACK = ['gemini-3.5-flash-lite', 'gemini-3.8-flash']
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models'
+const GEMINI_TIMEOUT_MS = 20_000
+const GOOGLE_SEARCH_COOLDOWN_MS = 5 * 60 * 1000
 
 export const geminiDisponible = Boolean(API_KEY)
 
@@ -52,7 +55,7 @@ Acciones permitidas y sus params:
 - obtener_vehiculo_completo: {vehiculoId:"..."}
 - renovar_soat: {vehiculoId:"..."} — SOLO para renovar SOAT (seguro obligatorio). El usuario dirá "renueva el SOAT", "renueva el seguro obligatorio", "SOAT vencido".
 - renovar_tecnomecanica: {vehiculoId:"..."} — SOLO para renovar Tecnicomecánica (revisión técnico-mecánica). El usuario dirá "renueva la tecnomecánica", "renueva la TM", "revisión técnico-mecánica vencida".
-- registrar_mantenimiento: {monto:numero, fecha:"YYYY-MM-DD", placa:"ABC123" (opcional), marca:"..." (opcional), linea:"..." (opcional), concepto:"cambio de aceite", km:numero (opcional), cuentaBancoId:"..." (opcional)}
+- registrar_mantenimiento: {monto:numero, fecha:"YYYY-MM-DD", placa:"ABC123" (opcional), marca:"..." (opcional), linea:"..." (opcional), concepto:"cambio de aceite", km:numero (opcional), cuentaBancoId:"..." (opcional), moneda:"USD" (opcional)}
 - ayuda: {}
 
 Reglas:
@@ -89,13 +92,30 @@ export function limpiarJson(texto: string): string {
 }
 
 function fechaValida(v: unknown, fallback: string): string {
-  const s = String(v ?? '').slice(0, 10)
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : fallback
+  const s = String(v ?? '').trim().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && Boolean(parseFechaLocal(s)) ? s : fallback
 }
 
-function num(v: unknown): number {
-  const n = Number(String(v ?? '').replace(/[^\d.-]/g, ''))
-  return Number.isFinite(n) ? Math.round(n) : 0
+function num(v: unknown, permitirDecimales = false): number {
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v) || v < 0) return 0
+    return permitirDecimales ? Math.round(v * 100) / 100 : Math.round(v)
+  }
+  let s = String(v ?? '').trim().replace(/[^\d.,-]/g, '')
+  if (!s) return 0
+  const hasDot = s.includes('.')
+  const hasComma = s.includes(',')
+  if (hasDot && hasComma) {
+    s = s.replace(/\./g, '').replace(',', '.')
+  } else if (hasDot && /^-?\d{1,3}(\.\d{3})+$/.test(s)) {
+    s = s.replace(/\./g, '')
+  } else if (hasComma) {
+    if (/^-?\d{1,3}(,\d{3})+$/.test(s)) s = s.replace(/,/g, '')
+    else s = s.replace(',', '.')
+  }
+  const n = Number(s)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return permitirDecimales ? Math.round(n * 100) / 100 : Math.round(n)
 }
 
 interface TurnoHistorial {
@@ -110,19 +130,30 @@ interface Contexto {
   snapshot?: string
 }
 
+async function fetchConTimeout(url: string, init: RequestInit, timeoutMs = GEMINI_TIMEOUT_MS): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function llamarGemini(body: unknown): Promise<{ res: Response | null; cuotaAgotada: boolean }> {
   if (!API_KEY) return { res: null, cuotaAgotada: false }
   const candidatos = [MODELO, ...MODELOS_FALLBACK].filter((m, i, a) => m && a.indexOf(m) === i)
   let cuotaAgotada = false
   for (const modelo of candidatos) {
     try {
-      const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
+      const r = await fetchConTimeout(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
       if (r.ok) return { res: r, cuotaAgotada: false }
       if (r.status === 429) cuotaAgotada = true
+      if (r.status === 400 || r.status === 401 || r.status === 403) break
     } catch {
       /* intenta siguiente modelo */
     }
@@ -130,17 +161,17 @@ export async function llamarGemini(body: unknown): Promise<{ res: Response | nul
   return { res: null, cuotaAgotada }
 }
 
-// Circuit-breaker de sesión: si Google Search Grounding devuelve 429 (plan gratuito sin cuota de grounding),
-// evita repetir 3 llamadas fallidas por clic y preserva tu cuota por minuto (RPM) para Lucía y Gema.
-let googleSearchSinCuotaEnSesion = false
+// Circuit-breaker con enfriamiento (5 min): si Google Search Grounding devuelve 429,
+// evita quemar el RPM durante el enfriamiento y luego permite reintentar automáticamente.
+let googleSearchCooldownHasta = 0
 
 export function googleSearchBloqueadoEnSesion(): boolean {
-  return googleSearchSinCuotaEnSesion
+  return Date.now() < googleSearchCooldownHasta
 }
 
 /**
  * Llama a Gemini activando Google Search Grounding (datos en vivo de internet).
- * Si el plan de API devuelve 429 por cuota de grounding, recuerda el estado en la sesión
+ * Si el plan de API devuelve 429 por cuota de grounding, activa un enfriamiento temporal
  * para no quemar el límite por minuto (RPM) en cada acción.
  */
 export async function llamarGeminiConBusqueda(
@@ -162,13 +193,13 @@ export async function llamarGeminiConBusqueda(
     }
   }
 
-  if (googleSearchSinCuotaEnSesion) {
+  if (googleSearchBloqueadoEnSesion()) {
     if (!permitirFallbackSinBusqueda) {
       return {
         res: null,
         cuotaAgotada: true,
         usoBusqueda: false,
-        errorBusqueda: 'Google Search Grounding sin cuota en plan actual (usando fuentes alternativas).',
+        errorBusqueda: 'Google Search Grounding en enfriamiento temporal por cuota (usando fuentes alternativas).',
       }
     }
     const sinBusq = await llamarGemini(bodySinTools)
@@ -176,7 +207,7 @@ export async function llamarGeminiConBusqueda(
       res: sinBusq.res,
       cuotaAgotada: sinBusq.cuotaAgotada,
       usoBusqueda: false,
-      errorBusqueda: 'Google Search Grounding sin cuota en plan actual.',
+      errorBusqueda: 'Google Search Grounding en enfriamiento temporal por cuota.',
     }
   }
 
@@ -203,17 +234,18 @@ export async function llamarGeminiConBusqueda(
 
   for (const modelo of candidatosBusqueda) {
     try {
-      const r = await fetch(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
+      const r = await fetchConTimeout(`${ENDPOINT}/${modelo}:generateContent?key=${API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(bodyBusqueda),
       })
       if (r.ok) {
+        googleSearchCooldownHasta = 0
         return { res: r, cuotaAgotada: false, usoBusqueda: true, modeloUsado: modelo }
       }
       if (r.status === 429) {
         cuotaAgotada = true
-        googleSearchSinCuotaEnSesion = true
+        googleSearchCooldownHasta = Date.now() + GOOGLE_SEARCH_COOLDOWN_MS
       }
       let detalle = `HTTP ${r.status}`
       try {
@@ -225,8 +257,8 @@ export async function llamarGeminiConBusqueda(
         /* ignore */
       }
       errores.push(`${modelo} (${detalle})`)
-      // Si ya devolvió 429 por cuota de plan/billing en grounding, no quemamos más modelos
-      if (r.status === 429) break
+      // Si devolvió 429/400/401/403 no quemamos más modelos
+      if (r.status === 429 || r.status === 400 || r.status === 401 || r.status === 403) break
     } catch (err) {
       errores.push(`${modelo} (${err instanceof Error ? err.message : 'red'})`)
     }
@@ -383,10 +415,19 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
   if (!res) throw new Error(cuotaAgotada ? 'gemini_cuota' : 'gemini_no_disponible')
 
   const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    candidates?: Array<{ finishReason?: string; content?: { parts?: Array<{ text?: string }> } }>
   }
-  const texto = (data.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
-  const parsed = JSON.parse(limpiarJson(texto)) as {
+  const candidato = data.candidates?.[0]
+  if (candidato?.finishReason === 'SAFETY' || candidato?.finishReason === 'MAX_TOKENS') {
+    throw new Error(`gemini_finish_${candidato.finishReason.toLowerCase()}`)
+  }
+  const texto = (candidato?.content?.parts ?? []).map((p) => p.text ?? '').join('').trim()
+  if (!texto) throw new Error('gemini_respuesta_vacia')
+  const rawParsed: unknown = JSON.parse(limpiarJson(texto))
+  if (!rawParsed || typeof rawParsed !== 'object' || Array.isArray(rawParsed)) {
+    throw new Error('gemini_json_invalido')
+  }
+  const parsed = rawParsed as {
     mensaje?: string
     respuesta?: string
     acciones?: Array<{ accion?: string; params?: Record<string, unknown> }>
@@ -404,6 +445,8 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     const nombre = String(a.accion ?? '').trim()
     if (!nombre) continue
     const params = { ...(a.params ?? {}) }
+    const monedaNorm = 'moneda' in params ? normalizarMoneda(params.moneda) : undefined
+    const esMonedaExt = Boolean(monedaNorm)
 
     if (nombre === 'registrar_movimiento') {
       const tipo = params.tipo === 'ingreso' ? 'ingreso' : 'gasto'
@@ -414,9 +457,9 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
           tipo,
           fecha: fechaValida(params.fecha, contexto.hoy),
           concepto: String(params.concepto ?? '').trim() || 'Movimiento',
-          monto: num(params.monto),
+          monto: num(params.monto, esMonedaExt),
           categoria: String(params.categoria ?? '').trim() || (tipo === 'ingreso' ? 'Ingresos' : 'Otros'),
-          moneda: normalizarMoneda(params.moneda),
+          moneda: monedaNorm,
         },
       })
       continue
@@ -425,10 +468,10 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     if (nombre === 'crear_evento') params.fecha = fechaValida(params.fecha, contexto.hoy)
     if (nombre === 'pago_deuda' || nombre === 'pago_nomina') {
       params.fecha = fechaValida(params.fecha, contexto.hoy)
-      params.monto = num(params.monto)
+      params.monto = num(params.monto, esMonedaExt)
     }
     if (nombre === 'transferir') {
-      params.monto = num(params.monto)
+      params.monto = num(params.monto, esMonedaExt)
       params.fecha = fechaValida(params.fecha, contexto.hoy)
       params.cuentaOrigenId = String(
         params.cuentaOrigenId ?? params.cuentaOrigen ?? params.origenId ?? params.origen ?? ''
@@ -443,7 +486,7 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
       params.fecha = fechaValida(params.fecha, contexto.hoy)
     }
     if (nombre === 'crear_recurrente') {
-      params.monto = num(params.monto)
+      params.monto = num(params.monto, esMonedaExt)
       params.valor = params.monto
     }
     if (nombre === 'resumen_mes') {
@@ -468,7 +511,7 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     }
 
     if (nombre === 'registrar_mantenimiento') {
-      params.monto = num(params.monto)
+      params.monto = num(params.monto, esMonedaExt)
       params.fecha = fechaValida(params.fecha, contexto.hoy)
       params.placa = String(params.placa ?? '').trim().toUpperCase()
       params.marca = String(params.marca ?? '').trim()
@@ -483,8 +526,7 @@ export async function interpretarConGemini(mensaje: string, contexto: Contexto):
     }
 
     if ('moneda' in params) {
-      const m = normalizarMoneda(params.moneda)
-      if (m) params.moneda = m
+      if (monedaNorm) params.moneda = monedaNorm
       else delete params.moneda
     }
 

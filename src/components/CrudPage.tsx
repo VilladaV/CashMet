@@ -12,10 +12,12 @@ export interface CampoForm {
   opciones?: { value: string; label: string }[]
   required?: boolean
   span2?: boolean
+  disabled?: (vals: Record<string, string>) => boolean
 }
 
 interface Props<T extends { id: string }> {
   titulo: string
+  tituloPlural?: string
   descripcion?: string
   campos: CampoForm[]
   vacio: Record<string, string>
@@ -27,35 +29,82 @@ interface Props<T extends { id: string }> {
   aForm: (item: T) => Record<string, string>
   renderItem: (item: T) => React.ReactNode
   extra?: React.ReactNode
+  refreshKey?: number
+  onMutate?: () => void | Promise<void>
+}
+
+function pluralizarTitulo(titulo: string): string {
+  const t = titulo.trim()
+  if (!t) return 'Registros'
+  if (/[aeiouáéíóú]$/i.test(t)) return `${t}s`
+  return `${t}es`
 }
 
 export default function CrudPage<T extends { id: string }>(props: Props<T>) {
-  const { titulo, descripcion, campos, vacio, listar, crear, actualizar, eliminar, transformar, aForm, renderItem, extra } = props
+  const {
+    titulo,
+    tituloPlural,
+    descripcion,
+    campos,
+    vacio,
+    listar,
+    crear,
+    actualizar,
+    eliminar,
+    transformar,
+    aForm,
+    renderItem,
+    extra,
+    refreshKey,
+    onMutate,
+  } = props
   const [items, setItems] = useState<T[]>([])
-  const [form, setForm] = useState<Record<string, string>>(vacio)
+  const [loading, setLoading] = useState(true)
+  const [form, setForm] = useState<Record<string, string>>({})
   const [editId, setEditId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
 
-  const cargar = useCallback(() => {
-    listar()
-      .then(setItems)
-      .catch(() => setError('No se pudieron cargar los datos.'))
+  const plural = tituloPlural?.trim() || pluralizarTitulo(titulo)
+
+  const cargar = useCallback(async () => {
+    setError('')
+    try {
+      const data = await listar()
+      setItems(data)
+    } catch {
+      setError('No se pudieron cargar los datos.')
+    } finally {
+      setLoading(false)
+    }
   }, [listar])
 
   useEffect(() => {
-    cargar()
-  }, [cargar])
+    let cancelado = false
+    void Promise.resolve().then(() => {
+      if (!cancelado) void cargar()
+    })
+    return () => {
+      cancelado = true
+    }
+  }, [cargar, refreshKey])
 
-  const formEfectivo: Record<string, string> = editId
-    ? form
-    : { ...vacio, ...Object.fromEntries(Object.entries(form).filter(([, v]) => v !== '')) }
+  const formEfectivo: Record<string, string> = editId ? form : { ...vacio, ...form }
 
-  const submit = async () => {
+  const actualizarCampo = (key: string, valor: string) => {
+    setForm((prev) => ({ ...(editId ? prev : { ...vacio, ...prev }), [key]: valor }))
+  }
+
+  const submit = async (e?: React.FormEvent) => {
+    e?.preventDefault()
+    if (busy) return
     setError('')
     setMsg('')
-    const faltante = campos.find((c) => c.required && !String(formEfectivo[c.key] ?? '').trim())
+    const faltante = campos.find(
+      (c) => c.required && !c.disabled?.(formEfectivo) && !String(formEfectivo[c.key] ?? '').trim()
+    )
     if (faltante) {
       setError(`Falta diligenciar: ${faltante.label}`)
       return
@@ -70,9 +119,10 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
         await crear(documento)
         setMsg('Registro creado exitosamente.')
       }
-      setForm(vacio)
+      setForm({})
       setEditId(null)
-      cargar()
+      await cargar()
+      await onMutate?.()
     } catch (e: any) {
       setError(e?.message || 'No se pudo guardar la información.')
     } finally {
@@ -81,19 +131,31 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
   }
 
   const editar = (item: T) => {
+    setMsg('')
+    setError('')
     setForm({ ...vacio, ...aForm(item) })
     setEditId(item.id)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const borrar = async (item: T) => {
-    if (!eliminar) return
+    if (!eliminar || deletingId) return
     if (!confirm('¿Deseas eliminar este registro de la base de datos?')) return
+    setDeletingId(item.id)
+    setMsg('')
+    setError('')
     try {
       await eliminar(item.id)
-      cargar()
+      if (item.id === editId) {
+        setEditId(null)
+        setForm({})
+      }
+      await cargar()
+      await onMutate?.()
     } catch {
       setError('No se pudo eliminar el registro.')
+    } finally {
+      setDeletingId(null)
     }
   }
 
@@ -117,81 +179,91 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
             </span>
           )}
         </CardHeader>
-        <CardContent className="space-y-4 p-4 text-xs sm:p-6">
-          {descripcion && <p className="leading-relaxed text-mist-500">{descripcion}</p>}
+        <CardContent className="p-4 text-xs sm:p-6">
+          <form onSubmit={submit} className="space-y-4">
+            {descripcion && <p className="leading-relaxed text-mist-500">{descripcion}</p>}
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {campos.map((c) => (
-              <label key={c.key} className={`${c.span2 ? 'sm:col-span-2' : ''} flex flex-col gap-1.5`}>
-                <span className="font-bold text-mist-300">
-                  {c.label} {c.required && <span className="text-red-300">*</span>}
-                </span>
-                {c.tipo === 'select' ? (
-                  <select
-                    className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none"
-                    value={formEfectivo[c.key] ?? ''}
-                    onChange={(e) => setForm({ ...formEfectivo, [c.key]: e.target.value })}
-                  >
-                    <option value="">Seleccionar...</option>
-                    {c.opciones?.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <Input
-                    type={c.tipo === 'number' ? 'number' : c.tipo === 'date' ? 'date' : 'text'}
-                    cifra={c.tipo === 'cifra'}
-                    value={formEfectivo[c.key] ?? ''}
-                    onChange={(e) => setForm({ ...formEfectivo, [c.key]: e.target.value })}
-                    className="field-dark h-10 text-xs shadow-none"
-                  />
-                )}
-              </label>
-            ))}
-          </div>
-
-          {error && (
-            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 font-medium text-red-300">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              <span>{error}</span>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {campos.map((c) => {
+                const deshabilitado = Boolean(c.disabled?.(formEfectivo))
+                return (
+                  <label key={c.key} className={`${c.span2 ? 'sm:col-span-2' : ''} flex flex-col gap-1.5`}>
+                    <span className="font-bold text-mist-300">
+                      {c.label} {c.required && !deshabilitado && <span className="text-red-300">*</span>}
+                    </span>
+                    {c.tipo === 'select' ? (
+                      <select
+                        disabled={deshabilitado}
+                        className="field-dark h-10 rounded-xl px-2.5 text-xs font-medium outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                        value={formEfectivo[c.key] ?? ''}
+                        onChange={(e) => actualizarCampo(c.key, e.target.value)}
+                      >
+                        <option value="">Seleccionar...</option>
+                        {c.opciones?.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <Input
+                        disabled={deshabilitado}
+                        type={c.tipo === 'number' ? 'number' : c.tipo === 'date' ? 'date' : 'text'}
+                        cifra={c.tipo === 'cifra'}
+                        value={formEfectivo[c.key] ?? ''}
+                        onChange={(e) => actualizarCampo(c.key, e.target.value)}
+                        className="field-dark h-10 text-xs shadow-none"
+                      />
+                    )}
+                  </label>
+                )
+              })}
             </div>
-          )}
 
-          {msg && (
-            <div className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-2.5 font-bold text-emerald-200">
-              <Check className="h-4 w-4 shrink-0" />
-              <span>{msg}</span>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 border-t border-white/[0.06] pt-3">
-            <Button
-              size="sm"
-              disabled={busy}
-              onClick={submit}
-              className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
-            >
-              <span>{busy ? 'Guardando...' : editId ? 'Actualizar registro' : `Guardar ${titulo}`}</span>
-            </Button>
-            {editId && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => {
-                  setEditId(null)
-                  setForm(vacio)
-                  setError('')
-                  setMsg('')
-                }}
-                className="h-9 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white"
+            {error && (
+              <div
+                role="alert"
+                className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 font-medium text-red-300"
               >
-                Cancelar edición
-              </Button>
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>{error}</span>
+              </div>
             )}
-          </div>
+
+            {msg && (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-2.5 font-bold text-emerald-200">
+                <Check className="h-4 w-4 shrink-0" />
+                <span>{msg}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 border-t border-white/[0.06] pt-3">
+              <Button
+                type="submit"
+                size="sm"
+                disabled={busy}
+                className="h-9 cursor-pointer gap-1.5 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
+              >
+                <span>{busy ? 'Guardando...' : editId ? 'Actualizar registro' : `Guardar ${titulo}`}</span>
+              </Button>
+              {editId && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => {
+                    setEditId(null)
+                    setForm({})
+                    setError('')
+                    setMsg('')
+                  }}
+                  className="h-9 cursor-pointer border-white/10 bg-transparent text-xs text-mist-300 hover:bg-white/5 hover:text-white"
+                >
+                  Cancelar edición
+                </Button>
+              )}
+            </div>
+          </form>
         </CardContent>
       </Card>
 
@@ -199,30 +271,38 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
 
       <Card className="glass-card overflow-hidden border-0">
         <CardHeader className="flex flex-row items-center justify-between border-b border-white/[0.06] px-4 py-3.5 sm:px-6">
-          <CardTitle className="text-sm font-extrabold text-white sm:text-base">
-            {titulo}s registrados
-          </CardTitle>
+          <CardTitle className="text-sm font-extrabold text-white sm:text-base">{plural} registrados</CardTitle>
           <span className="text-[11px] font-semibold text-mist-500">
             {items.length} {items.length === 1 ? 'registro' : 'registros'}
           </span>
         </CardHeader>
         <CardContent className="p-0 text-xs">
-          {items.length === 0 ? (
+          {loading ? (
+            <div className="space-y-2 p-6">
+              <div className="animate-shimmer h-10 rounded-xl" />
+              <div className="animate-shimmer h-10 rounded-xl" />
+            </div>
+          ) : items.length === 0 ? (
             <div className="space-y-1 p-8 text-center">
-              <p className="font-bold text-mist-300">No hay {titulo.toLowerCase()}s registrados todavía</p>
+              <p className="font-bold text-mist-300">No hay {plural.toLowerCase()} registrados todavía</p>
               <p className="text-[11px] text-mist-600">Diligencia el formulario superior para añadir el primero.</p>
             </div>
           ) : (
             <ul className="divide-y divide-white/[0.05]">
               {items.map((it) => (
-                <li key={it.id} className="flex items-center justify-between gap-3 p-3 transition-colors hover:bg-white/[0.03] sm:px-6">
+                <li
+                  key={it.id}
+                  className="flex items-center justify-between gap-3 p-3 transition-colors hover:bg-white/[0.03] sm:px-6"
+                >
                   <div className="min-w-0 flex-1 text-mist-100">{renderItem(it)}</div>
                   <div className="flex shrink-0 items-center gap-1">
                     {actualizar && (
                       <Button
                         size="sm"
                         variant="ghost"
+                        disabled={deletingId === it.id}
                         onClick={() => editar(it)}
+                        aria-label={`Editar ${titulo.toLowerCase()}`}
                         className="h-8 cursor-pointer gap-1 text-xs text-mist-500 hover:bg-white/[0.06] hover:text-white"
                       >
                         <Edit3 className="h-3.5 w-3.5" />
@@ -233,11 +313,13 @@ export default function CrudPage<T extends { id: string }>(props: Props<T>) {
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => borrar(it)}
+                        disabled={deletingId !== null}
+                        onClick={() => void borrar(it)}
+                        aria-label={`Eliminar ${titulo.toLowerCase()}`}
                         className="h-8 cursor-pointer gap-1 text-xs text-mist-500 hover:bg-red-500/10 hover:text-red-300"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
-                        <span className="hidden sm:inline">Eliminar</span>
+                        <span className="hidden sm:inline">{deletingId === it.id ? 'Eliminando...' : 'Eliminar'}</span>
                       </Button>
                     )}
                   </div>

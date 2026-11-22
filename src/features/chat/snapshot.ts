@@ -7,6 +7,8 @@ import { listarPropiedades } from '@/lib/firebase/propiedadesRepo'
 import { listarNomina, totalMensualNomina } from '@/lib/firebase/nominaRepo'
 import { listarEventos } from '@/lib/firebase/calendarioRepo'
 import { lineaTasasContexto } from '@/lib/fx'
+import { hoyISO } from '@/lib/fechas'
+import { geminiDisponible } from '@/ai/gemini'
 
 const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
 
@@ -26,13 +28,7 @@ export function invalidarSnapshotFinanciero() {
 }
 
 function mesActual(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-function hoyISO(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return hoyISO().slice(0, 7)
 }
 
 function val<T>(r: PromiseSettledResult<T>): T | undefined {
@@ -40,9 +36,11 @@ function val<T>(r: PromiseSettledResult<T>): T | undefined {
 }
 
 export async function construirSnapshotFinanciero(): Promise<string> {
+  if (!geminiDisponible) return ''
   if (cache && Date.now() - cache.ts < VIGENCIA_MS) return cache.texto
 
-  const [cuentasR, movsR, deudasR, recR, impR, vehR, propR, nomR, evR] = await Promise.allSettled([
+  const hoyStr = hoyISO()
+  const [cuentasR, movsR, deudasR, recR, impR, vehR, propR, nomR, evR, tasasR] = await Promise.allSettled([
     listarCuentasBanco(),
     listarTodosLosMovimientos(400),
     listarDeudas(),
@@ -51,22 +49,23 @@ export async function construirSnapshotFinanciero(): Promise<string> {
     listarVehiculos(),
     listarPropiedades(),
     listarNomina(),
-    listarEventos(80),
+    listarEventos(80, { incluirPasados: false }),
+    lineaTasasContexto(),
   ])
 
   const cuentas = val(cuentasR) ?? []
-  const movs = val(movsR) ?? []
+  const movs = (val(movsR) ?? []).filter((m) => m.estado !== 'anulado')
   const deudas = (val(deudasR) ?? []).filter((d) => d.estado === 'activa')
   const recurrentes = (val(recR) ?? []).filter((r) => r.activo !== false)
   const impuestos = (val(impR) ?? []).filter((i) => !i.pagado)
   const vehiculos = val(vehR) ?? []
   const propiedades = val(propR) ?? []
   const nomina = (val(nomR) ?? []).filter((n) => n.activo !== false)
-  const eventos = (val(evR) ?? []).filter((e) => String(e.fechaInicio) >= hoyISO())
+  const eventos = (val(evR) ?? []).filter((e) => String(e.fechaInicio) >= hoyStr)
+  const tasasLinea = val(tasasR) ?? null
 
-  const lineas: string[] = [`Contexto financiero actual (datos en vivo de su base, ${hoyISO()}):`]
+  const lineas: string[] = [`Contexto financiero actual (datos en vivo de su base, ${hoyStr}):`]
 
-  const tasasLinea = await lineaTasasContexto()
   if (tasasLinea) lineas.push('', tasasLinea)
 
   const totalCuentas = cuentas.reduce((s, c) => s + (Number(c.saldoActual) || 0), 0)
@@ -115,9 +114,11 @@ export async function construirSnapshotFinanciero(): Promise<string> {
   if (deudas.length) {
     const totalDeuda = deudas.reduce((s, d) => s + (Number(d.saldoPendiente) || 0), 0)
     const cuotaTotal = deudas.reduce((s, d) => s + (Number(d.cuotaMensual) || 0), 0)
+    const hoyDia = new Date().getDate()
+    const distanciaDia = (dia: number) => ((Math.round(dia) - hoyDia) % 31 + 31) % 31
     const proxima = [...deudas]
-      .filter((d) => d.fechaVencimientoCuota)
-      .sort((a, b) => (a.fechaVencimientoCuota ?? 99) - (b.fechaVencimientoCuota ?? 99))[0]
+      .filter((d) => d.fechaVencimientoCuota && d.fechaVencimientoCuota >= 1)
+      .sort((a, b) => distanciaDia(a.fechaVencimientoCuota ?? 31) - distanciaDia(b.fechaVencimientoCuota ?? 31))[0]
     lineas.push('', `DEUDAS ACTIVAS (${deudas.length})`)
     lineas.push(`- Saldo pendiente total: ${COD(totalDeuda)}`)
     if (cuotaTotal > 0) lineas.push(`- Cuota mensual total: ${COD(cuotaTotal)}`)
@@ -125,18 +126,20 @@ export async function construirSnapshotFinanciero(): Promise<string> {
     for (const d of deudas.slice(0, 6)) {
       lineas.push(`  · ${d.nombre} (${d.tipo}): saldo ${COD(Number(d.saldoPendiente) || 0)}`)
     }
+    if (deudas.length > 6) lineas.push(`  … y ${deudas.length - 6} más`)
   }
 
   if (recurrentes.length) {
     const mensual = recurrentes.reduce(
       (s, r) => s + (Number(r.valor) || 0) * (FACTOR_MENSUAL[r.periodicidad] ?? 1),
-      0,
+      0
     )
     lineas.push('', `GASTOS RECURRENTES ACTIVOS (${recurrentes.length})`)
     lineas.push(`- Equivalente mensual aproximado: ${COD(mensual)}`)
     for (const r of recurrentes.slice(0, 6)) {
       lineas.push(`  · ${r.concepto} ${COD(Number(r.valor) || 0)} (${r.periodicidad})`)
     }
+    if (recurrentes.length > 6) lineas.push(`  … y ${recurrentes.length - 6} más`)
   }
 
   if (impuestos.length) {
@@ -175,7 +178,9 @@ export async function construirSnapshotFinanciero(): Promise<string> {
       if (v.soat?.fechaVencimiento) extras.push(`SOAT vence ${v.soat.fechaVencimiento}`)
       if (v.tecnicomecanica?.fechaVencimiento) extras.push(`TM vence ${v.tecnicomecanica.fechaVencimiento}`)
       if (v.seguroTodoRiesgo?.fechaVencimiento) extras.push(`STR vence ${v.seguroTodoRiesgo.fechaVencimiento}`)
-      lineas.push(`  · ${v.marca} ${v.linea}${v.modelo ? ` ${v.modelo}` : ''}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''} [id: ${v.id}]`)
+      lineas.push(
+        `  · ${v.marca} ${v.linea}${v.modelo ? ` ${v.modelo}` : ''}${v.placa ? ` (${v.placa})` : ''}${extras.length ? ` — ${extras.join('; ')}` : ''} [id: ${v.id}]`
+      )
     }
     lineas.push(`  … (usa la tool "obtener_vehiculo_completo" con el id para detalle completo)`)
   }
@@ -183,12 +188,13 @@ export async function construirSnapshotFinanciero(): Promise<string> {
   if (propiedades.length) {
     const valorProp = propiedades.reduce(
       (s, p) => s + (Number(p.valorPatrimonial) || Number(p.valorComercialEstimado) || 0),
-      0,
+      0
     )
-    lineas.push(`- Propiedades: ${propiedades.length}${valorProp ? ` (valor ~${COD(valorProp)})` : ''}`)
+    lineas.push('', `PROPIEDADES (${propiedades.length})${valorProp ? ` · valor ~${COD(valorProp)}` : ''}`)
     for (const p of propiedades.slice(0, 4)) {
       lineas.push(`  · ${p.nombre} (${p.tipo})`)
     }
+    if (propiedades.length > 4) lineas.push(`  … y ${propiedades.length - 4} más`)
   }
 
   if (nomina.length) {
@@ -215,9 +221,12 @@ export async function construirSnapshotFinanciero(): Promise<string> {
       .slice(0, 6)
     lineas.push('', 'PRÓXIMOS VENCIMIENTOS / EVENTOS')
     for (const e of proxEv) lineas.push(`- ${e.fechaInicio}: ${e.titulo}`)
+    if (eventos.length > 6) lineas.push(`  … y ${eventos.length - 6} más`)
   }
 
   const texto = lineas.join('\n')
-  cache = { texto, ts: Date.now() }
+  if (cuentasR.status === 'fulfilled' && movsR.status === 'fulfilled') {
+    cache = { texto, ts: Date.now() }
+  }
   return texto
 }

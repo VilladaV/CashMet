@@ -9,6 +9,7 @@ import { construirSnapshotFinanciero, invalidarSnapshotFinanciero } from './snap
 import ConfirmacionCard, { type MovimientoConfirmado } from './ConfirmacionCard'
 import TextoEnriquecido from './TextoEnriquecido'
 import type { BorradorMovimiento } from '@/ai/parser/nl'
+import { auth } from '@/lib/firebase/config'
 import {
   crearMovimiento,
   listarCuentasBanco,
@@ -40,7 +41,7 @@ import { listarNomina, registrarPagoNomina, totalMensualNomina } from '@/lib/fir
 import { crearEvento, construirEventos, guardarEventos } from '@/lib/firebase/calendarioRepo'
 import { estadoGoogleCalendar, sincronizarPendientes } from '@/lib/google/calendar'
 import { leerResumenPiloto, marcarPilotoAnunciado } from '@/lib/piloto'
-import { lineaTasasContexto } from '@/lib/fx'
+import { convertirACOP, lineaTasasContexto, normalizarMoneda } from '@/lib/fx'
 import { CashMetEmblem } from '@/components/brand/CashMetLogo'
 import { Send, CheckCircle2, AlertCircle, User, Trash2, ArrowLeftRight, BarChart3 } from 'lucide-react'
 
@@ -51,11 +52,12 @@ interface Msg {
   borrador?: BorradorMovimiento
   estado?: 'pendiente' | 'guardado' | 'cancelado'
   timestamp?: string
+  sesionId?: string
 }
 
-const COD = (n: number) => `$${n.toLocaleString('es-CO')} COP`
+const COD = (n: number) => `$${Math.round(n).toLocaleString('es-CO')} COP`
 
-const normalizarNombreCuenta = (s: string) =>
+const normalizarNombre = (s: string) =>
   s
     .toLowerCase()
     .normalize('NFD')
@@ -66,7 +68,7 @@ type CatRecurrente = 'hogar' | 'transporte' | 'salud' | 'educacion' | 'servicios
 type PerRecurrente = 'mensual' | 'bimestral' | 'trimestral' | 'semestral' | 'anual'
 
 const normalizarCategoria = (c: string): CatRecurrente => {
-  const t = c.toLowerCase()
+  const t = normalizarNombre(c)
   if (t.includes('hogar') || t.includes('casa') || t.includes('mercado')) return 'hogar'
   if (t.includes('transp') || t.includes('gasolina') || t.includes('carro') || t.includes('moto')) return 'transporte'
   if (t.includes('salud') || t.includes('medic')) return 'salud'
@@ -77,11 +79,11 @@ const normalizarCategoria = (c: string): CatRecurrente => {
 }
 
 const normalizarPeriodicidad = (p: string): PerRecurrente => {
-  const t = p.toLowerCase()
+  const t = normalizarNombre(p)
   if (t.startsWith('bim')) return 'bimestral'
   if (t.startsWith('tri')) return 'trimestral'
   if (t.startsWith('sem')) return 'semestral'
-  if (t.startsWith('an') || t.includes('año')) return 'anual'
+  if (t.startsWith('an') || t.includes('ano')) return 'anual'
   return 'mensual'
 }
 
@@ -93,17 +95,37 @@ interface PulsoMes {
 
 const SALUDO = `👋 ¡Hola! Soy ${NOMBRE_IA}, tu contadora. Cuéntame cómo te fue con la plata y yo te la organizo. 💛`
 
-const CLAVE_CHAT = 'cashmet_chat_v1'
+const TEXTO_AYUDA =
+  `¡Hola! Soy ${NOMBRE_IA}, tu contadora personal. Esto es lo que puedo hacer por ti:\n\n` +
+  `• Registrar gastos e ingresos ("gasté 50.000 en mercado", "me pagaron 3.000 dólares")\n` +
+  `• Mover plata entre tus cuentas ("pasa 500.000 de Bancolombia a Nequi")\n` +
+  `• Consultar saldos, movimientos y resumen del mes\n` +
+  `• Convertir divisas con la tasa del día ("¿cuánto son 100 dólares en pesos?")\n` +
+  `• Pagar deudas, impuestos y nómina\n` +
+  `• Crear gastos recurrentes, eventos de calendario, vehículos y mantenimientos`
+
+// Identificador único de esta pestaña/sesión SPA: permite conservar borradores
+// pendientes al cambiar de pestaña sin dejar borradores colgados tras recargar.
+const SESION_SPA_ID = `s-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+const claveChatUsuario = (): string => {
+  const uid = auth.currentUser?.uid
+  return uid ? `cashmet_chat_v1_${uid}` : 'cashmet_chat_v1_anon'
+}
 
 const saludoInicial = (): Msg => ({ id: 0, rol: 'ia', texto: SALUDO, timestamp: 'Ahora' })
 
 const cargarHistorial = (): Msg[] => {
   try {
-    const raw = localStorage.getItem(CLAVE_CHAT)
+    const raw = localStorage.getItem(claveChatUsuario())
     if (raw) {
       const parsed = JSON.parse(raw) as Msg[]
       if (Array.isArray(parsed) && parsed.length) {
-        return parsed.map((m) => (m.estado === 'pendiente' ? { ...m, estado: 'cancelado' as const } : m))
+        return parsed.map((m) =>
+          m.estado === 'pendiente' && m.sesionId !== SESION_SPA_ID
+            ? { ...m, estado: 'cancelado' as const }
+            : m
+        )
       }
     }
   } catch {
@@ -116,17 +138,25 @@ export default function ChatPage() {
   const [msg, setMsg] = useState('')
   const [msgs, setMsgs] = useState<Msg[]>(cargarHistorial)
   const [cuentas, setCuentas] = useState<CuentaBanco[]>([])
-  const [guardandoId, setGuardandoId] = useState<number | null>(null)
+  const [guardandoIds, setGuardandoIds] = useState<Set<number>>(() => new Set())
   const [pensando, setPensando] = useState(false)
   const [error, setError] = useState('')
   const [tasas, setTasas] = useState<string[]>([])
+  const [estadoTasas, setEstadoTasas] = useState<'cargando' | 'listo' | 'vacio'>('cargando')
   const [pulso, setPulso] = useState<PulsoMes[]>([])
+  const [estadoPulso, setEstadoPulso] = useState<'cargando' | 'listo' | 'vacio'>('cargando')
+
+  const enProcesoRef = useRef<Set<number>>(new Set())
+  const epochRef = useRef(0)
+  const idRef = useRef(1)
+  const bottomRef = useRef<HTMLDivElement>(null)
 
   const cargarPulso = useCallback(async () => {
     try {
       const todos = await listarTodosLosMovimientos(400)
       const ahora = new Date()
       const meses: PulsoMes[] = []
+      let conDatos = false
       for (let i = 5; i >= 0; i--) {
         const d = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1)
         const clave = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -138,6 +168,7 @@ export default function ChatPage() {
           if (m.tipo === 'ingreso') ingresos += v
           else if (m.tipo !== 'transferencia') gastos += v
         }
+        if (ingresos > 0 || gastos > 0) conDatos = true
         meses.push({
           etiqueta: d.toLocaleDateString('es-CO', { month: 'short' }).replace('.', ''),
           ingresos,
@@ -145,12 +176,11 @@ export default function ChatPage() {
         })
       }
       setPulso(meses)
+      setEstadoPulso(conDatos ? 'listo' : 'vacio')
     } catch {
-      /* sin pulso disponible */
+      setEstadoPulso('vacio')
     }
   }, [])
-  const idRef = useRef(1)
-  const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     idRef.current = msgs.reduce((mx, m) => Math.max(mx, m.id), 0) + 1
@@ -159,13 +189,17 @@ export default function ChatPage() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(CLAVE_CHAT, JSON.stringify(msgs.slice(-60)))
+      localStorage.setItem(claveChatUsuario(), JSON.stringify(msgs.slice(-60)))
     } catch {
       // almacenamiento no disponible
     }
   }, [msgs])
 
   const limpiarChat = () => {
+    if (pensando) return
+    epochRef.current += 1
+    enProcesoRef.current.clear()
+    setGuardandoIds(new Set())
     idRef.current = 1
     setMsgs([saludoInicial()])
     setError('')
@@ -177,9 +211,11 @@ export default function ChatPage() {
       .catch(() => setError('No se pudieron cargar las cuentas bancarias.'))
     lineaTasasContexto()
       .then((t) => {
-        if (t) setTasas(t.split('\n').filter((l) => l.startsWith('- ')))
+        const lista = t ? t.split('\n').filter((l) => l.startsWith('- ')) : []
+        setTasas(lista)
+        setEstadoTasas(lista.length ? 'listo' : 'vacio')
       })
-      .catch(() => {})
+      .catch(() => setEstadoTasas('vacio'))
     void cargarPulso()
   }, [cargarPulso])
 
@@ -190,6 +226,7 @@ export default function ChatPage() {
   useEffect(() => {
     let cancelado = false
     let intentos = 0
+    let timerId: number | undefined
 
     const revisar = () => {
       if (cancelado) return
@@ -208,31 +245,71 @@ export default function ChatPage() {
           '',
           avisos.length ? 'Revisa esos pendientes cuando puedas. 💛' : 'Así vas encaminado. 💪',
         ].join('\n')
-        setMsgs((prev) => [...prev, { id: Date.now(), rol: 'ia', texto, timestamp: tiempo }])
+        const id = idRef.current++
+        setMsgs((prev) => [...prev, { id, rol: 'ia', texto, timestamp: tiempo }])
         return
       }
 
       if ((!r || r.fecha !== hoy) && intentos < 15) {
         intentos++
-        window.setTimeout(revisar, 700)
+        timerId = window.setTimeout(revisar, 700)
       }
     }
 
     revisar()
     return () => {
       cancelado = true
+      if (timerId !== undefined) window.clearTimeout(timerId)
     }
   }, [])
 
   const push = (m: Omit<Msg, 'id'>) => {
     const id = idRef.current++
     const tiempo = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
-    setMsgs((prev) => [...prev, { ...m, id, timestamp: tiempo }])
+    setMsgs((prev) => [...prev, { ...m, id, timestamp: tiempo, sesionId: m.borrador ? SESION_SPA_ID : m.sesionId }])
     return id
   }
 
-  const ejecutarAccion = async (op: AccionInterpretada) => {
+  const ejecutarAccion = async (op: AccionInterpretada): Promise<boolean> => {
     const p = op.params ?? {}
+
+    if (op.nombre === 'ayuda') {
+      push({ rol: 'ia', texto: TEXTO_AYUDA })
+      return true
+    }
+
+    if (op.nombre === 'consulta_conversion') {
+      const monto = Number(p.monto)
+      const moneda = normalizarMoneda(p.moneda) ?? String(p.moneda ?? '').trim().toUpperCase()
+      if (!moneda || !Number.isFinite(monto) || monto <= 0) {
+        push({
+          rol: 'ia',
+          texto: 'Dime el monto y la moneda que quieres convertir. Por ejemplo: "¿cuánto son 100 dólares en pesos?".',
+        })
+        return true
+      }
+      try {
+        const conv = await convertirACOP(monto, moneda)
+        if (!conv) {
+          push({
+            rol: 'ia',
+            texto: `No pude obtener la tasa de cambio para ${moneda} en este momento. Intenta de nuevo en unos minutos.`,
+          })
+          return true
+        }
+        const tasaTxt = conv.tasa.toLocaleString('es-CO', { maximumFractionDigits: 2 })
+        const fechaTxt = conv.fecha ? ` (${conv.fecha})` : ''
+        push({
+          rol: 'ia',
+          texto:
+            `💱 ${monto.toLocaleString('es-CO')} ${conv.moneda} equivalen a **${COD(conv.montoCOP)}**.\n\n` +
+            `• Tasa usada: 1 ${conv.moneda} = $${tasaTxt} COP${fechaTxt}`,
+        })
+      } catch {
+        push({ rol: 'ia', texto: 'No pude consultar las tasas de cambio en este momento.' })
+      }
+      return true
+    }
 
     if (op.nombre === 'consulta_saldos') {
       try {
@@ -249,7 +326,7 @@ export default function ChatPage() {
       } catch {
         push({ rol: 'ia', texto: 'No pude consultar los saldos en este momento.' })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'transferir') {
@@ -264,13 +341,13 @@ export default function ChatPage() {
       }
       const resolver = (valor: unknown): CuentaBanco | undefined => {
         const raw = String(valor ?? '').trim()
-        const v = normalizarNombreCuenta(raw)
+        const v = normalizarNombre(raw)
         if (!v) return undefined
         return (
           listaCuentas.find((c) => c.id === raw) ??
-          listaCuentas.find((c) => normalizarNombreCuenta(c.nombre) === v) ??
+          listaCuentas.find((c) => normalizarNombre(c.nombre) === v) ??
           listaCuentas.find((c) => {
-            const n = normalizarNombreCuenta(c.nombre)
+            const n = normalizarNombre(c.nombre)
             return n.includes(v) || v.includes(n)
           })
         )
@@ -280,7 +357,7 @@ export default function ChatPage() {
 
       if (!monto || monto <= 0) {
         push({ rol: 'ia', texto: '¿De cuánto es la transferencia? Dime el monto y de qué cuenta a cuál la paso.' })
-        return
+        return true
       }
       if (!origen || !destino) {
         const lista = listaCuentas.length
@@ -294,7 +371,7 @@ export default function ChatPage() {
               ? `Dime por ejemplo: "pasa 200.000 de ${listaCuentas[0].nombre} a ${listaCuentas[1].nombre}".`
               : 'Ve a la pestaña "Cuentas" y agrega al menos dos para poder transferir.'),
         })
-        return
+        return true
       }
 
       try {
@@ -313,7 +390,7 @@ export default function ChatPage() {
             saldo_insuficiente: `La cuenta "${origen.nombre}" tiene ${COD(r.saldoDisponible ?? 0)}, no alcanza para mover ${COD(monto)}.`,
           }
           push({ rol: 'ia', texto: mensajes[r.error] ?? 'No pude hacer la transferencia.' })
-          return
+          return true
         }
         invalidarSnapshotFinanciero()
         setCuentas((prev) =>
@@ -331,24 +408,49 @@ export default function ChatPage() {
         console.error('Error al transferir entre cuentas:', e)
         push({ rol: 'ia', texto: `No pude hacer la transferencia: ${e?.message ?? 'error'}` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'busqueda_movimientos') {
+      const qRaw = String(p.q ?? p.texto ?? p.concepto ?? p.categoria ?? '').trim()
+      const qNorm = normalizarNombre(qRaw)
       try {
-        const movs = await listarMovimientos(8)
-        if (!movs.length) {
-          push({ rol: 'ia', texto: 'Todavía no hay movimientos registrados.' })
+        if (qNorm) {
+          const todos = await listarTodosLosMovimientos(250)
+          const coincidencias = todos
+            .filter((m) => {
+              const texto = normalizarNombre(
+                `${m.fecha ?? ''} ${m.concepto ?? ''} ${m.categoria ?? ''} ${m.descripcion ?? ''} ${m.tipo ?? ''}`
+              )
+              return texto.includes(qNorm)
+            })
+            .slice(0, 12)
+          if (!coincidencias.length) {
+            push({ rol: 'ia', texto: `No encontré movimientos que coincidan con "${qRaw}".` })
+          } else {
+            const detalle = coincidencias
+              .map((m) => `• ${m.fecha} — ${m.concepto}: ${COD(Number(m.monto) || 0)} (${m.tipo})`)
+              .join('\n')
+            push({
+              rol: 'ia',
+              texto: `🔎 Encontré ${coincidencias.length} movimiento(s) para "${qRaw}":\n\n${detalle}`,
+            })
+          }
         } else {
-          const detalle = movs
-            .map((m) => `• ${m.fecha} — ${m.concepto}: ${COD(Number(m.monto) || 0)} (${m.tipo})`)
-            .join('\n')
-          push({ rol: 'ia', texto: `📋 Tus últimos ${movs.length} movimientos:\n\n${detalle}` })
+          const movs = await listarMovimientos(8)
+          if (!movs.length) {
+            push({ rol: 'ia', texto: 'Todavía no hay movimientos registrados.' })
+          } else {
+            const detalle = movs
+              .map((m) => `• ${m.fecha} — ${m.concepto}: ${COD(Number(m.monto) || 0)} (${m.tipo})`)
+              .join('\n')
+            push({ rol: 'ia', texto: `📋 Tus últimos ${movs.length} movimientos:\n\n${detalle}` })
+          }
         }
       } catch {
         push({ rol: 'ia', texto: 'No pude recuperar los movimientos.' })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'generar_calendario') {
@@ -367,12 +469,13 @@ export default function ChatPage() {
       } catch {
         push({ rol: 'ia', texto: 'No pude generar los eventos del calendario.' })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'resumen_mes') {
       try {
-        const mes = String(p.mes ?? '')
+        const mesRaw = String(p.mes ?? '').trim()
+        const mes = /^\d{4}-\d{2}$/.test(mesRaw) ? mesRaw : hoyISO().slice(0, 7)
         const todos = await listarTodosLosMovimientos(500)
         const delMes = todos.filter((m) => String(m.fecha).startsWith(mes))
         if (!delMes.length) {
@@ -386,7 +489,6 @@ export default function ChatPage() {
             if (m.tipo === 'ingreso') {
               ingresos += val
             } else if (m.tipo !== 'transferencia') {
-              // Las transferencias mueven dinero entre cuentas propias: no son gasto.
               gastos += val
               porCat.set(m.categoria || 'Otros', (porCat.get(m.categoria || 'Otros') || 0) + val)
             }
@@ -416,38 +518,66 @@ export default function ChatPage() {
       } catch {
         push({ rol: 'ia', texto: 'No pude calcular el resumen del mes.' })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'pago_deuda') {
       const hoyString = hoyISO()
       const monto = Number(p.monto) || 0
       const fecha = String(p.fecha ?? hoyString).slice(0, 10) || hoyString
-      const nombreBuscado = String(p.nombre ?? p.deudaNombre ?? '').toLowerCase()
+      const nombreOriginal = String(p.nombre ?? p.deudaNombre ?? '').trim()
+      const nombreBuscado = normalizarNombre(nombreOriginal)
       try {
         const deudas = (await listarDeudas()).filter((d) => d.estado !== 'pagada')
         const candidatas = nombreBuscado
-          ? deudas.filter((d) => d.nombre.toLowerCase().includes(nombreBuscado) || nombreBuscado.includes(d.nombre.toLowerCase()))
+          ? deudas.filter((d) => {
+              const n = normalizarNombre(d.nombre)
+              return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
+            })
           : deudas
-        const deuda = candidatas.length === 1 ? candidatas[0] : deudas.length === 1 ? deudas[0] : undefined
+
+        // Si el usuario indicó un nombre pero no coincidió con ninguna deuda activa, NO aplicar a otra deuda
+        const deuda =
+          candidatas.length === 1
+            ? candidatas[0]
+            : !nombreBuscado && deudas.length === 1
+              ? deudas[0]
+              : undefined
+
         if (!deuda) {
-          push({
-            rol: 'ia',
-            texto:
-              deudas.length === 0
-                ? 'No tienes deudas activas registradas. Ve a la pestaña "Deudas" y las registramos.'
-                : `Tienes varias deudas activas:\n${deudas.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n\n¿A cuál le abono? Ej: "pagué 100.000 de ${deudas[0].nombre}".`,
-          })
-          return
+          if (deudas.length === 0) {
+            push({
+              rol: 'ia',
+              texto: 'No tienes deudas activas registradas. Ve a la pestaña "Deudas" y las registramos.',
+            })
+          } else if (nombreBuscado && candidatas.length === 0) {
+            push({
+              rol: 'ia',
+              texto:
+                `No encontré ninguna deuda activa llamada "${nombreOriginal}". Estas son tus deudas activas:\n` +
+                `${deudas.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n\n` +
+                `¿A cuál le abono?`,
+            })
+          } else {
+            const lista = candidatas.length ? candidatas : deudas
+            push({
+              rol: 'ia',
+              texto:
+                `Tienes varias deudas que coinciden:\n` +
+                `${lista.map((d) => `• ${d.nombre} (saldo ${COD(d.saldoPendiente || 0)})`).join('\n')}\n\n` +
+                `¿A cuál le abono? Ej: "pagué 100.000 de ${lista[0].nombre}".`,
+            })
+          }
+          return true
         }
         const cuentaDeudaId = deuda.cuentaBancoId || cuentas[0]?.id
         if (!cuentaDeudaId) {
           push({ rol: 'ia', texto: 'Primero necesitas crear una cuenta bancaria en la pestaña "Cuentas" para poder descontar el pago.' })
-          return
+          return true
         }
         if (!monto || monto <= 0) {
           push({ rol: 'ia', texto: '¿De cuánto es el abono? Dime el monto y lo registro.' })
-          return
+          return true
         }
         const r = await registrarPagoDeuda(deuda.id, monto, fecha, cuentaDeudaId, 'chat_IA')
         if (!r.ok) {
@@ -461,7 +591,7 @@ export default function ChatPage() {
             saldo_insuficiente: `La cuenta solo tiene ${COD(r.saldoDisponible ?? 0)}, no alcanza para el abono de ${COD(monto)}.`,
           }
           push({ rol: 'ia', texto: mensajes[r.error] ?? 'No pude registrar el pago de la deuda.' })
-          return
+          return true
         }
         invalidarSnapshotFinanciero()
         listarCuentasBanco().then(setCuentas).catch(() => {})
@@ -474,32 +604,62 @@ export default function ChatPage() {
         })
       } catch (e: any) {
         console.error('Error al pagar deuda:', e)
-        setError(`No se pudo registrar el pago (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No pude registrar el pago de la deuda: ${e?.message || e?.code || 'error'}.` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'pagar_impuesto') {
       const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const impuestoId = String(p.impuestoId ?? '').trim()
-      const nombreBuscado = normalizarNombreCuenta(String(p.nombre ?? p.impuesto ?? ''))
+      const nombreOriginal = String(p.nombre ?? p.impuesto ?? '').trim()
+      const nombreBuscado = normalizarNombre(nombreOriginal)
       try {
         const todos = await listarImpuestos()
         const pendientes = todos.filter((i) => !i.pagado)
-        const impuesto = impuestoId
-          ? todos.find((i) => i.id === impuestoId)
-          : nombreBuscado
-            ? pendientes.find((i) => {
-                const n = normalizarNombreCuenta(i.nombre)
-                return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
-              }) ??
-              todos.find((i) => {
-                const n = normalizarNombreCuenta(i.nombre)
-                return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
+
+        let impuesto = impuestoId ? todos.find((i) => i.id === impuestoId) : undefined
+
+        if (!impuesto && nombreBuscado) {
+          const coincide = (nombre: string) => {
+            const n = normalizarNombre(nombre)
+            return n === nombreBuscado || n.includes(nombreBuscado) || nombreBuscado.includes(n)
+          }
+          const exactosPendientes = pendientes.filter((i) => normalizarNombre(i.nombre) === nombreBuscado)
+          const candPendientes = exactosPendientes.length ? exactosPendientes : pendientes.filter((i) => coincide(i.nombre))
+          if (candPendientes.length === 1) {
+            impuesto = candPendientes[0]
+          } else if (candPendientes.length > 1) {
+            push({
+              rol: 'ia',
+              texto:
+                `Encontré varios impuestos pendientes que coinciden con "${nombreOriginal}":\n` +
+                `${candPendientes
+                  .map((i) => `• ${i.nombre}: ${COD(Number(i.valor) || 0)}${i.fechaVencimiento ? ` (vence ${i.fechaVencimiento})` : ''}`)
+                  .join('\n')}\n\n¿Cuál deseas pagar?`,
+            })
+            return true
+          } else {
+            const candPagados = todos.filter((i) => i.pagado && coincide(i.nombre))
+            if (candPagados.length === 1) {
+              impuesto = candPagados[0]
+            } else {
+              push({
+                rol: 'ia',
+                texto:
+                  pendientes.length === 0
+                    ? `No encontré un impuesto pendiente llamado "${nombreOriginal}" y no tienes otros pendientes.`
+                    : `No encontré un impuesto pendiente llamado "${nombreOriginal}". Tus pendientes son:\n` +
+                      `${pendientes
+                        .map((i) => `• ${i.nombre}: ${COD(Number(i.valor) || 0)}${i.fechaVencimiento ? ` (vence ${i.fechaVencimiento})` : ''}`)
+                        .join('\n')}\n\n¿Cuál pago?`,
               })
-            : pendientes.length === 1
-              ? pendientes[0]
-              : undefined
+              return true
+            }
+          }
+        } else if (!impuesto && !nombreBuscado && pendientes.length === 1) {
+          impuesto = pendientes[0]
+        }
 
         if (!impuesto) {
           push({
@@ -514,12 +674,12 @@ export default function ChatPage() {
                     )
                     .join('\n')}\n\n¿Cuál pago?`,
           })
-          return
+          return true
         }
 
         if (impuesto.pagado) {
           push({ rol: 'ia', texto: `"${impuesto.nombre}" ya estaba marcado como pagado.` })
-          return
+          return true
         }
 
         const r = await registrarPagoImpuesto(impuesto.id, { fecha, fuente: 'chat_IA' })
@@ -534,7 +694,7 @@ export default function ChatPage() {
           } else {
             push({ rol: 'ia', texto: `No pude registrar el pago de "${impuesto.nombre}".` })
           }
-          return
+          return true
         }
 
         invalidarSnapshotFinanciero()
@@ -550,7 +710,7 @@ export default function ChatPage() {
         console.error('Error al pagar impuesto:', e)
         push({ rol: 'ia', texto: `No pude registrar el pago del impuesto: ${e?.message ?? 'error'}` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'investigar_vehiculo') {
@@ -564,29 +724,29 @@ export default function ChatPage() {
           `• Seguro todo riesgo: ~${COD(est.seguroTodoRiesgoAnualEstimadoCOP)} anual (rango ${COD(est.rangoSTR.min)} - ${COD(est.rangoSTR.max)})\n\n` +
           `💡 Es un estimativo (confianza media). Puedes afinarlo y guardarlo en la pestaña "Vehículos".`,
       })
-      return
+      return true
     }
 
     if (op.nombre === 'crear_vehiculo') {
       const yearDefault = new Date().getFullYear()
       const marca = String(p.marca ?? '').trim()
       const linea = String(p.linea ?? '').trim()
-      const placa = String(p.placa ?? '').trim().toUpperCase()
+      const placa = String(p.placa ?? '').trim().toUpperCase().replace(/[\s-]+/g, '')
       const modelo = Number(p.modelo) || yearDefault
       if (!marca || !linea) {
         push({ rol: 'ia', texto: 'Necesito al menos la marca y la línea del vehículo para registrarlo.' })
-        return
+        return true
       }
       try {
         const vehiculos = await listarVehiculos()
         if (placa) {
-          const existente = vehiculos.find((x) => (x.placa ?? '').toUpperCase() === placa)
+          const existente = vehiculos.find((x) => (x.placa ?? '').toUpperCase().replace(/[\s-]+/g, '') === placa)
           if (existente) {
             push({
               rol: 'ia',
               texto: `Ya tienes un vehículo con la placa ${placa}: ${existente.marca} ${existente.linea}. No creé otro.`,
             })
-            return
+            return true
           }
         }
         const tipoTexto = String(p.tipo ?? '').trim()
@@ -608,29 +768,47 @@ export default function ChatPage() {
         })
       } catch (e: any) {
         console.error('Error al crear vehículo:', e)
-        setError(`No se pudo registrar el vehículo (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No se pudo registrar el vehículo (${e?.code || e?.message || 'error'}).` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'registrar_mantenimiento') {
-      const monto = Number(p.monto) || 0
+      const montoRaw = p.monto !== undefined ? Number(p.monto) : 0
+      const monto = Number.isFinite(montoRaw) ? montoRaw : 0
       const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
-      const placa = String(p.placa ?? '').trim().toUpperCase()
-      const marca = String(p.marca ?? '').trim().toLowerCase()
-      const linea = String(p.linea ?? '').trim().toLowerCase()
+      const placa = String(p.placa ?? '').trim().toUpperCase().replace(/[\s-]+/g, '')
+      const marca = normalizarNombre(String(p.marca ?? ''))
+      const linea = normalizarNombre(String(p.linea ?? ''))
       const concepto = String(p.concepto ?? '').trim() || 'Mantenimiento'
-      const km = p.km !== undefined ? Number(p.km) : undefined
+      const km = p.km !== undefined && p.km !== '' ? Number(p.km) : undefined
+
+      if (monto < 0) {
+        push({ rol: 'ia', texto: 'El costo del mantenimiento no puede ser negativo.' })
+        return true
+      }
+      if (km !== undefined && (!Number.isFinite(km) || km < 0)) {
+        push({ rol: 'ia', texto: 'El kilometraje del mantenimiento debe ser un número válido mayor o igual a cero.' })
+        return true
+      }
+      if (monto === 0 && km === undefined && p.sinCosto !== true) {
+        push({
+          rol: 'ia',
+          texto: `¿Cuánto costó "${concepto}" (o a qué kilometraje se hizo)? Dime el valor y lo registro completo.`,
+        })
+        return true
+      }
+
       const cuentaId = String(p.cuentaBancoId ?? '').trim() || undefined
       try {
         const vehiculos = await listarVehiculos()
         const activos = vehiculos.filter((x) => x.activo !== false && x.estado !== 'Vendido')
-        let v = placa ? activos.find((x) => (x.placa ?? '').toUpperCase() === placa) : undefined
+        let v = placa ? activos.find((x) => (x.placa ?? '').toUpperCase().replace(/[\s-]+/g, '') === placa) : undefined
         if (!v && (marca || linea)) {
           const candidatos = activos.filter(
             (x) =>
-              (!marca || x.marca.toLowerCase().includes(marca)) &&
-              (!linea || x.linea.toLowerCase().includes(linea))
+              (!marca || normalizarNombre(x.marca).includes(marca)) &&
+              (!linea || normalizarNombre(x.linea).includes(linea))
           )
           if (candidatos.length === 1) {
             v = candidatos[0]
@@ -641,40 +819,42 @@ export default function ChatPage() {
                 .map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`)
                 .join('\n')}\n\n¿De cuál fue el mantenimiento?`,
             })
-            return
+            return true
           }
         }
-        if (!v && activos.length === 1) v = activos[0]
+        if (!v && !placa && !marca && !linea && activos.length === 1) v = activos[0]
         if (!v) {
           push({
             rol: 'ia',
             texto:
               activos.length === 0
                 ? 'Todavía no tienes vehículos activos registrados. Ve a la pestaña "Vehículos" y lo registramos primero.'
-                : `Tienes varios vehículos:\n${activos
+                : `No identifiqué el vehículo. Estos son tus vehículos activos:\n${activos
                     .map((x) => `• ${x.marca} ${x.linea}${x.placa ? ` (${x.placa})` : ''}`)
                     .join('\n')}\n\n¿De cuál fue el mantenimiento?`,
           })
-          return
+          return true
         }
-        // Validamos la cuenta ANTES de guardar la tarea: si falta, no debe
-        // quedar un mantenimiento a medias sin su movimiento de costo.
-        const cuentaMantId = cuentaId || cuentas[0]?.id
+
+        // Validamos la cuenta ANTES de cualquier escritura
+        let listaCuentas = cuentas
+        if (monto > 0 && !listaCuentas.length) {
+          listaCuentas = await listarCuentasBanco().catch(() => [])
+        }
+        const cuentaMantId =
+          cuentaId && listaCuentas.some((c) => c.id === cuentaId)
+            ? cuentaId
+            : listaCuentas[0]?.id
         if (monto > 0 && !cuentaMantId) {
           push({ rol: 'ia', texto: 'Primero registra una cuenta en la pestaña "Cuentas" para descontar el costo del mantenimiento.' })
-          return
+          return true
         }
+
         const nombre = concepto.slice(0, 60)
-        let tarea = (v.mantenimiento?.tareas ?? []).find((t) => t.nombre.toLowerCase() === nombre.toLowerCase())
-        if (!tarea) {
-          tarea = { id: nuevaTareaId(), nombre }
-          await guardarTareaMantenimiento(v.id, tarea)
-        }
-        await registrarServicioMantenimiento(v.id, tarea.id, {
-          km: Number.isFinite(km) ? km : undefined,
-          fecha,
-        })
-        if (monto > 0) {
+
+        // Si tiene costo, creamos el movimiento primero para que un fallo bancario no deje hoja de vida desincronizada
+        let movimientoCreado = false
+        if (monto > 0 && cuentaMantId) {
           await crearMovimiento({
             fecha,
             tipo: 'mantenimiento',
@@ -682,12 +862,36 @@ export default function ChatPage() {
             monto,
             categoria: 'Transporte',
             vehiculoId: v.id,
-            cuentaBancoId: cuentaMantId as string,
+            cuentaBancoId: cuentaMantId,
             fuente: 'chat_IA',
           })
+          movimientoCreado = true
           listarCuentasBanco().then(setCuentas).catch(() => {})
           void cargarPulso()
         }
+
+        try {
+          let tarea = (v.mantenimiento?.tareas ?? []).find((t) => normalizarNombre(t.nombre) === normalizarNombre(nombre))
+          if (!tarea) {
+            tarea = { id: nuevaTareaId(), nombre }
+            await guardarTareaMantenimiento(v.id, tarea)
+          }
+          await registrarServicioMantenimiento(v.id, tarea.id, {
+            km: Number.isFinite(km) ? km : undefined,
+            fecha,
+          })
+        } catch (errHoja: any) {
+          invalidarSnapshotFinanciero()
+          console.error('Error al actualizar hoja de vida tras movimiento:', errHoja)
+          push({
+            rol: 'ia',
+            texto: movimientoCreado
+              ? `⚠️ Desconté el movimiento de ${COD(monto)}, pero no pude actualizar la hoja de vida del vehículo. Regístralo manualmente en la pestaña "Vehículos".`
+              : `No pude registrar el mantenimiento en el vehículo (${errHoja?.message || 'error'}).`,
+          })
+          return true
+        }
+
         invalidarSnapshotFinanciero()
         const detalleKm = Number.isFinite(km) ? ` a los ${formatoKm(km)}` : ''
         push({
@@ -696,22 +900,22 @@ export default function ChatPage() {
         })
       } catch (e: any) {
         console.error('Error al registrar mantenimiento:', e)
-        setError(`No se pudo registrar el mantenimiento (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No se pudo registrar el mantenimiento (${e?.message || e?.code || 'error'}).` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'obtener_vehiculo_completo') {
       const vehiculoId = String(p.vehiculoId ?? '').trim()
       if (!vehiculoId) {
         push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres ver (puedes usar la placa o decirme "el primero").' })
-        return
+        return true
       }
       try {
         const v = await obtenerVehiculo(vehiculoId)
         if (!v) {
           push({ rol: 'ia', texto: 'No encontré ese vehículo. Verifica el ID o la placa.' })
-          return
+          return true
         }
         const soatV = vigenciaDe(v.soat?.fechaVencimiento)
         const tmV = vigenciaDe(v.tecnicomecanica?.fechaVencimiento)
@@ -758,21 +962,21 @@ export default function ChatPage() {
       } catch {
         push({ rol: 'ia', texto: 'No pude obtener el detalle del vehículo.' })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'renovar_soat') {
       const vehiculoId = String(p.vehiculoId ?? '').trim()
       if (!vehiculoId) {
         push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres renovar.' })
-        return
+        return true
       }
       try {
         const v = await obtenerVehiculo(vehiculoId)
         const r = await renovarSoat(vehiculoId)
         if (!r) {
           push({ rol: 'ia', texto: 'Ese vehículo no tiene SOAT con fecha de vencimiento para renovar.' })
-          return
+          return true
         }
         invalidarSnapshotFinanciero()
         const nombre = v ? ` del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}` : ''
@@ -783,21 +987,21 @@ export default function ChatPage() {
       } catch (e: any) {
         push({ rol: 'ia', texto: `No pude renovar el SOAT: ${e?.message ?? 'error'}` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'renovar_tecnomecanica') {
       const vehiculoId = String(p.vehiculoId ?? '').trim()
       if (!vehiculoId) {
         push({ rol: 'ia', texto: 'Falta el ID del vehículo. Dime cuál quieres renovar.' })
-        return
+        return true
       }
       try {
         const v = await obtenerVehiculo(vehiculoId)
         const r = await renovarTecnicomecanica(vehiculoId)
         if (!r) {
           push({ rol: 'ia', texto: 'Ese vehículo no tiene Tecnicomecánica con fecha de vencimiento para renovar.' })
-          return
+          return true
         }
         invalidarSnapshotFinanciero()
         const nombre = v ? ` del ${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}` : ''
@@ -808,24 +1012,49 @@ export default function ChatPage() {
       } catch (e: any) {
         push({ rol: 'ia', texto: `No pude renovar la TM: ${e?.message ?? 'error'}` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'pago_nomina') {
       const monto = Number(p.monto) || 0
       const fecha = String(p.fecha ?? '').slice(0, 10) || hoyISO()
       const nombre = String(p.nombre ?? '').trim()
+      const nombreNorm = normalizarNombre(nombre)
       try {
-        const nominas = await listarNomina()
-        const match = nombre
-          ? nominas.find((n) => n.nombreCompleto.toLowerCase().includes(nombre.toLowerCase()))
-          : nominas.length === 1
-            ? nominas[0]
-            : undefined
+        const nominas = (await listarNomina()).filter((n) => n.activo !== false)
+        const candidatos = nombreNorm
+          ? nominas.filter((n) => {
+              const completo = normalizarNombre(n.nombreCompleto)
+              return completo === nombreNorm || completo.includes(nombreNorm) || nombreNorm.includes(completo)
+            })
+          : nominas
+
+        const match =
+          candidatos.length === 1
+            ? candidatos[0]
+            : !nombreNorm && nominas.length === 1
+              ? nominas[0]
+              : undefined
+
+        if (!match && nominas.length > 0) {
+          const lista = candidatos.length > 1 ? candidatos : nominas
+          push({
+            rol: 'ia',
+            texto:
+              (nombre && candidatos.length === 0
+                ? `No encontré a "${nombre}" en tu nómina activa. `
+                : 'Tienes varios empleados activos en nómina. ') +
+              `¿A quién le registro el pago?\n\n${lista
+                .map((n) => `• ${n.nombreCompleto} (${COD(totalMensualNomina(n))})`)
+                .join('\n')}`,
+          })
+          return true
+        }
+
         const cuentaNominaId = match?.cuentaBancoId || cuentas[0]?.id
         if (!cuentaNominaId) {
           push({ rol: 'ia', texto: 'Primero debes tener al menos una cuenta en "Cuentas" para descontar el pago de nómina.' })
-          return
+          return true
         }
         if (match) {
           const r = await registrarPagoNomina(match.id, {
@@ -843,7 +1072,7 @@ export default function ChatPage() {
             } else {
               push({ rol: 'ia', texto: `No pude registrar el pago de nómina de "${match.nombreCompleto}".` })
             }
-            return
+            return true
           }
           invalidarSnapshotFinanciero()
           listarCuentasBanco().then(setCuentas).catch(() => {})
@@ -856,7 +1085,12 @@ export default function ChatPage() {
             rol: 'ia',
             texto: `✅ Registré el pago de nómina de ${COD(r.monto ?? 0)}${extra} a ${match.nombreCompleto} (${fecha}).`,
           })
-          return
+          return true
+        }
+
+        if (monto <= 0) {
+          push({ rol: 'ia', texto: 'No tienes empleados en nómina registrados. Dime el monto del pago para registrarlo.' })
+          return true
         }
         await crearMovimiento({
           fecha,
@@ -876,17 +1110,25 @@ export default function ChatPage() {
         })
       } catch (e: any) {
         console.error('Error al registrar pago de nómina:', e)
-        setError(`No se pudo registrar el pago de nómina (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No se pudo registrar el pago de nómina (${e?.message || e?.code || 'error'}).` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'crear_recurrente') {
-      const monto = Number(p.monto ?? p.valor) || 0
+      const monto = Math.round(Number(p.monto ?? p.valor) || 0)
+      if (!Number.isFinite(monto) || monto <= 0) {
+        push({
+          rol: 'ia',
+          texto: 'Para crear el gasto recurrente necesito un monto mayor a cero. Dime de cuánto es y lo dejo programado.',
+        })
+        return true
+      }
       const concepto = String(p.concepto ?? '').trim() || 'Gasto recurrente'
       const categoria = normalizarCategoria(String(p.categoria ?? 'otro'))
       const periodicidad = normalizarPeriodicidad(String(p.periodicidad ?? 'mensual'))
-      const dia = Number(p.diaVencimiento) || undefined
+      const diaRaw = Number(p.diaVencimiento)
+      const dia = Number.isFinite(diaRaw) ? Math.round(diaRaw) : undefined
       try {
         await crearRecurrente({
           concepto,
@@ -894,6 +1136,7 @@ export default function ChatPage() {
           valor: monto,
           periodicidad,
           diaVencimiento: dia && dia >= 1 && dia <= 31 ? dia : undefined,
+          fechaInicio: hoyISO(),
           cuentaBancoId: cuentas[0]?.id,
           activo: true,
           autoGenerar: true,
@@ -907,9 +1150,9 @@ export default function ChatPage() {
         })
       } catch (e: any) {
         console.error('Error al crear recurrente:', e)
-        setError(`No se pudo crear el gasto recurrente (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No se pudo crear el gasto recurrente (${e?.message || e?.code || 'error'}).` })
       }
-      return
+      return true
     }
 
     if (op.nombre === 'crear_evento') {
@@ -930,28 +1173,38 @@ export default function ChatPage() {
         push({ rol: 'ia', texto: `📅 Anoté "${titulo}" para el ${fecha}. Te aviso un día antes.` })
       } catch (e: any) {
         console.error('Error al crear evento:', e)
-        setError(`No se pudo crear el evento (${e?.code || 'error'}).`)
+        push({ rol: 'ia', texto: `No se pudo crear el evento (${e?.message || e?.code || 'error'}).` })
       }
-      return
+      return true
     }
+
+    return false
   }
 
   const send = async () => {
     const texto = msg.trim()
     if (!texto || pensando) return
+    const epochActual = epochRef.current
     setMsg('')
     setError('')
     push({ rol: 'user', texto })
     setPensando(true)
     try {
       const historial = msgs
-        .filter((m) => m.texto.trim() && m.id !== 0)
+        .filter((m) => (m.texto.trim() || m.borrador) && m.id !== 0)
         .slice(-8)
-        .map((m) => ({ rol: m.rol, texto: m.texto }))
+        .map((m) => {
+          const resumenBorrador = m.borrador
+            ? ` [Borrador ${m.estado ?? 'pendiente'}: ${m.borrador.tipo} ${COD(m.borrador.monto)} · ${m.borrador.concepto} · ${m.borrador.fecha}]`
+            : ''
+          return { rol: m.rol, texto: `${m.texto}${resumenBorrador}`.trim() }
+        })
 
       const snapshot = await construirSnapshotFinanciero().catch(() => undefined)
+      if (epochRef.current !== epochActual) return
 
       const interp = await interpretar(texto, { cuentas: cuentas.map((c) => c.nombre), historial, snapshot })
+      if (epochRef.current !== epochActual) return
 
       const ops: AccionInterpretada[] = interp.lote?.length
         ? interp.lote
@@ -961,11 +1214,17 @@ export default function ChatPage() {
 
       const registros = ops.filter((o) => o.nombre === 'requiere_confirmacion' && o.borrador)
       const otras = ops.filter((o) => !(o.nombre === 'requiere_confirmacion' && o.borrador))
-      const soloTransferencias = ops.length > 0 && ops.every((o) => o.nombre === 'transferir')
 
-      if (!registros.length && interp.respuesta && !soloTransferencias) {
-        push({ rol: 'ia', texto: interp.respuesta })
+      // Ejecutar acciones inmediatas ANTES de decidir si mostrar interp.respuesta
+      // para evitar burbujas optimistas contradictorias si la acción falla.
+      let algunaAccionRespondio = false
+      for (const op of otras) {
+        if (epochRef.current !== epochActual) return
+        const respondio = await ejecutarAccion(op)
+        if (respondio) algunaAccionRespondio = true
       }
+
+      if (epochRef.current !== epochActual) return
 
       registros.forEach((op, i) => {
         push({
@@ -976,29 +1235,39 @@ export default function ChatPage() {
         })
       })
 
-      for (const op of otras) {
-        await ejecutarAccion(op)
+      if (!registros.length && !algunaAccionRespondio && interp.respuesta) {
+        push({ rol: 'ia', texto: interp.respuesta })
       }
 
       if (!ops.length && !interp.respuesta) {
         push({ rol: 'ia', texto: 'Cuéntame en qué te ayudo con tu plata. 💛' })
       }
     } catch (e) {
+      if (epochRef.current !== epochActual) return
       console.error('Error al interpretar el mensaje:', e)
       push({ rol: 'ia', texto: 'Uy, se me cruzaron los cables un segundo. ¿Me repites eso?' })
     } finally {
-      setPensando(false)
+      if (epochRef.current === epochActual) {
+        setPensando(false)
+      }
     }
   }
 
   const confirmar = async (id: number, data: MovimientoConfirmado) => {
-    setGuardandoId(id)
+    if (enProcesoRef.current.has(id)) return
+    enProcesoRef.current.add(id)
+    setGuardandoIds((prev) => {
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
     setError('')
     try {
       await crearMovimiento({
         fecha: data.fecha,
         tipo: data.tipo,
         concepto: data.concepto,
+        descripcion: data.descripcion,
         monto: data.monto,
         categoria: data.categoria,
         cuentaBancoId: data.cuentaBancoId,
@@ -1019,18 +1288,24 @@ export default function ChatPage() {
       const code = e?.code || (e && e.name) || 'desconocido'
       setError(`No se pudo guardar el movimiento (${code}).`)
     } finally {
-      setGuardandoId(null)
+      enProcesoRef.current.delete(id)
+      setGuardandoIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     }
   }
 
   const cancelar = (id: number) => {
+    if (enProcesoRef.current.has(id)) return
     setMsgs((prev) => prev.map((m) => (m.id === id ? { ...m, estado: 'cancelado' } : m)))
   }
 
   return (
     <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_300px]">
       {/* COLUMNA DEL CHAT */}
-      <Card className="glass-card surface-glow flex flex-col overflow-hidden border-0 max-md:h-[calc(100vh-56px)] max-md:h-[calc(100dvh-56px)] max-md:rounded-none">
+      <Card className="glass-card surface-glow flex flex-col overflow-hidden border-0 max-md:h-[calc(100dvh-56px)] max-md:rounded-none">
         <div className="flex items-center justify-between border-b border-white/[0.07] bg-white/[0.02] p-3.5 sm:p-4">
           <div className="flex items-center gap-3">
             <motion.div
@@ -1054,9 +1329,12 @@ export default function ChatPage() {
             </div>
           </div>
           <button
+            type="button"
             onClick={limpiarChat}
+            disabled={pensando}
             title="Nueva conversación"
-            className="cursor-pointer rounded-xl border border-white/10 bg-white/[0.04] p-2 text-mist-300 transition-all hover:bg-white/10 hover:text-white active:scale-95"
+            aria-label="Nueva conversación"
+            className="cursor-pointer rounded-xl border border-white/10 bg-white/[0.04] p-2 text-mist-300 transition-all hover:bg-white/10 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Trash2 className="h-4 w-4" />
           </button>
@@ -1103,8 +1381,8 @@ export default function ChatPage() {
                           <ConfirmacionCard
                             borrador={m.borrador}
                             cuentas={cuentas}
-                            guardando={guardandoId === m.id}
-                            onConfirm={(data) => confirmar(m.id, data)}
+                            guardando={guardandoIds.has(m.id)}
+                            onConfirm={(data) => void confirmar(m.id, data)}
                             onCancel={() => cancelar(m.id)}
                           />
                         </motion.div>
@@ -1159,7 +1437,10 @@ export default function ChatPage() {
           </div>
 
           {error && (
-            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 text-xs text-red-300">
+            <div
+              role="alert"
+              className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-2.5 text-xs text-red-300"
+            >
               <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>
@@ -1170,13 +1451,17 @@ export default function ChatPage() {
               value={msg}
               onChange={(e) => setMsg(e.target.value)}
               placeholder="Ej: gasté 35.000 en gasolina y me regalaron 20.000..."
-              onKeyDown={(e) => e.key === 'Enter' && send()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) void send()
+              }}
+              aria-label="Mensaje para Lucía"
               className="field-dark h-12 rounded-2xl text-sm shadow-none"
             />
             <motion.div whileTap={{ scale: 0.94 }} className="shrink-0">
               <Button
-                onClick={send}
+                onClick={() => void send()}
                 disabled={pensando}
+                aria-label="Enviar mensaje"
                 className="h-12 cursor-pointer rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-400 px-4 font-bold text-[#04241a] shadow-[0_8px_24px_-8px_rgba(16,185,129,0.7)] hover:brightness-110 disabled:opacity-60"
               >
                 <Send className="h-4 w-4" />
@@ -1195,7 +1480,7 @@ export default function ChatPage() {
               <ArrowLeftRight className="h-3.5 w-3.5 text-emerald-300" />
               <span>Tasas del día</span>
             </div>
-            {tasas.length ? (
+            {estadoTasas === 'listo' ? (
               <ul className="space-y-1.5">
                 {tasas.map((t) => (
                   <li
@@ -1206,8 +1491,12 @@ export default function ChatPage() {
                   </li>
                 ))}
               </ul>
-            ) : (
+            ) : estadoTasas === 'cargando' ? (
               <div className="animate-shimmer h-16 rounded-xl" />
+            ) : (
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-3 text-[11px] text-mist-500">
+                Tasas no disponibles sin conexión.
+              </div>
             )}
             <p className="text-[11px] leading-relaxed text-mist-600">
               Referencia en COP. Lucía convierte sola cuando hablas en otra moneda.
@@ -1221,7 +1510,7 @@ export default function ChatPage() {
               <BarChart3 className="h-3.5 w-3.5 text-emerald-300" />
               <span>Últimos 6 meses</span>
             </div>
-            {pulso.length ? (
+            {estadoPulso === 'listo' ? (
               <div className="space-y-2.5">
                 <div className="flex h-28 items-end gap-1.5">
                   {(() => {
@@ -1258,8 +1547,12 @@ export default function ChatPage() {
                   </span>
                 </div>
               </div>
-            ) : (
+            ) : estadoPulso === 'cargando' ? (
               <div className="animate-shimmer h-28 rounded-xl" />
+            ) : (
+              <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-4 text-center text-[11px] text-mist-500">
+                Sin movimientos registrados en los últimos 6 meses.
+              </div>
             )}
           </CardContent>
         </Card>

@@ -34,6 +34,7 @@ declare global {
             client_id: string
             scope: string
             callback: (resp: TokenResponse & { error?: string }) => void
+            error_callback?: (err: { type?: string; message?: string }) => void
           }) => TokenClient
           revoke: (token: string) => void
         }
@@ -64,7 +65,11 @@ function cargarGIS(): Promise<void> {
       s.async = true
       s.defer = true
       s.onload = () => resolver()
-      s.onerror = () => rechazar(new Error('no se pudo cargar Google Identity'))
+      s.onerror = () => {
+        promesaGIS = null
+        s.remove()
+        rechazar(new Error('no se pudo cargar Google Identity'))
+      }
       document.head.appendChild(s)
     })
   }
@@ -91,18 +96,27 @@ export async function conectarGoogleCalendar(): Promise<void> {
   await cargarGIS()
   const oauth2 = window.google?.accounts?.oauth2
   if (!oauth2) throw new Error('Google Identity no disponible')
-  const token = await new Promise<string>((resolver, rechazar) => {
+  const respToken = await new Promise<{ token: string; expiresIn: number }>((resolver, rechazar) => {
     const cliente = oauth2.initTokenClient({
       client_id: CLIENT_ID,
       scope: ALCANCE,
       callback: (resp) => {
         if (resp.error || !resp.access_token) rechazar(new Error('autorización denegada'))
-        else resolver(resp.access_token)
+        else {
+          const exp = Number(resp.expires_in)
+          resolver({ token: resp.access_token, expiresIn: Number.isFinite(exp) && exp > 0 ? exp : 3600 })
+        }
+      },
+      error_callback: (err) => {
+        rechazar(new Error(err?.message || err?.type || 'autorización cancelada'))
       },
     })
     cliente.requestAccessToken({ prompt: 'consent' })
   })
-  guardarSesion({ token, expira: Date.now() + 3500 * 1000 })
+  guardarSesion({
+    token: respToken.token,
+    expira: Date.now() + Math.max(60, respToken.expiresIn - 100) * 1000,
+  })
 }
 
 export function desconectarGoogleCalendar(): void {
@@ -124,14 +138,19 @@ export function desconectarGoogleCalendar(): void {
 
 async function api<T>(ruta: string, init?: RequestInit): Promise<T> {
   const s = leerSesion()
-  if (!s) throw new Error('conectar primero Google Calendar')
+  if (!s) {
+    throw Object.assign(new Error('conectar primero Google Calendar'), { status: 401 })
+  }
   const r = await fetch(`${API}${ruta}`, {
     ...init,
     headers: { Authorization: `Bearer ${s.token}`, 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   })
   if (!r.ok) {
     if (r.status === 401) desconectarGoogleCalendar()
-    throw new Error(`Google Calendar respondió ${r.status}`)
+    throw Object.assign(new Error(`Google Calendar respondió ${r.status}`), { status: r.status })
+  }
+  if (r.status === 204 || r.headers.get('content-length') === '0') {
+    return undefined as T
   }
   return (await r.json()) as T
 }
@@ -152,14 +171,17 @@ export async function subirEvento(ev: EventoDoc): Promise<string | null> {
     end: { date: diaSiguiente(fecha) },
     reminders: {
       useDefault: false,
-      overrides: (ev.recordatorios ?? [{ minutosAntes: 1440 }]).map((x) => ({
-        method: 'popup',
-        minutes: Number(x.minutosAntes) || 60,
-      })),
+      overrides: (ev.recordatorios ?? [{ minutosAntes: 1440 }]).map((x) => {
+        const mins = Number(x.minutosAntes)
+        return {
+          method: 'popup',
+          minutes: Number.isFinite(mins) && mins >= 0 ? Math.round(mins) : 60,
+        }
+      }),
     },
   }
   const creado = ev.googleEventId
-    ? await api<{ id: string }>(`/calendars/primary/events/${ev.googleEventId}`, {
+    ? await api<{ id: string }>(`/calendars/primary/events/${encodeURIComponent(ev.googleEventId)}`, {
         method: 'PATCH',
         body: JSON.stringify(cuerpo),
       })
@@ -174,7 +196,9 @@ export async function subirEvento(ev: EventoDoc): Promise<string | null> {
 
 export async function sincronizarPendientes(): Promise<{ subidos: number; fallos: number }> {
   const hoy = hoyISO()
-  const eventos = (await listarEventos(500)).filter((e) => !e.googleEventId && e.fechaInicio.slice(0, 10) >= hoy)
+  const eventos = (await listarEventos(500, { desde: hoy })).filter(
+    (e) => !e.googleEventId && e.fechaInicio.slice(0, 10) >= hoy
+  )
   let subidos = 0
   let fallos = 0
   for (const e of eventos) {
@@ -182,7 +206,11 @@ export async function sincronizarPendientes(): Promise<{ subidos: number; fallos
       const id = await subirEvento(e)
       if (id) subidos++
       else fallos++
-    } catch {
+    } catch (err) {
+      const status = (err as { status?: number })?.status
+      if (status === 401 || !estadoGoogleCalendar().conectado) {
+        throw err
+      }
       fallos++
     }
   }
@@ -190,5 +218,7 @@ export async function sincronizarPendientes(): Promise<{ subidos: number; fallos
 }
 
 export async function eliminarEventoGoogle(googleEventId: string): Promise<void> {
-  await api<unknown>(`/calendars/primary/events/${googleEventId}`, { method: 'DELETE' }).catch(() => {})
+  await api<unknown>(`/calendars/primary/events/${encodeURIComponent(googleEventId)}`, { method: 'DELETE' }).catch(
+    () => {}
+  )
 }

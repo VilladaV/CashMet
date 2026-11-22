@@ -8,20 +8,30 @@ interface Props {
 }
 
 export default function Contador({ valor, formato, className }: Props) {
-  const mv = useMotionValue(0)
-  const texto = useTransform(mv, (v) => formato(Math.round(v)))
+  const seguro = Number.isFinite(valor) ? valor : 0
+  const formatoRef = useRef(formato)
+  const mv = useMotionValue(seguro)
+  const texto = useTransform(mv, (v) => formatoRef.current(Math.round(v)))
   const reducir = useReducedMotion()
-  const primero = useRef(true)
+  const ultimoValorRef = useRef(seguro)
 
   useEffect(() => {
-    if (primero.current || reducir) {
-      primero.current = false
-      mv.set(valor)
+    formatoRef.current = formato
+  }, [formato])
+
+  useEffect(() => {
+    if (ultimoValorRef.current === seguro) {
+      mv.set(seguro)
       return
     }
-    const controles = animate(mv, valor, { type: 'spring', stiffness: 80, damping: 21, mass: 0.9 })
+    ultimoValorRef.current = seguro
+    if (reducir) {
+      mv.set(seguro)
+      return
+    }
+    const controles = animate(mv, seguro, { type: 'spring', stiffness: 80, damping: 21, mass: 0.9 })
     return () => controles.stop()
-  }, [valor, mv, reducir])
+  }, [seguro, mv, reducir])
 
   return <motion.span className={className}>{texto}</motion.span>
 }

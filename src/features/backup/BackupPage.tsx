@@ -4,33 +4,83 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { exportarBackup, importarBackup } from '@/lib/firebase/backup'
 import { exportarMovimientosCompacto } from '@/lib/firebase/movimientosRepo'
-import { Download, Upload, ShieldCheck, Database, CheckCircle2, AlertCircle, FileSpreadsheet } from 'lucide-react'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
+import {
+  Download,
+  Upload,
+  ShieldCheck,
+  Database,
+  CheckCircle2,
+  AlertCircle,
+  FileSpreadsheet,
+  AlertTriangle,
+} from 'lucide-react'
+
+interface PreviewImportacion {
+  archivoNombre: string
+  texto: string
+  totalDocs: number
+  colecciones: Array<{ nombre: string; cantidad: number }>
+  generado?: string
+}
+
+function analizarBackupJson(nombreArchivo: string, texto: string): PreviewImportacion {
+  const data = JSON.parse(texto) as unknown
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('El archivo no contiene un objeto JSON de respaldo válido.')
+  }
+  const raiz = data as Record<string, unknown>
+  const copia = (raiz.copia ?? raiz) as Record<string, unknown>
+  if (!copia || typeof copia !== 'object' || Array.isArray(copia)) {
+    throw new Error('El respaldo no contiene la estructura "copia".')
+  }
+  const colecciones: Array<{ nombre: string; cantidad: number }> = []
+  let totalDocs = 0
+  for (const [nombre, valor] of Object.entries(copia)) {
+    if (!Array.isArray(valor)) {
+      throw new Error(`La colección "${nombre}" no tiene formato de lista válido.`)
+    }
+    colecciones.push({ nombre, cantidad: valor.length })
+    totalDocs += valor.length
+  }
+  return {
+    archivoNombre: nombreArchivo,
+    texto,
+    totalDocs,
+    colecciones,
+    generado: typeof raiz.generado === 'string' ? raiz.generado : undefined,
+  }
+}
 
 export default function BackupPage() {
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busyExport, setBusyExport] = useState(false)
+  const [busyImport, setBusyImport] = useState(false)
   const [busyMovs, setBusyMovs] = useState(false)
+  const [pendiente, setPendiente] = useState<PreviewImportacion | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  const ocupado = busyExport || busyImport || busyMovs
+
   const descargar = async () => {
-    setBusy(true)
+    setBusyExport(true)
     setMsg('')
     setError('')
     try {
       const { nombre, contenido } = await exportarBackup()
-      const blob = new Blob([contenido], { type: 'application/json' })
+      const blob = new Blob([contenido], { type: 'application/json;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = nombre
       a.click()
-      URL.revokeObjectURL(url)
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       setMsg('Respaldo descargado exitosamente. Guárdalo en un almacenamiento seguro.')
     } catch (e: any) {
       setError(e?.message || 'No se pudo exportar el backup.')
     } finally {
-      setBusy(false)
+      setBusyExport(false)
     }
   }
 
@@ -40,14 +90,14 @@ export default function BackupPage() {
     setError('')
     try {
       const { nombre, contenido, totalMovimientos } = await exportarMovimientosCompacto()
-      const blob = new Blob([contenido], { type: 'text/csv;charset=utf-8' })
+      const blob = new Blob(['\uFEFF', contenido], { type: 'text/csv;charset=utf-8' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = nombre
       a.click()
-      URL.revokeObjectURL(url)
-      setMsg(`Se exportaron los ${totalMovimientos} movimientos históricos en formato compacto (mínimo de tokens).`)
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setMsg(`Se exportaron los ${totalMovimientos} movimientos históricos en formato compacto (separado por "|").`)
     } catch (e: any) {
       setError(e?.message || 'No se pudieron exportar los movimientos.')
     } finally {
@@ -55,19 +105,35 @@ export default function BackupPage() {
     }
   }
 
-  const importar = async (file: File) => {
-    setBusy(true)
+  const prepararImportacion = async (file: File) => {
+    setMsg('')
+    setError('')
+    setPendiente(null)
+    try {
+      const texto = await file.text()
+      const preview = analizarBackupJson(file.name, texto)
+      setPendiente(preview)
+    } catch (e: any) {
+      setError(e?.message || 'Archivo JSON inválido.')
+    } finally {
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  const confirmarImportacion = async () => {
+    if (!pendiente || busyImport) return
+    setBusyImport(true)
     setMsg('')
     setError('')
     try {
-      const texto = await file.text()
-      const n = await importarBackup(texto)
+      const n = await importarBackup(pendiente.texto)
+      invalidarSnapshotFinanciero()
+      setPendiente(null)
       setMsg(`Restauración exitosa: ${n} documentos restaurados en Firestore.`)
     } catch (e: any) {
       setError(e?.message || 'Archivo JSON inválido o error al restaurar datos.')
     } finally {
-      setBusy(false)
-      if (fileRef.current) fileRef.current.value = ''
+      setBusyImport(false)
     }
   }
 
@@ -92,24 +158,24 @@ export default function BackupPage() {
 
         <CardContent className="space-y-4 p-4 text-xs sm:p-6">
           <p className="text-sm leading-relaxed text-mist-500">
-            Exporta una instantánea completa de tu base de datos: cuentas, deudas, vehículos, propiedades, nómina, recurrentes, movimientos y calendario. Guárdala localmente o restáurala cuando quieras.
+            Exporta una instantánea completa de tu base de datos: cuentas, deudas, vehículos, propiedades, nómina, recurrentes, impuestos, movimientos, calendario y configuración. Guárdala localmente o restáurala cuando quieras.
           </p>
 
           <div className="flex flex-wrap gap-2.5 pt-1">
             <Button
               size="sm"
-              disabled={busy}
-              onClick={descargar}
+              disabled={ocupado}
+              onClick={() => void descargar()}
               className="h-10 cursor-pointer gap-2 bg-gradient-to-r from-emerald-500 to-teal-400 px-4 text-xs font-bold text-[#04241a] hover:brightness-110"
             >
               <Download className="h-4 w-4" />
-              <span>{busy ? 'Generando...' : 'Descargar copia (.json)'}</span>
+              <span>{busyExport ? 'Generando...' : 'Descargar copia (.json)'}</span>
             </Button>
 
             <Button
               size="sm"
-              disabled={busy || busyMovs}
-              onClick={descargarMovimientosCompacto}
+              disabled={ocupado}
+              onClick={() => void descargarMovimientosCompacto()}
               className="h-10 cursor-pointer gap-2 border border-emerald-400/30 bg-emerald-400/15 px-4 text-xs font-bold text-emerald-200 hover:bg-emerald-400/25"
             >
               <FileSpreadsheet className="h-4 w-4" />
@@ -119,12 +185,12 @@ export default function BackupPage() {
             <Button
               size="sm"
               variant="outline"
-              disabled={busy || busyMovs}
+              disabled={ocupado}
               onClick={() => fileRef.current?.click()}
               className="h-10 cursor-pointer gap-2 border-white/10 bg-transparent px-4 text-xs text-mist-300 hover:bg-white/5 hover:text-white"
             >
               <Upload className="h-4 w-4" />
-              <span>Restaurar desde archivo</span>
+              <span>{busyImport ? 'Restaurando...' : 'Restaurar desde archivo'}</span>
             </Button>
 
             <input
@@ -134,10 +200,57 @@ export default function BackupPage() {
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0]
-                if (f) importar(f)
+                if (f) void prepararImportacion(f)
               }}
             />
           </div>
+
+          {pendiente && (
+            <div className="space-y-3 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-xs text-amber-100">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                <div className="space-y-1">
+                  <div className="font-extrabold text-white">
+                    Confirmar restauración de {pendiente.archivoNombre}
+                  </div>
+                  <p className="text-amber-200/90">
+                    Se escribirán <b>{pendiente.totalDocs}</b> documento(s) en {pendiente.colecciones.length}{' '}
+                    colección(es) de Firestore. Los registros con el mismo ID serán sobrescritos.
+                    {pendiente.generado ? ` Respaldo generado: ${pendiente.generado.slice(0, 19).replace('T', ' ')}.` : ''}
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {pendiente.colecciones.map((c) => (
+                  <span
+                    key={c.nombre}
+                    className="rounded-lg border border-amber-300/25 bg-black/25 px-2 py-0.5 text-[11px] font-semibold text-amber-200"
+                  >
+                    {c.nombre}: {c.cantidad}
+                  </span>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button
+                  size="sm"
+                  disabled={busyImport}
+                  onClick={() => void confirmarImportacion()}
+                  className="h-9 cursor-pointer bg-amber-400 px-4 text-xs font-bold text-[#1f1300] hover:bg-amber-300"
+                >
+                  {busyImport ? 'Restaurando...' : 'Sí, restaurar respaldo'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busyImport}
+                  onClick={() => setPendiente(null)}
+                  className="h-9 cursor-pointer border-white/15 bg-transparent text-xs text-mist-200 hover:bg-white/10"
+                >
+                  Cancelar
+                </Button>
+              </div>
+            </div>
+          )}
 
           {msg && (
             <div className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-3 font-bold text-emerald-200">
@@ -147,7 +260,10 @@ export default function BackupPage() {
           )}
 
           {error && (
-            <div className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-3 font-medium text-red-300">
+            <div
+              role="alert"
+              className="flex items-center gap-2 rounded-xl border border-red-400/25 bg-red-500/10 p-3 font-medium text-red-300"
+            >
               <AlertCircle className="h-4 w-4 shrink-0" />
               <span>{error}</span>
             </div>

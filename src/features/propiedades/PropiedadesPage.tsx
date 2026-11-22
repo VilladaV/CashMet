@@ -7,13 +7,19 @@ import {
   listarPropiedades,
   type Propiedad,
 } from '@/lib/firebase/propiedadesRepo'
+import { invalidarSnapshotFinanciero } from '@/features/chat/snapshot'
+import { fechaFutura } from '@/lib/fechas'
+import { desformatearCifra } from '@/lib/utils'
 
 const num = (s: string) => {
-  const n = Number(String(s).replace(/[^\d.-]/g, ''))
+  const limpio = String(s ?? '').trim()
+  if (!limpio) return undefined
+  const n = desformatearCifra(limpio)
   return Number.isFinite(n) ? n : undefined
 }
 
-const NUMERICOS = new Set(['valorComercialEstimado', 'valorPatrimonial', 'predialValor'])
+const NUMERICOS = new Set(['valorComercialEstimado', 'valorPatrimonial'])
+const CAMPOS_PREDIAL = new Set(['predialValor', 'predialFecha', 'municipio'])
 
 const CAMPOS: CampoForm[] = [
   { key: 'nombre', label: 'Nombre', required: true },
@@ -33,9 +39,11 @@ export default function PropiedadesPage() {
   return (
     <CrudPage<Propiedad>
       titulo="Propiedad"
+      tituloPlural="Propiedades"
       descripcion="Registra propiedades (casa, apartamento, lote) con su valor y predial."
       campos={CAMPOS}
       vacio={VACIO}
+      onMutate={() => invalidarSnapshotFinanciero()}
       listar={listarPropiedades}
       crear={(d) => crearPropiedad(d)}
       actualizar={(id, d) => actualizarPropiedad(id, d)}
@@ -46,29 +54,42 @@ export default function PropiedadesPage() {
           tipo: vals.tipo || 'vivienda',
         }
         for (const c of CAMPOS) {
-          if (c.key === 'nombre' || c.key === 'tipo') continue
-          const v = vals[c.key]
-          if (!v) continue
-          if (NUMERICOS.has(c.key)) doc[c.key] = num(v)
-          else if (c.key.startsWith('predial')) doc[c.key] = String(v).trim()
-          else doc[c.key] = String(v).trim()
+          if (c.key === 'nombre' || c.key === 'tipo' || CAMPOS_PREDIAL.has(c.key)) continue
+          const v = String(vals[c.key] ?? '').trim()
+          if (!v) {
+            doc[c.key] = null
+            continue
+          }
+          if (NUMERICOS.has(c.key)) {
+            const valNum = num(v)
+            if (valNum === undefined || valNum < 0) {
+              throw new Error(`${c.label} debe ser un número válido mayor o igual a 0.`)
+            }
+            doc[c.key] = Math.round(valNum)
+          } else {
+            doc[c.key] = v
+          }
         }
-        const predialValor = vals.predialValor
-          ? num(vals.predialValor)
-          : undefined
-        if (predialValor !== undefined || vals.predialFecha) {
+
+        const predialValor = vals.predialValor?.trim() ? num(vals.predialValor) : undefined
+        if (vals.predialValor?.trim() && (predialValor === undefined || predialValor < 0)) {
+          throw new Error('El valor anual del predial debe ser un número mayor o igual a 0.')
+        }
+        const predialFecha = vals.predialFecha?.trim() || undefined
+        const municipio = vals.municipio?.trim() || undefined
+
+        if (predialValor !== undefined || predialFecha || municipio) {
           doc.impuestos = {
             predial: {
-              valorAnual: predialValor,
-              fechaVencimiento: vals.predialFecha || undefined,
-              municipio: vals.municipio?.trim() || undefined,
-              vigente: !!vals.predialFecha,
+              valorAnual: predialValor !== undefined ? Math.round(predialValor) : null,
+              fechaVencimiento: predialFecha ?? null,
+              municipio: municipio ?? null,
+              vigente: fechaFutura(predialFecha),
               fuente: 'manual',
             },
           }
-          delete doc.predialValor
-          delete doc.predialFecha
-          delete doc.municipio
+        } else {
+          doc.impuestos = null
         }
         return doc
       }}
@@ -94,6 +115,7 @@ export default function PropiedadesPage() {
               : p.valorPatrimonial
                 ? `Patrimonial: $${p.valorPatrimonial.toLocaleString('es-CO')}`
                 : ''}
+            {p.impuestos?.predial?.municipio ? ` · ${p.impuestos.predial.municipio}` : ''}
             {p.impuestos?.predial?.fechaVencimiento ? ` · Predial: ${p.impuestos.predial.fechaVencimiento}` : ''}
           </div>
         </div>

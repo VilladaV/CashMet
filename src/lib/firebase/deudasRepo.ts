@@ -1,7 +1,7 @@
 import { addDoc, collection, deleteDoc, doc, getDocs, increment, runTransaction, updateDoc } from 'firebase/firestore'
 import { db } from './config'
 import { COLLECTIONS } from './collections'
-import { limpio } from './repoUtils'
+import { limpio, limpioUpdate } from './repoUtils'
 import { datosMovimiento } from './movimientosRepo'
 import { parseFechaLocal } from '../fechas'
 
@@ -33,6 +33,7 @@ export type ErrorPagoDeuda =
   | 'fecha_invalida'
   | 'deuda_no_encontrada'
   | 'deuda_pagada'
+  | 'deuda_congelada'
   | 'monto_excede_saldo'
   | 'cuenta_no_encontrada'
   | 'saldo_insuficiente'
@@ -57,12 +58,22 @@ export async function listarDeudas(): Promise<Deuda[]> {
 }
 
 export async function crearDeuda(d: Partial<Deuda>): Promise<string> {
-  const ref = await addDoc(collection(db, COLLECTIONS.DEUDAS), limpio({ ...d, actualizado: Date.now() }))
+  const { id: _omitido, ...resto } = d as Record<string, unknown>
+  if (resto.saldoPendiente !== undefined && resto.saldoPendiente !== null) {
+    const s = Number(resto.saldoPendiente)
+    resto.saldoPendiente = Number.isFinite(s) ? Math.max(0, Math.round(s)) : 0
+  }
+  const ref = await addDoc(collection(db, COLLECTIONS.DEUDAS), limpio({ ...resto, actualizado: Date.now() }))
   return ref.id
 }
 
 export async function actualizarDeuda(id: string, d: Partial<Deuda>): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.DEUDAS, id), limpio({ ...d, actualizado: Date.now() }))
+  const { id: _omitido, ...resto } = d as Record<string, unknown>
+  if (resto.saldoPendiente !== undefined && resto.saldoPendiente !== null) {
+    const s = Number(resto.saldoPendiente)
+    resto.saldoPendiente = Number.isFinite(s) ? Math.max(0, Math.round(s)) : 0
+  }
+  await updateDoc(doc(db, COLLECTIONS.DEUDAS, id), limpioUpdate({ ...resto, actualizado: Date.now() }))
 }
 
 export async function eliminarDeuda(id: string): Promise<void> {
@@ -88,23 +99,16 @@ export async function registrarPagoDeuda(
 
   const deudaRef = doc(db, COLLECTIONS.DEUDAS, id)
   const movRef = doc(collection(db, COLLECTIONS.MOVIMIENTOS))
-  const datos = datosMovimiento({
-    fecha,
-    tipo: 'pago_deuda',
-    concepto: 'Pago de cuota deuda',
-    monto: montoAbs,
-    categoria: 'deudas',
-    deudaId: id,
-    cuentaBancoId,
-    fuente,
-  })
 
   return runTransaction<ResultadoPagoDeuda>(db, async (tx) => {
     const deudaSnap = await tx.get(deudaRef)
     if (!deudaSnap.exists()) return { ok: false, error: 'deuda_no_encontrada' }
 
     const deuda = deudaSnap.data() as Record<string, unknown>
-    const saldoActual = Number(deuda.saldoPendiente) || 0
+    const saldoActual = Math.round(Number(deuda.saldoPendiente) || 0)
+    if (deuda.estado === 'congelada') {
+      return { ok: false, error: 'deuda_congelada', saldoPendiente: saldoActual }
+    }
     if (deuda.estado === 'pagada' || saldoActual <= 0) {
       return { ok: false, error: 'deuda_pagada', saldoPendiente: saldoActual }
     }
@@ -112,18 +116,33 @@ export async function registrarPagoDeuda(
       return { ok: false, error: 'monto_excede_saldo', saldoPendiente: saldoActual }
     }
 
-    if (cuentaBancoId) {
-      const cuentaRef = doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaBancoId)
+    const cuentaRef = cuentaBancoId ? doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaBancoId) : null
+    if (cuentaRef) {
       const cuentaSnap = await tx.get(cuentaRef)
       if (!cuentaSnap.exists()) return { ok: false, error: 'cuenta_no_encontrada', saldoPendiente: saldoActual }
       const saldoCuenta = Number(cuentaSnap.data()?.saldoActual) || 0
       if (saldoCuenta < montoAbs) {
         return { ok: false, error: 'saldo_insuficiente', saldoPendiente: saldoActual, saldoDisponible: saldoCuenta }
       }
+    }
+
+    const nombreDeuda = String(deuda.nombre ?? '').trim()
+    const datos = datosMovimiento({
+      fecha,
+      tipo: 'pago_deuda',
+      concepto: nombreDeuda ? `Pago de cuota ${nombreDeuda}` : 'Pago de cuota deuda',
+      monto: montoAbs,
+      categoria: 'Deudas',
+      deudaId: id,
+      cuentaBancoId,
+      fuente,
+    })
+
+    if (cuentaRef) {
       tx.update(cuentaRef, { saldoActual: increment(-montoAbs), actualizado: Date.now() })
     }
 
-    const nuevoSaldo = saldoActual - montoAbs
+    const nuevoSaldo = Math.max(0, saldoActual - montoAbs)
     const cerrada = nuevoSaldo <= 0
     tx.update(deudaRef, {
       saldoPendiente: nuevoSaldo,
