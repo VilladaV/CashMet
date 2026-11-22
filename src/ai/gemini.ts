@@ -130,10 +130,18 @@ export async function llamarGemini(body: unknown): Promise<{ res: Response | nul
   return { res: null, cuotaAgotada }
 }
 
+// Circuit-breaker de sesión: si Google Search Grounding devuelve 429 (plan gratuito sin cuota de grounding),
+// evita repetir 3 llamadas fallidas por clic y preserva tu cuota por minuto (RPM) para Lucía y Gema.
+let googleSearchSinCuotaEnSesion = false
+
+export function googleSearchBloqueadoEnSesion(): boolean {
+  return googleSearchSinCuotaEnSesion
+}
+
 /**
  * Llama a Gemini activando Google Search Grounding (datos en vivo de internet).
- * Prioriza modelos con soporte completo de `google_search` (gemini-2.5-flash, 2.0-flash, etc.)
- * y devuelve el motivo exacto si ninguno pudo activar la búsqueda web.
+ * Si el plan de API devuelve 429 por cuota de grounding, recuerda el estado en la sesión
+ * para no quemar el límite por minuto (RPM) en cada acción.
  */
 export async function llamarGeminiConBusqueda(
   bodySinTools: Record<string, unknown>,
@@ -154,15 +162,32 @@ export async function llamarGeminiConBusqueda(
     }
   }
 
-  // Mismos modelos activos que usa Lucía en CashMet + gemini-3.8-flash recomendado por la API
-  const candidatosBusqueda = [MODELO, 'gemini-3.8-flash', 'gemini-3.5-flash-lite'].filter(
+  if (googleSearchSinCuotaEnSesion) {
+    if (!permitirFallbackSinBusqueda) {
+      return {
+        res: null,
+        cuotaAgotada: true,
+        usoBusqueda: false,
+        errorBusqueda: 'Google Search Grounding sin cuota en plan actual (usando fuentes alternativas).',
+      }
+    }
+    const sinBusq = await llamarGemini(bodySinTools)
+    return {
+      res: sinBusq.res,
+      cuotaAgotada: sinBusq.cuotaAgotada,
+      usoBusqueda: false,
+      errorBusqueda: 'Google Search Grounding sin cuota en plan actual.',
+    }
+  }
+
+  // Solo probamos el modelo principal + 1 respaldo para no agotar el RPM del plan gratuito
+  const candidatosBusqueda = [MODELO, 'gemini-3.8-flash'].filter(
     (m, i, a) => m && a.indexOf(m) === i
   )
 
   let cuotaAgotada = false
   const errores: string[] = []
 
-  // Nunca enviar responseMimeType/responseSchema junto con google_search (evita rechazo o desactivación silenciosa)
   const genCfg =
     bodySinTools.generationConfig && typeof bodySinTools.generationConfig === 'object'
       ? { ...(bodySinTools.generationConfig as Record<string, unknown>) }
@@ -186,7 +211,10 @@ export async function llamarGeminiConBusqueda(
       if (r.ok) {
         return { res: r, cuotaAgotada: false, usoBusqueda: true, modeloUsado: modelo }
       }
-      if (r.status === 429) cuotaAgotada = true
+      if (r.status === 429) {
+        cuotaAgotada = true
+        googleSearchSinCuotaEnSesion = true
+      }
       let detalle = `HTTP ${r.status}`
       try {
         const errJson = (await r.json()) as { error?: { message?: string } }
@@ -197,6 +225,8 @@ export async function llamarGeminiConBusqueda(
         /* ignore */
       }
       errores.push(`${modelo} (${detalle})`)
+      // Si ya devolvió 429 por cuota de plan/billing en grounding, no quemamos más modelos
+      if (r.status === 429) break
     } catch (err) {
       errores.push(`${modelo} (${err instanceof Error ? err.message : 'red'})`)
     }
@@ -209,7 +239,6 @@ export async function llamarGeminiConBusqueda(
     return { res: null, cuotaAgotada, usoBusqueda: false, errorBusqueda }
   }
 
-  // Fallback sin google_search si el llamador lo permite (ej: precios o fichas técnicas)
   const sinBusq = await llamarGemini(bodySinTools)
   return {
     res: sinBusq.res,

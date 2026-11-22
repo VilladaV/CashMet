@@ -9,6 +9,7 @@
 
 import {
   geminiDisponible,
+  googleSearchBloqueadoEnSesion,
   limpiarJson,
   llamarGemini,
   llamarGeminiConBusqueda,
@@ -86,81 +87,137 @@ interface CandidatoNoticiaRaw {
   alcance: 'regional' | 'nacional'
 }
 
+function parsearRssXml(xmlText: string): RssNewsItem[] {
+  if (typeof DOMParser === 'undefined') return []
+  try {
+    const doc = new DOMParser().parseFromString(xmlText, 'text/xml')
+    const nodes = Array.from(doc.querySelectorAll('item'))
+    return nodes.map((n) => ({
+      title: n.querySelector('title')?.textContent || '',
+      pubDate: n.querySelector('pubDate')?.textContent || '',
+      link: n.querySelector('link')?.textContent || '',
+      author: n.querySelector('source')?.textContent || '',
+      description: n.querySelector('description')?.textContent || '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+async function obtenerItemsRssConRespaldo(rssUrl: string): Promise<{ items: RssNewsItem[]; ok: boolean }> {
+  const encoded = encodeURIComponent(rssUrl)
+
+  // Mirror 1: rss2json.com (devuelve JSON ya parseado)
+  try {
+    const c1 = new AbortController()
+    const t1 = setTimeout(() => c1.abort(), 6500)
+    const r1 = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encoded}`, { signal: c1.signal })
+    clearTimeout(t1)
+    if (r1.ok) {
+      const json = (await r1.json()) as { status?: string; items?: RssNewsItem[] }
+      if (json.status === 'ok' && Array.isArray(json.items)) {
+        return { items: json.items, ok: true }
+      }
+    }
+  } catch {
+    /* intenta mirror 2 */
+  }
+
+  // Mirror 2: allorigins.win (XML directo de Google News)
+  try {
+    const c2 = new AbortController()
+    const t2 = setTimeout(() => c2.abort(), 7500)
+    const r2 = await fetch(`https://api.allorigins.win/raw?url=${encoded}`, { signal: c2.signal })
+    clearTimeout(t2)
+    if (r2.ok) {
+      const xml = await r2.text()
+      const items = parsearRssXml(xml)
+      if (items.length > 0 || xml.includes('<rss')) {
+        return { items, ok: true }
+      }
+    }
+  } catch {
+    /* intenta mirror 3 */
+  }
+
+  // Mirror 3: corsproxy.io (XML directo de Google News)
+  try {
+    const c3 = new AbortController()
+    const t3 = setTimeout(() => c3.abort(), 7500)
+    const r3 = await fetch(`https://corsproxy.io/?url=${encoded}`, { signal: c3.signal })
+    clearTimeout(t3)
+    if (r3.ok) {
+      const xml = await r3.text()
+      const items = parsearRssXml(xml)
+      if (items.length > 0 || xml.includes('<rss')) {
+        return { items, ok: true }
+      }
+    }
+  } catch {
+    /* sin mirrors disponibles */
+  }
+
+  return { items: [], ok: false }
+}
+
 async function fetchGoogleNewsQuery(
   queryStr: string,
   alcance: 'regional' | 'nacional'
 ): Promise<{ items: CandidatoNoticiaRaw[]; ok: boolean }> {
   const hoy = hoyISO()
   const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(queryStr)}&hl=es-419&gl=CO&ceid=CO:es-419`
-  const apiUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`
 
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 7500)
-    const r = await fetch(apiUrl, { signal: controller.signal })
-    clearTimeout(timer)
-    if (!r.ok) return { items: [], ok: false }
+  const { items: rawItems, ok } = await obtenerItemsRssConRespaldo(rssUrl)
+  if (!ok) return { items: [], ok: false }
 
-    const json = (await r.json()) as { status?: string; items?: RssNewsItem[] }
-    if (json.status !== 'ok' || !Array.isArray(json.items)) {
-      return { items: [], ok: false }
-    }
+  const items: CandidatoNoticiaRaw[] = []
+  for (const item of rawItems) {
+    const tituloRaw = String(item.title || '').trim()
+    if (!tituloRaw) continue
 
-    const items: CandidatoNoticiaRaw[] = []
-    for (const item of json.items) {
-      const tituloRaw = String(item.title || '').trim()
-      if (!tituloRaw) continue
+    const partes = tituloRaw.split(' - ')
+    const fuente =
+      partes.length > 1 ? partes.pop()!.trim() : String(item.author || 'Prensa Colombia').trim()
+    const titulo = partes.join(' - ').trim() || tituloRaw
 
-      const partes = tituloRaw.split(' - ')
-      const fuente =
-        partes.length > 1 ? partes.pop()!.trim() : String(item.author || 'Prensa Colombia').trim()
-      const titulo = partes.join(' - ').trim() || tituloRaw
-
-      let fechaPub = ''
-      if (item.pubDate) {
-        const dt = new Date(
-          item.pubDate.replace(' ', 'T') + (item.pubDate.includes('Z') ? '' : 'Z')
-        )
-        if (!Number.isNaN(dt.getTime())) {
-          fechaPub = isoLocal(dt)
-        }
+    let fechaPub = ''
+    if (item.pubDate) {
+      const parsedDate = new Date(
+        item.pubDate.includes('GMT') || item.pubDate.includes('Z') || item.pubDate.includes('+')
+          ? item.pubDate
+          : item.pubDate.replace(' ', 'T') + 'Z'
+      )
+      if (!Number.isNaN(parsedDate.getTime())) {
+        fechaPub = isoLocal(parsedDate)
       }
-      // Candado estricto: solo noticias publicadas en los últimos 2 días
-      if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
-
-      const resumenRaw = String(item.description || '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 240)
-
-      items.push({
-        titulo,
-        fuente,
-        link: String(item.link || '').trim(),
-        fechaPub,
-        resumenRaw,
-        alcance,
-      })
     }
+    // Candado estricto: solo noticias publicadas en los últimos 2 días
+    if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
 
-    return { items, ok: true }
-  } catch {
-    return { items: [], ok: false }
+    const resumenRaw = String(item.description || '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 240)
+
+    items.push({
+      titulo,
+      fuente,
+      link: String(item.link || '').trim(),
+      fechaPub,
+      resumenRaw,
+      alcance,
+    })
   }
+
+  return { items, ok: true }
 }
 
 /**
- * Fuente web real de todo Colombia (gratis, sin cuota de Google Search Grounding):
- * 1. Consulta 2 feeds reales de Google News Colombia (`when:2d`):
- *    - Regional: Caldas & Eje Cafetero (derrumbes, cierres viales, lluvias, damnificados).
- *    - Nacional: Todo Colombia (Chocó, Costa Caribe, Antioquia, Pacífico, Llanos, Cauca, Tolima, etc.).
- * 2. Pasa TODAS las candidatas por Gemini IA como CURADOR OPERATIVO ESTRICTO:
- *    - Evalúa una por una si Bear's Reserve puede ayudar aunque sea en lo más mínimo
- *      (transporte humanitario, víveres/agua a damnificados, rescate 4x4/camión, despeje vial, evacuación).
- *    - RECHAZA política, presupuestos, accidentes urbanos de moto/carro, crímenes y duplicados.
- *    - Sin importar el departamento (Chocó, Costa, Manizales, Cauca...), si Bear's Reserve puede ayudar, se muestra
- *      y el usuario decide si despachar o no.
+ * Fuente web real de todo Colombia (1 sola consulta limpia + mirrors CORS de respaldo):
+ * 1. Consulta Google News Colombia (`when:2d`) sobre derrumbes, inundaciones, damnificados,
+ *    cierres viales y emergencias invernales en todo el país (sin saturar rate-limits).
+ * 2. Pasa las candidatas en 1 sola llamada a Gemini IA como CURADOR OPERATIVO ESTRICTO.
  */
 async function buscarNoticiasGoogleNewsRSS(
   eventosExistentes: EventoRadarLocal[]
@@ -170,25 +227,20 @@ async function buscarNoticiasGoogleNewsRSS(
   candidatasEvaluadas: number
   descartadasIrrelevantes: number
 }> {
-  const queryRegional =
-    '(Manizales OR Caldas OR Chinchiná OR Villamaría OR Risaralda OR Quindío OR "Alto de Letras") (derrumbe OR deslizamiento OR inundación OR "cierre vial" OR "paso restringido" OR damnificados OR creciente OR avalancha OR "emergencia invernal" OR "vía bloqueada") when:2d'
+  // 1 sola petición limpia cubriendo todo Colombia (evita 429 por solicitudes paralelas en rss2json)
+  const queryUnificada =
+    'Colombia (derrumbe OR deslizamiento OR inundaciones OR damnificados OR "cierre vial" OR "emergencia invernal" OR avalancha OR "vía bloqueada") when:2d'
 
-  const queryNacional =
-    'Colombia (derrumbe OR deslizamiento OR inundaciones OR damnificados OR "emergencia invernal" OR "cierre total" OR "comunidades incomunicadas" OR avalancha OR "creciente súbita" OR "ayuda humanitaria") (Chocó OR Antioquia OR Cauca OR Nariño OR Caribe OR Córdoba OR Bolívar OR Santander OR Tolima OR Huila OR Meta OR Valle OR Guajira OR Invías OR carreteras) when:2d'
+  const resNac = await fetchGoogleNewsQuery(queryUnificada, 'nacional')
 
-  const [resReg, resNac] = await Promise.all([
-    fetchGoogleNewsQuery(queryRegional, 'regional'),
-    fetchGoogleNewsQuery(queryNacional, 'nacional'),
-  ])
-
-  if (!resReg.ok && !resNac.ok) {
+  if (!resNac.ok) {
     return { eventos: [], consultado: false, candidatasEvaluadas: 0, descartadasIrrelevantes: 0 }
   }
 
-  // Combinar y pre-deduplicar candidatas por título/url contra las existentes
+  // Pre-deduplicar candidatas por título/url contra las existentes
   const combinadas: CandidatoNoticiaRaw[] = []
   const yaVistas: EventoRadarLocal[] = [...eventosExistentes]
-  for (const item of [...resReg.items.slice(0, 8), ...resNac.items.slice(0, 10)]) {
+  for (const item of resNac.items.slice(0, 16)) {
     const temp: EventoRadarLocal = {
       id: 'tmp',
       titulo: item.titulo,
@@ -374,9 +426,9 @@ Responde ÚNICAMENTE con un JSON válido:
 }
 
 /**
- * 1. PRECIOS REALES DE COMBUSTIBLE EN COLOMBIA (Manizales / Caldas) — Pipeline en 2 pasos
- * Paso 1: Gemini + Google Search Grounding en texto natural (sin forzar JSON).
- * Paso 2: Extracción JSON estricta sobre el texto verificado en web.
+ * 1. PRECIOS REALES DE COMBUSTIBLE EN COLOMBIA (Manizales / Caldas)
+ * Si Google Search Grounding tiene cuota, usa 2 pasos verificados en web.
+ * Si el plan gratuito no tiene cuota de grounding, hace 1 sola llamada limpia JSON (sin quemar RPM).
  */
 export async function consultarPreciosCombustibleRealesAI(): Promise<PreciosCombustible | null> {
   if (!geminiDisponible) return null
@@ -384,53 +436,66 @@ export async function consultarPreciosCombustibleRealesAI(): Promise<PreciosComb
   const hoy = hoyISO()
 
   try {
-    // PASO 1: Búsqueda web en vivo (texto libre para que Google Search Grounding siempre se ejecute)
-    const promptBusqueda = `Fecha actual: ${hoy}.
-Consulta en internet los precios VIGENTES hoy del combustible por galón en pesos colombianos (COP) en Manizales, Caldas (o el promedio oficial CREG / Ministerio de Minas y Energía de Colombia si Manizales no aparece desglosado):
+    let textoJson = ''
+    let fuentesWeb: Array<{ title: string; uri: string }> = []
+    let tuvoGroundingReal = false
+
+    if (!googleSearchBloqueadoEnSesion()) {
+      const promptBusqueda = `Fecha actual: ${hoy}.
+Consulta en internet los precios VIGENTES hoy del combustible por galón en pesos colombianos (COP) en Manizales, Caldas (o el promedio oficial CREG / Ministerio de Minas y Energía de Colombia):
 - Gasolina Corriente (COP/galón)
 - ACPM / Diésel (COP/galón)
 - Gasolina Extra (COP/galón)
-Indica las cifras exactas y la fuente oficial o medio colombiano que reporta la tarifa vigente.`
+Indica las cifras exactas y la fuente.`
 
-    const { res: resPaso1, usoBusqueda } = await llamarGeminiConBusqueda(
-      {
-        contents: [{ role: 'user', parts: [{ text: promptBusqueda }] }],
-        generationConfig: { temperature: 0.1 },
-      },
-      true
-    )
-    if (!resPaso1) return null
+      const { res: resPaso1, usoBusqueda } = await llamarGeminiConBusqueda(
+        {
+          contents: [{ role: 'user', parts: [{ text: promptBusqueda }] }],
+          generationConfig: { temperature: 0.1 },
+        },
+        false
+      )
 
-    const data1 = (await resPaso1.json()) as GeminiCandidateResponse
-    const { texto: textoInvestigado, fuentesWeb, consultasWeb } = extraerTextoYFuentes(data1)
-    if (!textoInvestigado) return null
-
-    const tuvoGroundingReal = usoBusqueda && (fuentesWeb.length > 0 || consultasWeb.length > 0)
-
-    // PASO 2: Estructurar la investigación en JSON limpio
-    const promptJson = `Extrae del siguiente texto los precios vigentes por galón en COP para Colombia/Manizales.
-Texto investigado:
+      if (resPaso1 && usoBusqueda) {
+        const data1 = (await resPaso1.json()) as GeminiCandidateResponse
+        const extr = extraerTextoYFuentes(data1)
+        fuentesWeb = extr.fuentesWeb
+        tuvoGroundingReal = extr.fuentesWeb.length > 0 || extr.consultasWeb.length > 0
+        if (extr.texto) {
+          const promptJson = `Extrae del texto los precios vigentes por galón en COP para Colombia/Manizales:
 """
-${textoInvestigado}
+${extr.texto}
 """
-Fuentes web detectadas: ${fuentesWeb.map((f) => f.title).join(', ') || 'ninguna'}
-
 Responde ÚNICAMENTE con un JSON válido:
-{
-  "corrientePorGalon": 16000,
-  "dieselPorGalon": 10800,
-  "extraPorGalon": 20500,
-  "fuente": "CREG / MinMinas Colombia (Manizales)"
-}`
+{"corrientePorGalon":16000,"dieselPorGalon":10800,"extraPorGalon":20500,"fuente":"CREG / MinMinas Colombia (Manizales)"}`
+          const { res: resPaso2 } = await llamarGemini({
+            contents: [{ role: 'user', parts: [{ text: promptJson }] }],
+            generationConfig: { temperature: 0, responseMimeType: 'application/json' },
+          })
+          if (resPaso2) {
+            const data2 = (await resPaso2.json()) as GeminiCandidateResponse
+            textoJson = extraerTextoYFuentes(data2).texto
+          }
+        }
+      }
+    }
 
-    const { res: resPaso2 } = await llamarGemini({
-      contents: [{ role: 'user', parts: [{ text: promptJson }] }],
-      generationConfig: { temperature: 0, responseMimeType: 'application/json' },
-    })
-    if (!resPaso2) return null
+    // 1 sola llamada limpia a Gemini si grounding no tiene cuota en el plan actual
+    if (!textoJson) {
+      const promptDirecto = `Fecha actual: ${hoy}.
+Indica los precios de referencia vigentes más recientes del combustible por galón en COP en Manizales / Caldas (Colombia, CREG / MinMinas):
+Responde ÚNICAMENTE con un JSON válido:
+{"corrientePorGalon":16000,"dieselPorGalon":10800,"extraPorGalon":20500,"fuente":"Referencia Gemini (CREG / Manizales)"}`
 
-    const data2 = (await resPaso2.json()) as GeminiCandidateResponse
-    const { texto: textoJson } = extraerTextoYFuentes(data2)
+      const { res } = await llamarGemini({
+        contents: [{ role: 'user', parts: [{ text: promptDirecto }] }],
+        generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+      })
+      if (!res) return null
+      const data = (await res.json()) as GeminiCandidateResponse
+      textoJson = extraerTextoYFuentes(data).texto
+    }
+
     if (!textoJson) return null
 
     const parsed = JSON.parse(limpiarJson(textoJson)) as Partial<PreciosCombustible>
@@ -463,7 +528,7 @@ Responde ÚNICAMENTE con un JSON válido:
       corrientePorGalon: corr,
       dieselPorGalon: dies,
       extraPorGalon: ext,
-      actualizado: `${hoy} ${hora} · ${tuvoGroundingReal ? 'Sincronizado en vivo (Google Search)' : 'Estimación Gemini (sin grounding web)'}`,
+      actualizado: `${hoy} ${hora} · ${tuvoGroundingReal ? 'Sincronizado en vivo (Google Search)' : 'Referencia Gemini IA'}`,
       fuente: fuenteTexto,
       consultadoEn: ahora,
       esFuenteReal: tuvoGroundingReal,
