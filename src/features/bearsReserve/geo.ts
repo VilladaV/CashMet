@@ -157,12 +157,18 @@ export function resolverCoordenadasLugar(
     { claves: ['santa rosa'], punto: PUNTOS_REFERENCIA_CALDAS.santa_rosa },
     { claves: ['pereira', 'dosquebradas', 'risaralda'], punto: PUNTOS_REFERENCIA_CALDAS.pereira },
     { claves: ['armenia', 'quindio', 'calarca', 'salento'], punto: { nombre: 'Quindío', lat: 4.5339, lng: -75.6811 } },
-    { claves: ['fresno', 'mariquita', 'tolima', 'herveo', 'ibague'], punto: PUNTOS_REFERENCIA_CALDAS.fresno },
-    { claves: ['cocorna', 'san luis', 'antioquia', 'medellin', 'uraba', 'dabeiba'], punto: PUNTOS_REFERENCIA_CALDAS.cocorna },
+    { claves: ['ibague'], punto: { nombre: 'Ibagué (Tolima)', lat: 4.4389, lng: -75.2322 } },
+    { claves: ['fresno', 'mariquita', 'tolima', 'herveo'], punto: PUNTOS_REFERENCIA_CALDAS.fresno },
+    { claves: ['bello', 'zamora'], punto: { nombre: 'Bello (Antioquia)', lat: 6.3373, lng: -75.5579 } },
+    { claves: ['medellin', 'aburra', 'envigado', 'itagui', 'sabaneta'], punto: { nombre: 'Medellín (Antioquia)', lat: 6.2442, lng: -75.5812 } },
+    { claves: ['uraba', 'apartado', 'turbo', 'dabeiba'], punto: { nombre: 'Urabá (Antioquia)', lat: 7.883, lng: -76.6259 } },
+    { claves: ['cocorna', 'san luis', 'antioquia'], punto: PUNTOS_REFERENCIA_CALDAS.cocorna },
     { claves: ['choco', 'quibdo', 'istmina', 'riosucio choco', 'san juan'], punto: { nombre: 'Chocó', lat: 5.6947, lng: -76.6611 } },
-    { claves: ['cauca', 'popayan', 'rosas', 'panamericana'], punto: { nombre: 'Cauca', lat: 2.4448, lng: -76.6147 } },
+    { claves: ['cauca', 'popayan', 'rosas', 'cajibio', 'panamericana'], punto: { nombre: 'Cauca', lat: 2.4448, lng: -76.6147 } },
     { claves: ['narino', 'pasto', 'tumaco', 'ipiales'], punto: { nombre: 'Nariño', lat: 1.2136, lng: -77.2811 } },
-    { claves: ['valle del cauca', 'cali', 'buenaventura', 'buga', 'palmira'], punto: { nombre: 'Valle del Cauca', lat: 3.4516, lng: -76.532 } },
+    { claves: ['buenaventura'], punto: { nombre: 'Buenaventura (Valle)', lat: 3.8801, lng: -77.0312 } },
+    { claves: ['buga', 'tulua'], punto: { nombre: 'Buga (Valle)', lat: 3.9009, lng: -76.2978 } },
+    { claves: ['valle del cauca', 'cali', 'palmira', 'jamundi'], punto: { nombre: 'Valle del Cauca', lat: 3.4516, lng: -76.532 } },
     { claves: ['cordoba', 'monteria', 'lorica', 'mojana'], punto: { nombre: 'Córdoba', lat: 8.7479, lng: -75.8814 } },
     { claves: ['bolivar', 'cartagena', 'magangue'], punto: { nombre: 'Bolívar', lat: 10.391, lng: -75.4794 } },
     { claves: ['atlantico', 'barranquilla', 'soledad'], punto: { nombre: 'Atlántico', lat: 10.9685, lng: -74.7813 } },
@@ -250,6 +256,8 @@ export function calcularDistanciaRutaParadas(
 
 /**
  * Calcula la distancia real por carretera/trocha desde Finca El Guadual a un punto.
+ * Adapta automáticamente el factor de sinuosidad y velocidad promedio entre trocha local (≤35 km)
+ * y carretera nacional de montaña (>35 km) para que los tiempos a otras regiones sean realistas.
  */
 export function calcularDistanciaRealDesdeBase(
   destinoLat: number,
@@ -258,7 +266,9 @@ export function calcularDistanciaRealDesdeBase(
 ): {
   distanciaKmIda: number
   distanciaKmTotalIdaYVuelta: number
+  tiempoMinutosIda: number
   tiempoMinutosRodamientoIdaYVuelta: number
+  esLargaDistancia: boolean
 } {
   const linealKm = calcularDistanciaHaversineKm(
     BASE_BEARS_RESERVE.lat,
@@ -266,19 +276,131 @@ export function calcularDistanciaRealDesdeBase(
     destinoLat,
     destinoLng
   )
-  const factor = factorSinuosidadMontaña(esTrocha)
-  const kmIda = Number((linealKm * factor).toFixed(1))
+  const esLargaDistancia = linealKm > 35
+  const usarTrocha = esTrocha && !esLargaDistancia
+  const factor = usarTrocha ? 1.54 : 1.42
+  const kmIda = Math.max(2, Number((linealKm * factor).toFixed(1)))
   const kmTotal = Number((kmIda * 2).toFixed(1))
 
-  // Velocidad promedio en curvas y trochas de montaña: ~26 km/h en trocha, ~36 km/h mixto
-  const velPromedioKmH = esTrocha ? 26 : 36
-  const tiempoMinutos = kmTotal > 0 ? Math.round((kmTotal / velPromedioKmH) * 60) : 0
+  // Velocidad promedio realista en Colombia para camioneta 4x4 / camión:
+  // ~28 km/h en trocha veredal, ~48 km/h en carretera nacional de montaña
+  const velPromedioKmH = usarTrocha ? 28 : esLargaDistancia ? 48 : 38
+  const tiempoIda = kmIda > 0 ? Math.max(8, Math.round((kmIda / velPromedioKmH) * 60)) : 0
+  const tiempoTotal = tiempoIda * 2
 
   return {
     distanciaKmIda: kmIda,
     distanciaKmTotalIdaYVuelta: kmTotal,
-    tiempoMinutosRodamientoIdaYVuelta: tiempoMinutos,
+    tiempoMinutosIda: tiempoIda,
+    tiempoMinutosRodamientoIdaYVuelta: tiempoTotal,
+    esLargaDistancia,
   }
+}
+
+export interface EstimacionLogisticaMision {
+  distanciaKmIda: number
+  distanciaKmTotalIdaYVuelta: number
+  minutosIda: number
+  minutosVuelta: number
+  minutosRodamientoTotal: number
+  minutosServicioEnSitio: number
+  minutosRalenti: number
+  duracionTotalMinutos: number
+  categoriaDistancia: 'local' | 'regional' | 'nacional'
+  fuenteCalculo: 'gps_carretera' | 'estimado_cordillera'
+}
+
+/**
+ * Estima la logística completa de una misión desde Base Finca El Guadual:
+ * Tiempo total = Ida + Servicio/maniobra en el sitio + Vuelta.
+ * Si se provee una ruta real OSRM (`osrmIda`), usa la distancia real por carretera y aplica
+ * un factor conservador de vehículo pesado/montaña (1.18x) sobre el tiempo teórico OSRM.
+ */
+export function estimarLogisticaMisionDesdeBase(
+  destino: {
+    lat?: number
+    lng?: number
+    lugar: string
+    departamento?: string
+    titulo?: string
+    esEmergenciaGrave?: boolean
+    tipoMision?: string
+  },
+  osrmIda?: { distanciaKm: number; duracionMinutos: number } | null
+): EstimacionLogisticaMision {
+  const coords =
+    typeof destino.lat === 'number' &&
+    typeof destino.lng === 'number' &&
+    Number.isFinite(destino.lat) &&
+    Number.isFinite(destino.lng)
+      ? { lat: destino.lat, lng: destino.lng }
+      : resolverCoordenadasLugar(destino.lugar, destino.departamento || 'Caldas')
+
+  const texto = `${destino.titulo || ''} ${destino.lugar || ''}`.toLowerCase()
+  const pareceVereda = /vereda|trocha|finca|camino|tablazo|caba[ñn]a|la linda|desquite|rosario/.test(texto)
+
+  let kmIda: number
+  let minutosIda: number
+  let fuenteCalculo: 'gps_carretera' | 'estimado_cordillera' = 'estimado_cordillera'
+
+  if (osrmIda && osrmIda.distanciaKm > 0 && osrmIda.duracionMinutos > 0) {
+    kmIda = Number(osrmIda.distanciaKm.toFixed(1))
+    // Factor de convoy/camión en carretera de montaña colombiana (~18% sobre auto ligero OSRM)
+    minutosIda = Math.max(8, Math.round(osrmIda.duracionMinutos * 1.18))
+    fuenteCalculo = 'gps_carretera'
+  } else {
+    const calc = calcularDistanciaRealDesdeBase(coords.lat, coords.lng, pareceVereda)
+    kmIda = calc.distanciaKmIda
+    minutosIda = calc.tiempoMinutosIda
+  }
+
+  const kmTotal = Number((kmIda * 2).toFixed(1))
+  const minutosVuelta = minutosIda
+  const minutosRodamientoTotal = minutosIda + minutosVuelta
+
+  // Tiempo realista de trabajo / maniobra en el lugar según tipo de emergencia
+  let minutosServicioEnSitio = 55
+  if (/volcamiento|derrumbe|deslizamiento|barrizal|barro|atascad|atollam|rescate|suspendido/.test(texto)) {
+    minutosServicioEnSitio = 75
+  } else if (/[aá]rbol|despeje|acueducto|quebrada|inundaci|creciente/.test(texto)) {
+    minutosServicioEnSitio = 65
+  } else if (/m[eé]dic|traslado|insumos|trasteo|v[ií]veres|agua|escolar/.test(texto)) {
+    minutosServicioEnSitio = 40
+  }
+  if (destino.esEmergenciaGrave) {
+    minutosServicioEnSitio += 25
+  }
+  if (kmIda > 150) {
+    // Apoyo en convoy de larga distancia incluye descarga, coordinación local y breve descanso
+    minutosServicioEnSitio = Math.max(minutosServicioEnSitio, 90)
+  }
+
+  const minutosRalenti = Math.round(minutosServicioEnSitio * 0.5)
+  const duracionTotalMinutos = Math.max(25, minutosRodamientoTotal + minutosServicioEnSitio)
+
+  const categoriaDistancia: 'local' | 'regional' | 'nacional' =
+    kmIda <= 40 ? 'local' : kmIda <= 150 ? 'regional' : 'nacional'
+
+  return {
+    distanciaKmIda: kmIda,
+    distanciaKmTotalIdaYVuelta: kmTotal,
+    minutosIda,
+    minutosVuelta,
+    minutosRodamientoTotal,
+    minutosServicioEnSitio,
+    minutosRalenti,
+    duracionTotalMinutos,
+    categoriaDistancia,
+    fuenteCalculo,
+  }
+}
+
+export function formatearDuracionCorta(minutos: number): string {
+  const m = Math.max(0, Math.round(minutos))
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  const rem = m % 60
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`
 }
 
 /**

@@ -7,7 +7,9 @@ import {
   calcularDistanciaRealDesdeBase,
   calcularDistanciaRutaParadas,
   escapeHtml,
+  estimarLogisticaMisionDesdeBase,
   factorSinuosidadMontaña,
+  formatearDuracionCorta,
   resolverCoordenadasLugar,
 } from '@/features/bearsReserve/geo'
 import {
@@ -416,5 +418,40 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
 
     const rAlertas = responderGema('¿Hay alertas viales en Caldas? 🚨', ctx)
     expect(rAlertas.respuesta).toContain('Paso restringido vía Letras')
+  })
+
+  it('calcula distancia ida/vuelta y desglose ida + servicio + vuelta realista (local vs nacional y con GPS OSRM)', () => {
+    const local = estimarLogisticaMisionDesdeBase({
+      lugar: 'Vereda La Cabaña · Manizales',
+      departamento: 'Caldas',
+      titulo: 'Despeje de árbol caído',
+    })
+    expect(local.categoriaDistancia).toBe('local')
+    expect(local.distanciaKmIda).toBeGreaterThan(2)
+    expect(local.distanciaKmIda).toBeLessThan(25)
+    expect(local.distanciaKmTotalIdaYVuelta).toBeCloseTo(local.distanciaKmIda * 2, 1)
+    expect(local.duracionTotalMinutos).toBe(local.minutosRodamientoTotal + local.minutosServicioEnSitio)
+
+    const medellinOsrm = estimarLogisticaMisionDesdeBase(
+      {
+        lugar: 'Medellín',
+        departamento: 'Antioquia',
+        titulo: 'Tormenta eléctrica y alerta roja por quebradas',
+        esEmergenciaGrave: true,
+      },
+      { distanciaKm: 203.9, duracionMinutos: 214 }
+    )
+    expect(medellinOsrm.fuenteCalculo).toBe('gps_carretera')
+    expect(medellinOsrm.categoriaDistancia).toBe('nacional')
+    expect(medellinOsrm.distanciaKmIda).toBe(203.9)
+    expect(medellinOsrm.distanciaKmTotalIdaYVuelta).toBe(407.8)
+    expect(medellinOsrm.minutosRodamientoTotal).toBe(medellinOsrm.minutosIda * 2)
+    expect(medellinOsrm.duracionTotalMinutos).toBe(
+      medellinOsrm.minutosRodamientoTotal + medellinOsrm.minutosServicioEnSitio
+    )
+
+    expect(formatearDuracionCorta(45)).toBe('45 min')
+    expect(formatearDuracionCorta(120)).toBe('2h')
+    expect(formatearDuracionCorta(155)).toBe('2h 35m')
   })
 })

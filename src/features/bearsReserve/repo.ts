@@ -62,7 +62,41 @@ const DOC_COMBUSTIBLE = 'bears_reserve_combustible'
 const DOC_CHAT = 'bears_reserve_chat'
 
 const CLAVE_STORAGE_LEGACY = 'bears_reserve_data_v2'
+const CLAVE_SNAPSHOT_OPERACIONES = 'bears_reserve_operaciones_snap_v1'
 const INTERVALO_ESCANEO_RADAR_MS = 6 * 60 * 60 * 1000 // Auto-refrescar radar cada 6 horas
+
+// Colas de escritura serializadas por documento para impedir sobrescrituras fuera de orden en Firestore
+const colasEscrituraDoc: Record<string, Promise<unknown>> = {}
+
+function guardarSnapshotOperacionesLocal(estado: EstadoBearsCompleto): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(
+      CLAVE_SNAPSHOT_OPERACIONES,
+      JSON.stringify({
+        turnos: estado.turnos,
+        misiones: estado.misiones.slice(0, 250),
+        eventosRadar: estado.eventosRadar,
+        ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
+        ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
+        actualizado: Date.now(),
+      })
+    )
+  } catch {
+    /* quota o navegación privada */
+  }
+}
+
+function leerSnapshotOperacionesLocal(): Partial<EstadoBearsCompleto> | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(CLAVE_SNAPSHOT_OPERACIONES)
+    if (!raw) return null
+    return JSON.parse(raw) as Partial<EstadoBearsCompleto>
+  } catch {
+    return null
+  }
+}
 
 export interface EstadoBearsCompleto {
   vehiculosExtra: Record<string, Partial<VehiculoOperativo>>
@@ -347,15 +381,22 @@ function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null 
   }
 }
 
-async function persistirDoc(docId: string, data: Record<string, unknown>): Promise<void> {
-  try {
-    await setDoc(
-      doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId),
-      sanitizarFirestore({ ...data, actualizado: Date.now() })
-    )
-  } catch (err) {
-    console.warn(`Error persistiendo ${docId} en Firestore:`, err)
-  }
+function persistirDoc(docId: string, data: Record<string, unknown>): Promise<void> {
+  const previa = colasEscrituraDoc[docId] || Promise.resolve()
+  const tarea = previa
+    .catch(() => undefined)
+    .then(async () => {
+      try {
+        await setDoc(
+          doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId),
+          sanitizarFirestore({ ...data, actualizado: Date.now() })
+        )
+      } catch (err) {
+        console.warn(`Error persistiendo ${docId} en Firestore:`, err)
+      }
+    })
+  colasEscrituraDoc[docId] = tarea
+  return tarea
 }
 
 async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
@@ -368,6 +409,7 @@ async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
 }
 
 async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> {
+  guardarSnapshotOperacionesLocal(estado)
   await persistirDoc(DOC_OPERACIONES, {
     turnos: estado.turnos,
     // Limitamos historial en el doc a las últimas 250 misiones para mantener el documento ligero
@@ -403,6 +445,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
   promesaHidratacion = (async () => {
     const base = estadoInicialVacio()
     let existiaEnFirestore = false
+    let errorLecturaFirestore = false
 
     try {
       const [snapCfg, snapOp, snapComb, snapChat] = await Promise.all([
@@ -426,7 +469,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
         const d = snapOp.data() as Partial<EstadoBearsCompleto>
         base.turnos = Array.isArray(d.turnos) ? d.turnos : []
         base.misiones = Array.isArray(d.misiones) ? d.misiones : []
-        base.eventosRadar = filtrarEventosRadarVigentes(d.eventosRadar || [])
+        base.eventosRadar = deduplicarEventosRadar(filtrarEventosRadarVigentes(d.eventosRadar || []))
         base.ultimoEscaneoRadarEn = Number(d.ultimoEscaneoRadarEn) || 0
         base.ultimoDiagnosticoRadar = String(d.ultimoDiagnosticoRadar || '')
       }
@@ -447,14 +490,24 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
         base.chatMensajes = Array.isArray(d.chatMensajes) ? d.chatMensajes : []
       }
     } catch (err) {
+      errorLecturaFirestore = true
       console.warn('Error leyendo Bear\'s Reserve desde Firestore:', err)
+      // Si Firestore falla temporalmente (red/reconexión), restauramos el último snapshot local sin pisar la nube
+      const snapLocal = leerSnapshotOperacionesLocal()
+      if (snapLocal) {
+        base.turnos = Array.isArray(snapLocal.turnos) ? snapLocal.turnos : []
+        base.misiones = Array.isArray(snapLocal.misiones) ? snapLocal.misiones : []
+        base.eventosRadar = deduplicarEventosRadar(
+          filtrarEventosRadarVigentes(snapLocal.eventosRadar || [])
+        )
+        base.ultimoEscaneoRadarEn = Number(snapLocal.ultimoEscaneoRadarEn) || 0
+        base.ultimoDiagnosticoRadar = String(snapLocal.ultimoDiagnosticoRadar || '')
+      }
     }
 
-    // Migración o recuperación segura desde localStorage:
-    // - Si Firestore estaba vacío, migra todo.
-    // - Si Firestore ya existía pero `vehiculosExtra` o `empleadosExtra` quedaron vacíos (ej. migración previa incompleta o primer ingreso desde otro navegador), recupera los registros locales sin pisar lo que ya exista en Firestore.
+    // Migración o recuperación segura desde localStorage (NUNCA sobreescribe Firestore si hubo error de lectura)
     const legacy = leerMigracionLegacyLocalStorage()
-    if (!existiaEnFirestore) {
+    if (!existiaEnFirestore && !errorLecturaFirestore) {
       if (legacy) {
         if (legacy.vehiculosExtra) base.vehiculosExtra = legacy.vehiculosExtra
         if (legacy.empleadosExtra) base.empleadosExtra = legacy.empleadosExtra
@@ -1085,38 +1138,38 @@ async function ejecutarSincronizacionRadar(forzar = false): Promise<{
     }
   }
 
-  // Si el usuario fuerza un escaneo manual, limpiamos noticias web anteriores no despachadas para re-evaluarlas con el curador IA
-  const baseParaBusqueda = forzar
-    ? estado.eventosRadar.filter((e) => !e.esNoticiaWebReal || e.despachado)
-    : estado.eventosRadar
-
-  const noticiasVigentes = baseParaBusqueda.filter((e) => e.esNoticiaWebReal && !e.despachado)
-  const llamadasVigentes = baseParaBusqueda.filter((e) => !e.esNoticiaWebReal && !e.despachado)
+  // Si el usuario fuerza un escaneo manual, solo reemplazamos noticias web anteriores si la consulta web nueva responde OK
+  const llamadasVigentes = estado.eventosRadar.filter((e) => !e.esNoticiaWebReal && !e.despachado)
+  const noticiasVigentes = estado.eventosRadar.filter((e) => e.esNoticiaWebReal && !e.despachado)
+  const baseSinWebActiva = estado.eventosRadar.filter((e) => !e.esNoticiaWebReal || e.despachado)
 
   let noticiasReales: EventoRadarLocal[] = []
   let llamadasNuevas: EventoRadarLocal[] = []
   let diagnosticoWeb = estado.ultimoDiagnosticoRadar || ''
+  let baseConservar = estado.eventosRadar
 
   // 1. Buscar noticias web reales de TODO Colombia (<48h) curadas por Gemini IA
   if (forzar || noticiasVigentes.length < 2) {
-    const resWeb = await buscarNoticiasVialesRealesAI(baseParaBusqueda)
-    noticiasReales = resWeb.eventos
+    const resWeb = await buscarNoticiasVialesRealesAI(forzar ? baseSinWebActiva : estado.eventosRadar)
     diagnosticoWeb = resWeb.diagnostico
+    if (resWeb.busquedaWebActiva) {
+      noticiasReales = resWeb.eventos
+      if (forzar) baseConservar = baseSinWebActiva
+    }
   }
 
-  // 2. Regenerar llamadas comunitarias frescas (máx 3 activas al tiempo, sin repetir vereda ni tema)
-  const faltanLlamadas = Math.max(0, 3 - llamadasVigentes.length)
+  // 2. Mantener máximo 2 llamadas comunitarias veredales vigentes (evita acumular llamadas IA en cada escaneo o recarga)
+  const faltanLlamadas = Math.max(0, 2 - llamadasVigentes.length)
   if (faltanLlamadas > 0) {
-    const cantNecesaria = forzar ? 1 : Math.min(2, faltanLlamadas)
-    const existentesConWeb = [...baseParaBusqueda, ...noticiasReales]
-    llamadasNuevas = await generarLlamadasComunitariasIA(existentesConWeb, cantNecesaria)
+    const existentesConWeb = [...baseConservar, ...noticiasReales]
+    llamadasNuevas = await generarLlamadasComunitariasIA(existentesConWeb, faltanLlamadas)
     if (llamadasNuevas.length === 0) {
-      llamadasNuevas = generarLlamadasComunitariasRespaldo(existentesConWeb, cantNecesaria, ahora)
+      llamadasNuevas = generarLlamadasComunitariasRespaldo(existentesConWeb, faltanLlamadas, ahora)
     }
   }
 
   estado.eventosRadar = deduplicarEventosRadar(
-    filtrarEventosRadarVigentes([...noticiasReales, ...llamadasNuevas, ...baseParaBusqueda], ahora)
+    filtrarEventosRadarVigentes([...noticiasReales, ...llamadasNuevas, ...baseConservar], ahora)
   ).slice(0, 12)
   estado.ultimoEscaneoRadarEn = ahora
   estado.ultimoDiagnosticoRadar = diagnosticoWeb

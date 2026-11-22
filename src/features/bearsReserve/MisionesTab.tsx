@@ -34,12 +34,14 @@ import {
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
 import {
-  calcularDistanciaRealDesdeBase,
   calcularDistanciaRutaParadas,
+  estimarLogisticaMisionDesdeBase,
+  formatearDuracionCorta,
   BASE_BEARS_RESERVE,
   PUNTOS_REFERENCIA_CALDAS,
   resolverCoordenadasLugar,
 } from './geo'
+import { trazarRutaCarreteraGps } from './ruteoGps'
 import {
   seleccionarVehiculosOptimosMision,
   seleccionarTripulacionMision,
@@ -132,6 +134,7 @@ export default function MisionesTab({
 
   // Estados para radar dinámico
   const [escaneandoRadar, setEscaneandoRadar] = useState(false)
+  const [despachandoEventoId, setDespachandoEventoId] = useState<string | null>(null)
   const [modalReportarAbierto, setModalReportarAbierto] = useState(false)
   const [reporteTitulo, setReporteTitulo] = useState('')
   const [reporteLugar, setReporteLugar] = useState('Vereda San Peregrino · Caldas')
@@ -299,88 +302,125 @@ export default function MisionesTab({
     )
   }
 
-  // Despacho desde evento del Radar (con resolución automática por IA al vencer duración)
+  // Despacho desde evento del Radar (calcula ruta real por carretera ida + servicio en sitio + vuelta)
   const despacharDesdeEvento = async (ev: EventoRadarLocal) => {
-    const tipoDeducido =
-      ev.titulo.toLowerCase().includes('camión') ||
-      ev.titulo.toLowerCase().includes('barrizal') ||
-      ev.titulo.toLowerCase().includes('barro')
-        ? 'rescate_barrizal'
-        : ev.titulo.toLowerCase().includes('trasteo')
-          ? 'transporte_humanitario'
-          : 'auxilio_comunitario'
+    if (despachandoEventoId) return
+    setDespachandoEventoId(ev.id)
+    try {
+      const textoEv = `${ev.titulo} ${ev.resumen}`.toLowerCase()
+      const tipoDeducido =
+        /cami[oó]n|barrizal|barro|volcamiento|atascad|atollam|suspendido/.test(textoEv)
+          ? 'rescate_barrizal'
+          : /trasteo|traslado|m[eé]dic|v[ií]veres|agua|insumos/.test(textoEv)
+            ? 'transporte_humanitario'
+            : 'auxilio_comunitario'
 
-    const seleccionGema = seleccionarVehiculosOptimosMision(
-      {
+      const coordsDestino =
+        typeof ev.lat === 'number' && typeof ev.lng === 'number'
+          ? { lat: ev.lat, lng: ev.lng }
+          : resolverCoordenadasLugar(ev.lugar, ev.departamento || 'Caldas')
+
+      // Consultar distancia/tiempo reales por carretera (OSRM) con respaldo cordillera si falla
+      const rutaOsrmIda = await trazarRutaCarreteraGps([
+        { lat: BASE_BEARS_RESERVE.lat, lng: BASE_BEARS_RESERVE.lng },
+        coordsDestino,
+      ]).catch(() => null)
+
+      const logistica = estimarLogisticaMisionDesdeBase(
+        {
+          lat: coordsDestino.lat,
+          lng: coordsDestino.lng,
+          lugar: ev.lugar,
+          departamento: ev.departamento,
+          titulo: ev.titulo,
+          esEmergenciaGrave: ev.esEmergenciaGrave,
+          tipoMision: tipoDeducido,
+        },
+        rutaOsrmIda
+      )
+
+      const terrenoCalculado: MisionComunitaria['terreno'] =
+        tipoDeducido === 'rescate_barrizal'
+          ? 'trocha_extrema_barrizal'
+          : logistica.categoriaDistancia === 'nacional'
+            ? 'mixto_montaña'
+            : 'trocha_moderada'
+
+      const seleccionGema = seleccionarVehiculosOptimosMision(
+        {
+          titulo: ev.titulo,
+          tipo: tipoDeducido,
+          impactoSocial: ev.resumen,
+          terreno: terrenoCalculado,
+        },
+        vehiculos
+      )
+      const vehiculoElegido = seleccionGema.vehiculoElegido
+
+      const seleccionTripulacion = seleccionarTripulacionMision(
+        { titulo: ev.titulo, tipo: tipoDeducido, impactoSocial: ev.resumen },
+        vehiculoElegido ? [vehiculoElegido] : [],
+        empleados,
+        turnos,
+        hoyISO(),
+        horaActualHHMM()
+      )
+
+      const prioridadGeo: MisionComunitaria['prioridadGeografica'] =
+        logistica.categoriaDistancia === 'local'
+          ? 'local_manizales'
+          : logistica.categoriaDistancia === 'regional'
+            ? 'eje_cercano'
+            : 'nacional_extrema_urgencia'
+
+      const nueva: MisionComunitaria = {
+        id: crearMisionId(),
         titulo: ev.titulo,
         tipo: tipoDeducido,
+        prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
+        origen: BASE_BEARS_RESERVE.nombre,
+        destino: ev.lugar,
+        departamento: (ev.departamento as MisionComunitaria['departamento']) || 'Caldas',
+        prioridadGeografica: prioridadGeo,
+        terreno: terrenoCalculado,
+        distanciaKmIdaYVuelta: Math.max(4, logistica.distanciaKmTotalIdaYVuelta),
+        duracionMinutos: logistica.duracionTotalMinutos,
+        minutosRodamientoEstimados: logistica.minutosRodamientoTotal,
+        minutosRalentiEstimados: logistica.minutosRalenti,
+        latDestino: coordsDestino.lat,
+        lngDestino: coordsDestino.lng,
+        vehiculosAsignados: vehiculoElegido
+          ? [
+              {
+                id: vehiculoElegido.id,
+                nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`,
+                placa: vehiculoElegido.placa,
+              },
+            ]
+          : [],
+        tripulantesAsignados: seleccionTripulacion.tripulacion.map((t) => ({
+          id: t.id,
+          nombre: t.nombre,
+        })),
+        galonesConsumidosEstimados: 0,
+        costoCombustibleEstimadoCOP: 0,
+        desgasteLlantasIncrementoPorc: 0,
+        fecha: hoyISO(),
+        estado: 'en_curso',
+        eventoRadarId: ev.id,
         impactoSocial: ev.resumen,
-        terreno: tipoDeducido === 'rescate_barrizal' ? 'trocha_extrema_barrizal' : 'trocha_moderada',
-      },
-      vehiculos
-    )
-    const vehiculoElegido = seleccionGema.vehiculoElegido
+        esNoticiaWebReal: ev.esNoticiaWebReal,
+      }
 
-    const seleccionTripulacion = seleccionarTripulacionMision(
-      { titulo: ev.titulo, tipo: tipoDeducido, impactoSocial: ev.resumen },
-      vehiculoElegido ? [vehiculoElegido] : [],
-      empleados,
-      turnos,
-      hoyISO(),
-      horaActualHHMM()
-    )
-
-    const geo =
-      ev.lat && ev.lng
-        ? calcularDistanciaRealDesdeBase(ev.lat, ev.lng, true)
-        : { distanciaKmTotalIdaYVuelta: 32, tiempoMinutosRodamientoIdaYVuelta: 60 }
-
-    const duracionTotal = Math.max(25, geo.tiempoMinutosRodamientoIdaYVuelta + 60)
-
-    const nueva: MisionComunitaria = {
-      id: crearMisionId(),
-      titulo: ev.titulo,
-      tipo: tipoDeducido,
-      prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
-      origen: BASE_BEARS_RESERVE.nombre,
-      destino: ev.lugar,
-      departamento: (ev.departamento as MisionComunitaria['departamento']) || 'Caldas',
-      prioridadGeografica: ev.departamento === 'Caldas' ? 'local_manizales' : 'eje_cercano',
-      terreno: tipoDeducido === 'rescate_barrizal' ? 'trocha_extrema_barrizal' : 'trocha_moderada',
-      distanciaKmIdaYVuelta: Math.max(4, geo.distanciaKmTotalIdaYVuelta),
-      duracionMinutos: duracionTotal,
-      minutosRodamientoEstimados: geo.tiempoMinutosRodamientoIdaYVuelta,
-      minutosRalentiEstimados: 30,
-      latDestino: ev.lat,
-      lngDestino: ev.lng,
-      vehiculosAsignados: vehiculoElegido
-        ? [
-            {
-              id: vehiculoElegido.id,
-              nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`,
-              placa: vehiculoElegido.placa,
-            },
-          ]
-        : [],
-      tripulantesAsignados: seleccionTripulacion.tripulacion.map((t) => ({
-        id: t.id,
-        nombre: t.nombre,
-      })),
-      galonesConsumidosEstimados: 0,
-      costoCombustibleEstimadoCOP: 0,
-      desgasteLlantasIncrementoPorc: 0,
-      fecha: hoyISO(),
-      estado: 'en_curso',
-      eventoRadarId: ev.id,
-      impactoSocial: ev.resumen,
-      esNoticiaWebReal: ev.esNoticiaWebReal,
+      await onCrearMision(nueva)
+      const tagRuta = logistica.fuenteCalculo === 'gps_carretera' ? 'GPS carretera' : 'estimado cordillera'
+      mostrarFeedback(
+        'ok',
+        `🚨 ¡Misión despachada (${tagRuta})! ${logistica.distanciaKmIda} km ida (${logistica.distanciaKmTotalIdaYVuelta} km total) · Ruta ${formatearDuracionCorta(logistica.minutosRodamientoTotal)} + servicio ${formatearDuracionCorta(logistica.minutosServicioEnSitio)} = ${formatearDuracionCorta(logistica.duracionTotalMinutos)}. ${seleccionGema.motivoGema}`
+      )
+    } finally {
+      setDespachandoEventoId(null)
     }
-
-    await onCrearMision(nueva)
-    mostrarFeedback(
-      'ok',
-      `🚨 ¡Misión despachada! ${seleccionGema.motivoGema} ${seleccionTripulacion.motivo} Gema IA la cerrará automáticamente en ~${duracionTotal} min.`
-    )
   }
 
   // Despachar misión manual o programada con validación estricta
@@ -632,8 +672,21 @@ export default function MisionesTab({
                               Destino: <b className="text-white">{m.destino}</b>
                             </span>
                             <span>
-                              · Distancia: <b className="text-white">{m.distanciaKmIdaYVuelta} km</b>
+                              · Distancia:{' '}
+                              <b className="text-white">{m.distanciaKmIdaYVuelta} km (ida y vuelta)</b>
                             </span>
+                            {typeof m.minutosRodamientoEstimados === 'number' && (
+                              <span>
+                                · Plan:{' '}
+                                <b className="text-sky-200">
+                                  {formatearDuracionCorta(m.minutosRodamientoEstimados)} ruta +{' '}
+                                  {formatearDuracionCorta(
+                                    Math.max(0, (m.duracionMinutos || 60) - m.minutosRodamientoEstimados)
+                                  )}{' '}
+                                  en sitio
+                                </b>
+                              </span>
+                            )}
                             <span>
                               · Flota:{' '}
                               <b className="text-amber-300">
@@ -651,7 +704,9 @@ export default function MisionesTab({
 
                         <div className="text-right">
                           <div className="font-mono text-xs font-black text-emerald-300">
-                            {minRestantes > 0 ? `~${minRestantes} min restantes` : 'Cerrando con Gema IA...'}
+                            {minRestantes > 0
+                              ? `~${formatearDuracionCorta(minRestantes)} restantes`
+                              : 'Cerrando con Gema IA...'}
                           </div>
                           <div className="text-[10px] text-mist-500">
                             {m.horaInicio ? `Salida ${m.horaInicio}` : ''}
@@ -825,6 +880,26 @@ export default function MisionesTab({
                   const yaDespachado =
                     Boolean(ev.despachado) ||
                     misiones.some((m) => m.eventoRadarId === ev.id || m.titulo === ev.titulo)
+                  const est = estimarLogisticaMisionDesdeBase({
+                    lat: ev.lat,
+                    lng: ev.lng,
+                    lugar: ev.lugar,
+                    departamento: ev.departamento,
+                    titulo: ev.titulo,
+                    esEmergenciaGrave: ev.esEmergenciaGrave,
+                  })
+                  const badgeDistColor =
+                    est.categoriaDistancia === 'local'
+                      ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300'
+                      : est.categoriaDistancia === 'regional'
+                        ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+                        : 'border-rose-400/35 bg-rose-500/10 text-rose-200'
+                  const etiquetaDist =
+                    est.categoriaDistancia === 'local'
+                      ? 'Cerca'
+                      : est.categoriaDistancia === 'regional'
+                        ? 'Regional'
+                        : 'Larga distancia'
 
                   return (
                     <div
@@ -883,6 +958,24 @@ export default function MisionesTab({
                         )}
                       </div>
 
+                      {/* Distancia desde Base Finca El Guadual + desglose ida/servicio/vuelta */}
+                      <div
+                        className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border px-2.5 py-1.5 text-[10.5px] font-semibold ${badgeDistColor}`}
+                      >
+                        <span className="inline-flex items-center gap-1 font-extrabold">
+                          <Navigation className="h-3 w-3 shrink-0" />
+                          A ~{est.distanciaKmIda} km de base ({etiquetaDist})
+                        </span>
+                        <span className="opacity-80">
+                          · {est.distanciaKmTotalIdaYVuelta} km ida y vuelta
+                        </span>
+                        <span className="opacity-85">
+                          · ~{formatearDuracionCorta(est.minutosRodamientoTotal)} ruta +{' '}
+                          {formatearDuracionCorta(est.minutosServicioEnSitio)} en sitio ={' '}
+                          <b>~{formatearDuracionCorta(est.duracionTotalMinutos)}</b>
+                        </span>
+                      </div>
+
                       <p className="text-[11px] leading-relaxed text-mist-300">{ev.resumen}</p>
 
                       <div className="rounded-xl border border-white/[0.06] bg-black/40 p-2 text-[11px]">
@@ -917,11 +1010,14 @@ export default function MisionesTab({
                         ) : (
                           <button
                             type="button"
+                            disabled={despachandoEventoId === ev.id}
                             onClick={() => void despacharDesdeEvento(ev)}
-                            className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95"
+                            className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95 disabled:opacity-60"
                           >
                             <Truck className="h-3.5 w-3.5" />
-                            <span>Despachar Misión</span>
+                            <span>
+                              {despachandoEventoId === ev.id ? 'Calculando ruta...' : 'Despachar Misión'}
+                            </span>
                           </button>
                         )}
                       </div>

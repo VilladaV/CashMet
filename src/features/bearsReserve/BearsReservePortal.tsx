@@ -130,12 +130,11 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
     const activos = emps.filter((e) => e.activo !== false)
 
     // Solo generamos automáticamente si no existe el cuadrante de esta semana
-    // o si hay algún activo sin turnos cuando el equipo sí tiene franjas posibles
+    // o si algún turno quedó asignado a un empleado que ya fue desactivado
     const requiereGenerar =
       activos.length > 0 &&
       (semanaActual.length === 0 ||
-        semanaActual.some((t) => t.esRespaldoCoordinador) ||
-        semanaActual.some((t) => !activos.some((a) => a.id === t.empleadoId)))
+        semanaActual.some((t) => !t.esRespaldoCoordinador && !activos.some((a) => a.id === t.empleadoId)))
 
     if (requiereGenerar) {
       const contadorActual = obtenerRotacionContador()
