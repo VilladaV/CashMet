@@ -4,7 +4,20 @@
 
 ---
 
-## 0. ESTADO DE AVANCE REAL (actualizado 2026-10-23)
+## Estado Actualizado (2026-11-22)
+
+> Resumen de la evolución real frente al plan original y al corte de octubre de 2026. Las secciones históricas posteriores se conservan como referencia de diseño.
+
+- **Integración de Bear's Reserve (`src/features/bearsReserve/`)**: módulo operativo completo accesible desde la barra superior y `#bears`, sincronizado con la flota y nómina de CashMet. Incluye gestión de flota (tanque, autonomía real por terreno, odómetro y desgaste de llantas), mapa interactivo con **Leaflet + OSRM** (rutas reales por carretera desde Finca El Guadual, Manizales/Caldas), cuadrante de **turnos 24/7** (máximo 42 h/semana con restricciones horarias), **tarjeta de combustible mensual** liquidable en CashMet y **GEMA IA** (radio conversacional, selección inteligente de vehículo o convoy 1–3, crónicas de misiones y radar de emergencias alimentado por Google Search Grounding + 6 feeds RSS de prensa colombiana).
+- **Integridad financiera con `runTransaction`**: todas las operaciones críticas que alteran saldos (movimientos, transferencias entre cuentas, pagos de deuda, pagos de nómina y pagos de impuestos) migraron a transacciones atómicas de Firestore (`runTransaction`) con validación previa de montos, fechas locales (`src/lib/fechas.ts`), existencia de cuentas y prevención de sobrepagos o condiciones de carrera.
+- **Suite de pruebas automatizadas con Vitest 5**: infraestructura activa (`vitest`, `jsdom`, Testing Library, `@vitest/coverage-v8`, doble en memoria `tests/helpers/fakeFirestore.ts`) cubriendo repositorios financieros, parser NL, motor del chat, fechas, utilidades, backup, controles estáticos y módulo Bear's Reserve (lógica, repositorio y pruebas de portal).
+- **IA con Gemini REST directo (sin Genkit)**: toda la inteligencia artificial (**Lucía** en `src/ai/gemini.ts` y **GEMA** en `src/features/bearsReserve/gemaAI.ts`) opera directamente contra la API REST de Gemini (`v1beta/models/{modelo}:generateContent`) con cadena de fallback, timeout, grounding opcional y fallback local determinista. Se **eliminó por completo el andamiaje muerto de Genkit** (`genkit.config.ts`, `src/ai/genkit.ts`, `src/ai/flows/*`, `src/ai/tools/*`) y las dependencias sobrantes (`genkit`, `@genkit-ai/googleai`, `zod`, `zustand`, `@radix-ui/react-slot`), además de otros archivos muertos (`src/store/appStore.ts`, `src/types/index.ts`, `src/App.css`, `src/components/ui/badge*`, `src/assets/*`, `public/sw-notifications.js`, `public/icons.svg`, `scripts/export-backup.*`).
+- **Optimización de Vite 8 y PWA**: carga diferida por módulo (`React.lazy` + `ErrorBoundary`), separación de chunks (`firebase`, `leaflet`, `lucide`, `motion`, `vendor`), uso de `import.meta.dirname` en `vite.config.ts` y manifest PWA consolidado con `favicon.svg` y tema oscuro (`#03080f`).
+- **Alertas Push (FCM/VAPID)**: permanecen **pendientes/descartadas** en el cliente (se eliminó el Service Worker huérfano `public/sw-notifications.js`); la estrategia vigente prioriza avisos en-app y recordatorios nativos vía Google Calendar (OAuth GIS con token únicamente en memoria).
+
+---
+
+## 0. ESTADO DE AVANCE REAL (corte histórico 2026-10-23)
 
 > Las casillas de la sección 10 son el **plan original**. Esta sección refleja lo que **realmente funciona hoy**.
 

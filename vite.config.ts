@@ -10,17 +10,17 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icons.svg', 'vite.svg'],
+      includeAssets: ['favicon.svg'],
       manifest: {
         name: 'CashMet',
         short_name: 'CashMet',
         description: 'Gestión económica personal con IA',
-        theme_color: '#0f172a',
-        background_color: '#ffffff',
+        theme_color: '#03080f',
+        background_color: '#03080f',
         display: 'standalone',
         start_url: '/',
         icons: [
-          { src: 'icons.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
+          { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
         ],
       },
       workbox: {
@@ -33,7 +33,7 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   build: {
@@ -41,6 +41,8 @@ export default defineConfig({
       output: {
         manualChunks(id: string) {
           if (id.includes('node_modules/firebase') || id.includes('@firebase')) return 'firebase'
+          if (id.includes('node_modules/leaflet')) return 'leaflet'
+          if (id.includes('node_modules/lucide-react')) return 'lucide'
           if (id.includes('node_modules/motion')) return 'motion'
           if (id.includes('node_modules/react') || id.includes('node_modules/scheduler')) return 'vendor'
           return undefined

@@ -278,3 +278,35 @@ Los pagos son transaccionales, pero **la idempotencia por periodo de nómina sig
 La auditoría encontró y corrigió defectos reales de integridad financiera, fechas y persistencia que la compilación y el lint no detectaban. La app queda con **130 pruebas de regresión en verde**, build y tipos limpios, y un catálogo de 238 casos que separa explícitamente lo verificado de lo bloqueado.
 
 No es correcto afirmar que CashMet está “listo para producción” sin resolver R-01 (aislamiento Firestore), R-02 (idempotencia de nómina) y R-05 (dependencias), y sin ejecutar E2E/Auth/reglas reales. Con esas salvedades, el núcleo financiero es hoy sustancialmente más seguro y consistente que en `develop`.
+
+---
+
+## 13. Adenda de Auditoría Completa (2026-11-22)
+
+Tras el cierre inicial de noviembre, se ejecutó una segunda ronda integral (Fases 0–3) enfocada en hallazgos **no-seguridad**: integridad funcional de CashMet y Bear's Reserve, calidad real del arnés de pruebas, corrección de falsos positivos del catálogo anterior y saneamiento del código muerto y del bundle de producción.
+
+### 13.1 Hallazgos no-seguridad corregidos (Fases 0–1)
+- **Núcleo CashMet (commit `a317c07`)**:
+  - Endurecimiento de integridad de datos en repositorios (`movimientosRepo`, `deudasRepo`, `impuestosRepo`, `nominaRepo`, `propiedadesRepo`, `recurrentesRepo`, `vehiculosRepo`, `calendarioRepo`, `pilotoRepo`, `backup`, `storage` y `repoUtils`).
+  - Correcciones en `src/ai/gemini.ts`, parser NL (`src/ai/parser/nl.ts`), orquestador/snapshot del chat, conversión multidivisa (`src/lib/fx.ts`), fechas locales (`src/lib/fechas.ts`), sincronización con Google Calendar (`src/lib/google/calendar.ts`) y piloto automático (`src/lib/piloto.ts`).
+  - Incorporación de `ErrorBoundary` (`src/components/ErrorBoundary.tsx`), carga diferida por módulo con `React.lazy` y mejoras de robustez y accesibilidad/UX en las páginas CRUD y navegación por hash (`src/App.tsx`).
+- **Módulo Bear's Reserve (commits `e2ca443` y `79d363f`)**:
+  - Corrección de persistencia serializada, espejo local y reconciliación con Firestore (incluido el bug de `obtenerCacheSincrono` que bloqueaba la hidratación al recargar con F5).
+  - Ajustes en despacho de misiones y selección de convoy con GEMA IA (`gemaAI.ts`, `gemaEngine.ts`), cálculo geográfico y ruteo real por carretera con OSRM (`geo.ts`, `ruteoGps.ts`), tarjeta de combustible (`TarjetaCombustibleWidget.tsx`, `preciosCombustible.ts`), turnos 24/7 (`TurnosTab.tsx`) y mapa interactivo Leaflet (`MapaOperaciones.tsx`).
+
+### 13.2 Corrección de falsos `PASS` del catálogo y mejora del arnés `fakeFirestore` (Fase 2)
+- Se revisaron los casos marcados como `PASS` en el catálogo anterior (`CATALOGO_PRUEBAS.md`) para eliminar falsos positivos respaldados solo por suposiciones o dobles demasiado permisivos, alineando el catálogo con evidencia reproducible.
+- Se fortaleció el arnés en memoria `tests/helpers/fakeFirestore.ts` para reproducir con mayor fidelidad la semántica real de Firestore (transacciones, lotes, operadores de consulta, eliminación de campos y condiciones de error) y se amplió la cobertura de regresión incluyendo pruebas de repositorio y portal de Bear's Reserve (`tests/bearsReserve-repo.test.ts`, `tests/bearsReserve-portal.test.tsx`).
+
+### 13.3 Limpieza de código muerto, poda de dependencias y optimización de bundle/PWA (Fase 3)
+- **Eliminación de 27 archivos muertos** verificados con 0 referencias en código activo y pruebas:
+  - Andamiaje obsoleto de Genkit: `genkit.config.ts`, `src/ai/genkit.ts`, `src/ai/flows/*` (4 archivos) y `src/ai/tools/*` (9 archivos).
+  - Código y recursos huérfanos: `src/types/index.ts`, `src/store/appStore.ts`, `src/App.css`, `src/components/ui/badge.tsx`, `src/components/ui/badge-variants.ts`, `src/assets/hero.png`, `src/assets/react.svg`, `src/assets/vite.svg`, `public/sw-notifications.js`, `public/icons.svg`, `scripts/export-backup.js` y `scripts/export-backup.mjs`.
+  - Eliminación de los 6 directorios vacíos resultantes (`src/ai/flows`, `src/ai/tools`, `src/types`, `src/store`, `src/assets`, `scripts`).
+- **Poda de dependencias sobrantes en `package.json`**: retiradas `genkit`, `@genkit-ai/googleai`, `zod`, `zustand` y `@radix-ui/react-slot` (0 importaciones activas en `src/` y `tests/`), reduciendo la superficie de mantenimiento y dependencias transitivas.
+- **Optimización de `vite.config.ts` y PWA**:
+  - Sustitución de `__dirname` por `import.meta.dirname` (compatibilidad nativa con Vite 8 sin advertencias de `configLoader`).
+  - Manifest PWA actualizado a `favicon.svg` (`purpose: 'any maskable'`), `theme_color: '#03080f'` y `background_color: '#03080f'`.
+  - División de `manualChunks` ampliada para aislar también `leaflet` y `lucide-react` junto a `firebase`, `motion` y `vendor`, manteniendo los chunks de producción bajo el umbral de 500 kB junto con `React.lazy`.
+- **Documentación sincronizada**: actualización de `README.md`, `DEPLOY.md`, `docs/PLAN_COMPLETO.md`, `docs/prompts/SYSTEM_PROMPT.md` y este informe para reflejar la arquitectura y operación vigentes.
+
