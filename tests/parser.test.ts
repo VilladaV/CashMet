@@ -26,13 +26,22 @@ describe('parser NLP', () => {
     it('interpreta sufijos k y millones', () => {
       expect(parseMontoCO('compré un almuerzo por 25k')).toBe(25000)
       expect(parseMontoCO('me pagaron 1,5 millones')).toBe(1500000)
+      expect(parseMontoCO('2 millones')).toBe(2000000)
       expect(parseMontoCO('gasté 2 mil')).toBe(2000)
+      expect(parseMontoCO('1,5 mil')).toBe(1500)
     })
 
     it('no confunde cantidades sin unidad monetaria con montos', () => {
       expect(parseMontoCO('compré 2 kg de arroz')).toBeNull()
       expect(parseMontoCO('caminé 3 km')).toBeNull()
+      expect(parseMontoCO('100 metros')).toBeNull()
       expect(parseMontoCO('sin cifras')).toBeNull()
+    })
+
+    it('interpreta montos junto a palabras con m, divisas y fechas ISO', () => {
+      expect(parseMontoCO('50.000 mercado')).toBe(50000)
+      expect(parseMontoCO('gasté 50 euros')).toBe(50)
+      expect(parseMontoCO('el 2026-03-15 gasté 50.000')).toBe(50000)
     })
 
     it('redondea a pesos enteros', () => {
@@ -68,6 +77,11 @@ describe('parser NLP', () => {
     it('acepta fechas ISO explícitas', () => {
       expect(parseFecha('registra 50.000 el 2025-03-15')).toBe('2025-03-15')
     })
+
+    it('no confunde expresiones como 24/7 con una fecha del calendario', () => {
+      expect(parseFecha('gasté 20.000 en tienda 24/7 hoy')).toBe('2026-11-11')
+      expect(parseFecha('gasté 20.000 en tienda 24/7')).toBe('2026-11-11')
+    })
   })
 
   describe('parseTipo', () => {
@@ -79,6 +93,7 @@ describe('parser NLP', () => {
     it('detecta gastos', () => {
       expect(parseTipo('pagué 100.000 de mercado')).toBe('gasto')
       expect(parseTipo('compré un café')).toBe('gasto')
+      expect(parseTipo('pagué recibo de luz por 80.000')).toBe('gasto')
     })
   })
 

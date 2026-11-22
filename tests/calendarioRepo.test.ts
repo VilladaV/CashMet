@@ -104,3 +104,70 @@ describe('calendario · persistencia', () => {
     expect(await listarEventos(1)).toHaveLength(1)
   })
 })
+
+describe('construirEventos · prima legal y predial de propiedades', () => {
+  it('programa la prima de junio el 30 de junio (-06-30) y NO en julio (-07-30)', async () => {
+    vi.setSystemTime(new Date('2026-01-15T15:00:00.000Z'))
+    __seed(COL_NOM, 'n-prima', {
+      nombreCompleto: 'Carlos',
+      cargo: 'Conductor',
+      activo: true,
+      salarioBaseMensual: 2000000,
+      primaServicios: { aplica: true, mitadJulio: true, mitadDiciembre: true },
+    })
+    const eventos = await construirEventos(12)
+    const primaJunio = eventos.filter((e) => e.tipo === 'prima_julio')
+    const primaDic = eventos.filter((e) => e.tipo === 'prima_diciembre')
+    expect(primaJunio).toHaveLength(1)
+    expect(primaJunio[0].fechaInicio).toBe('2026-06-30')
+    expect(primaJunio[0].fechaInicio).not.toContain('-07-')
+    expect(primaDic).toHaveLength(1)
+    expect(primaDic[0].fechaInicio).toBe('2026-12-20')
+  })
+
+  it('incluye vencimientos de predial de propiedades registradas', async () => {
+    vi.setSystemTime(new Date('2026-01-15T15:00:00.000Z'))
+    __seed('propiedades', 'prop-1', {
+      nombre: 'Finca El Guadual',
+      tipo: 'vivienda',
+      impuestos: {
+        predial: {
+          vigente: true,
+          valorAnual: 1200000,
+          fechaVencimiento: '2026-05-31',
+          municipio: 'Manizales',
+        },
+      },
+    })
+    const eventos = await construirEventos(12)
+    const prediales = eventos.filter((e) => e.tipo === 'predial')
+    expect(prediales).toHaveLength(1)
+    expect(prediales[0]).toMatchObject({
+      titulo: 'Predial Finca El Guadual',
+      fechaInicio: '2026-05-31',
+      relacionado: { propiedadId: 'prop-1' },
+    })
+  })
+
+  it('no produce overflow en día 31 al construir 12 meses de nómina y deudas', async () => {
+    vi.setSystemTime(new Date('2026-01-01T15:00:00.000Z'))
+    seedNomina(31)
+    seedDeuda(31)
+    const eventos = await construirEventos(12)
+    const fechasNomina = eventos.filter((e) => e.tipo === 'nomina_trabajador').map((e) => e.fechaInicio)
+    expect(fechasNomina).toEqual([
+      '2026-01-31',
+      '2026-02-28',
+      '2026-03-31',
+      '2026-04-30',
+      '2026-05-31',
+      '2026-06-30',
+      '2026-07-31',
+      '2026-08-31',
+      '2026-09-30',
+      '2026-10-31',
+      '2026-11-30',
+      '2026-12-31',
+    ])
+  })
+})

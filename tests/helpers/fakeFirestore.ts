@@ -1,7 +1,8 @@
 /**
  * Minimal in-memory implementation of the Firebase Firestore API surface used by
- * CashMet. It supports batches, runTransaction, increment(), deleteField(),
- * dotted-path updates and simple query/where/orderBy/limit constraints.
+ * CashMet. It supports batches, runTransaction (with strict reads-before-writes),
+ * increment(), deleteField() (including dotted paths), merge/mergeFields,
+ * forbidden-value validation (undefined & nested arrays), and query/where/orderBy/limit.
  *
  * The goal is to verify repository behaviour (including atomicity and validation)
  * without connecting to a real Firebase project or touching production data.
@@ -13,6 +14,7 @@ type Store = Map<string, Map<string, DocData>>
 let store: Store = new Map()
 let sequence = 0
 let txLock: Promise<void> = Promise.resolve()
+const nextGetDocFailures = new Map<string, Error>()
 
 export interface DocRef {
   __kind: 'doc'
@@ -33,8 +35,50 @@ interface QueryRef {
   max?: number
 }
 
+export interface SetOptions {
+  merge?: boolean
+  mergeFields?: string[]
+}
+
 export const increment = (value: number) => ({ __op: 'increment', value })
 export const deleteField = () => ({ __op: 'delete' })
+
+function isOpSentinel(value: unknown, op?: 'increment' | 'delete'): boolean {
+  if (!value || typeof value !== 'object') return false
+  const tag = (value as { __op?: string }).__op
+  return op ? tag === op : tag === 'increment' || tag === 'delete'
+}
+
+/**
+ * Mirrors real Firestore SDK payload validation:
+ * - Rejects `undefined` anywhere in the payload (direct or nested).
+ * - Rejects directly nested arrays (`[[...]]`).
+ */
+function validarValorFirestore(value: unknown, path = ''): void {
+  if (value === undefined) {
+    throw new Error(`Invalid Firestore value: unsupported field value undefined${path ? ` at "${path}"` : ''}`)
+  }
+  if (value === null || typeof value !== 'object') return
+  if (isOpSentinel(value)) return
+  if (value instanceof Date) return
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i]
+      if (Array.isArray(item)) {
+        throw new Error(
+          `Invalid Firestore value: nested arrays are not supported${path ? ` at "${path}[${i}]"` : ''}`
+        )
+      }
+      validarValorFirestore(item, `${path}[${i}]`)
+    }
+    return
+  }
+
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    validarValorFirestore(v, path ? `${path}.${k}` : k)
+  }
+}
 
 function clone<T>(value: T): T {
   return structuredClone(value)
@@ -75,6 +119,18 @@ function getPath(data: DocData, path: string): unknown {
   }, data)
 }
 
+function hasPath(data: DocData, path: string): boolean {
+  const parts = path.split('.')
+  let cursor: unknown = data
+  for (const part of parts) {
+    if (!cursor || typeof cursor !== 'object' || !(part in (cursor as Record<string, unknown>))) {
+      return false
+    }
+    cursor = (cursor as Record<string, unknown>)[part]
+  }
+  return true
+}
+
 function setPath(target: DocData, path: string, value: unknown): void {
   const parts = path.split('.')
   let cursor: Record<string, unknown> = target
@@ -86,8 +142,20 @@ function setPath(target: DocData, path: string, value: unknown): void {
   cursor[parts[parts.length - 1]] = value
 }
 
+function deletePath(target: DocData, path: string): void {
+  const parts = path.split('.')
+  let cursor: unknown = target
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) return
+    cursor = (cursor as Record<string, unknown>)[parts[i]]
+  }
+  if (cursor && typeof cursor === 'object' && !Array.isArray(cursor)) {
+    delete (cursor as Record<string, unknown>)[parts[parts.length - 1]]
+  }
+}
+
 function applyValue(existing: unknown, value: unknown): unknown {
-  if (value && typeof value === 'object' && (value as { __op?: string }).__op === 'increment') {
+  if (isOpSentinel(value, 'increment')) {
     return (Number(existing) || 0) + Number((value as { value: number }).value)
   }
   return clone(value)
@@ -95,14 +163,19 @@ function applyValue(existing: unknown, value: unknown): unknown {
 
 /** Applies an update payload (Firestore update semantics: maps are replaced, not deep-merged). */
 function applyUpdate(target: DocData, payload: DocData): void {
+  validarValorFirestore(payload)
   for (const [key, value] of Object.entries(payload)) {
     if (key.includes('.')) {
-      setPath(target, key, applyValue(getPath(target, key), value))
+      if (isOpSentinel(value, 'delete')) {
+        deletePath(target, key)
+      } else {
+        setPath(target, key, applyValue(getPath(target, key), value))
+      }
       continue
     }
-    if (value && typeof value === 'object' && (value as { __op?: string }).__op === 'increment') {
+    if (isOpSentinel(value, 'increment')) {
       target[key] = applyValue(target[key], value)
-    } else if (value && typeof value === 'object' && (value as { __op?: string }).__op === 'delete') {
+    } else if (isOpSentinel(value, 'delete')) {
       delete target[key]
     } else {
       target[key] = clone(value)
@@ -111,9 +184,10 @@ function applyUpdate(target: DocData, payload: DocData): void {
 }
 
 function mergeData(existing: DocData | undefined, payload: DocData): DocData {
+  validarValorFirestore(payload)
   const base: DocData = existing ? clone(existing) : {}
   for (const [key, value] of Object.entries(payload)) {
-    if (value && typeof value === 'object' && !Array.isArray(value) && !(value as { __op?: string }).__op) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && !isOpSentinel(value)) {
       const prev = base[key]
       base[key] =
         prev && typeof prev === 'object' && !Array.isArray(prev)
@@ -124,6 +198,41 @@ function mergeData(existing: DocData | undefined, payload: DocData): DocData {
     }
   }
   return base
+}
+
+/**
+ * Applies Firestore setDoc(..., { mergeFields }) semantics:
+ * replaces each listed field completely (no deep merge inside that field)
+ * while preserving all other existing fields in the document.
+ */
+function mergeFieldsData(existing: DocData | undefined, payload: DocData, fields: string[]): DocData {
+  validarValorFirestore(payload)
+  const base: DocData = existing ? clone(existing) : {}
+  for (const field of fields) {
+    if (!hasPath(payload, field)) continue
+    const value = getPath(payload, field)
+    if (field.includes('.')) {
+      if (isOpSentinel(value, 'delete')) {
+        deletePath(base, field)
+      } else {
+        setPath(base, field, applyValue(getPath(base, field), value))
+      }
+    } else if (isOpSentinel(value, 'delete')) {
+      delete base[field]
+    } else if (isOpSentinel(value, 'increment')) {
+      base[field] = applyValue(base[field], value)
+    } else {
+      base[field] = clone(value)
+    }
+  }
+  return base
+}
+
+function applySetData(existing: DocData | undefined, payload: DocData, opts?: SetOptions): DocData {
+  validarValorFirestore(payload)
+  if (opts?.mergeFields) return mergeFieldsData(existing, payload, opts.mergeFields)
+  if (opts?.merge) return mergeData(existing, payload)
+  return clone(payload)
 }
 
 function resolveRef(a: unknown, b?: unknown, c?: unknown): DocRef {
@@ -148,6 +257,12 @@ export function doc(a: unknown, b?: unknown, c?: unknown): DocRef {
 }
 
 export async function getDoc(ref: DocRef) {
+  const key = `${ref.col}/${ref.id}`
+  const err = nextGetDocFailures.get(key)
+  if (err) {
+    nextGetDocFailures.delete(key)
+    throw err
+  }
   return snapshot(ref, colMap(ref.col).get(ref.id))
 }
 
@@ -233,19 +348,21 @@ export async function getDocs(ref: ColRef | QueryRef) {
 }
 
 export async function addDoc(col: ColRef, data: DocData) {
+  validarValorFirestore(data)
   sequence += 1
   const id = `auto-${sequence}`
   colMap(col.col).set(id, clone(data))
   return { __kind: 'doc', col: col.col, id } as DocRef
 }
 
-export async function setDoc(ref: DocRef, data: DocData, opts?: { merge?: boolean }) {
+export async function setDoc(ref: DocRef, data: DocData, opts?: SetOptions) {
   const map = colMap(ref.col)
   const current = map.get(ref.id)
-  map.set(ref.id, opts?.merge ? mergeData(current, data) : clone(data))
+  map.set(ref.id, applySetData(current, data, opts))
 }
 
 export async function updateDoc(ref: DocRef, data: DocData) {
+  validarValorFirestore(data)
   const map = colMap(ref.col)
   const current = map.get(ref.id)
   if (!current) {
@@ -263,7 +380,7 @@ interface Op {
   kind: 'set' | 'update' | 'delete'
   ref: DocRef
   data?: DocData
-  merge?: boolean
+  opts?: SetOptions
 }
 
 function applyOps(target: Store, ops: Op[]): void {
@@ -275,7 +392,7 @@ function applyOps(target: Store, ops: Op[]): void {
     }
     if (op.kind === 'set') {
       const current = map.get(op.ref.id)
-      map.set(op.ref.id, op.merge ? mergeData(current, op.data!) : clone(op.data!))
+      map.set(op.ref.id, applySetData(current, op.data!, op.opts))
     } else if (op.kind === 'update') {
       const current = map.get(op.ref.id)
       if (!current) {
@@ -293,11 +410,13 @@ function applyOps(target: Store, ops: Op[]): void {
 export function writeBatch(_db: unknown) {
   const ops: Op[] = []
   return {
-    set(ref: DocRef, data: DocData, opts?: { merge?: boolean }) {
-      ops.push({ kind: 'set', ref, data, merge: opts?.merge })
+    set(ref: DocRef, data: DocData, opts?: SetOptions) {
+      validarValorFirestore(data)
+      ops.push({ kind: 'set', ref, data, opts })
       return this
     },
     update(ref: DocRef, data: DocData) {
+      validarValorFirestore(data)
       ops.push({ kind: 'update', ref, data })
       return this
     },
@@ -314,25 +433,32 @@ export function writeBatch(_db: unknown) {
 }
 
 export function runTransaction<T>(_db: unknown, fn: (tx: Transaction) => Promise<T>): Promise<T> {
-  // Firestore retries/serializes concurrent transactions. Serialize them here so
-  // double-spend regressions are deterministic in tests.
+  // Firestore retries/serializes concurrent transactions and enforces reads before writes.
   const ejecutar = async (): Promise<T> => {
     const working = cloneStore(store)
     const ops: Op[] = []
+    let yaEscribio = false
 
     const tx: Transaction = {
       async get(ref: DocRef) {
+        if (yaEscribio) {
+          throw new Error('Firestore transactions require all reads to be executed before all writes')
+        }
         const data = working.get(ref.col)?.get(ref.id)
         return snapshot(ref, data)
       },
       set(ref, data, opts) {
-        ops.push({ kind: 'set', ref, data, merge: opts?.merge })
+        validarValorFirestore(data)
+        yaEscribio = true
+        ops.push({ kind: 'set', ref, data, opts })
         const current = working.get(ref.col)?.get(ref.id)
         if (!working.has(ref.col)) working.set(ref.col, new Map())
-        working.get(ref.col)!.set(ref.id, opts?.merge ? mergeData(current, data) : clone(data))
+        working.get(ref.col)!.set(ref.id, applySetData(current, data, opts))
         return tx
       },
       update(ref, data) {
+        validarValorFirestore(data)
+        yaEscribio = true
         const current = working.get(ref.col)?.get(ref.id)
         if (!current) {
           throw Object.assign(new Error(`No document to update: ${ref.col}/${ref.id}`), { code: 'not-found' })
@@ -342,6 +468,7 @@ export function runTransaction<T>(_db: unknown, fn: (tx: Transaction) => Promise
         return tx
       },
       delete(ref) {
+        yaEscribio = true
         ops.push({ kind: 'delete', ref })
         working.get(ref.col)?.delete(ref.id)
         return tx
@@ -358,14 +485,14 @@ export function runTransaction<T>(_db: unknown, fn: (tx: Transaction) => Promise
   const ejecucion = txLock.then(ejecutar, ejecutar)
   txLock = ejecucion.then(
     () => undefined,
-    () => undefined,
+    () => undefined
   )
   return ejecucion
 }
 
 export interface Transaction {
   get(ref: DocRef): Promise<ReturnType<typeof snapshot>>
-  set(ref: DocRef, data: DocData, opts?: { merge?: boolean }): Transaction
+  set(ref: DocRef, data: DocData, opts?: SetOptions): Transaction
   update(ref: DocRef, data: DocData): Transaction
   delete(ref: DocRef): Transaction
 }
@@ -378,6 +505,11 @@ export function __reset(): void {
   store = new Map()
   sequence = 0
   txLock = Promise.resolve()
+  nextGetDocFailures.clear()
+}
+
+export function __failNextGetDoc(col: string, id: string, error: Error): void {
+  nextGetDocFailures.set(`${col}/${id}`, error)
 }
 
 export function __seed(col: string, id: string, data: DocData): void {

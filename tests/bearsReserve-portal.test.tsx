@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('@/lib/firebase/config', () => ({ db: { fake: true } }))
@@ -70,8 +71,17 @@ beforeEach(() => {
   __reset()
   __resetCacheBearsParaTests()
   localStorage.clear()
+  // Congelar solo Date (domingo al mediodía) para evitar disparo automático de rutas escolares L-V >07:30 sin bloquear waitFor
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-11-22T12:00:00-05:00'))
   // Evitar fetch real a RSS durante test de UI
   vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline test')))
+})
+
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe("Bear's Reserve · prueba real de uso E2E en <BearsReservePortal /> con recargas F5", () => {

@@ -1,9 +1,56 @@
 import { afterEach, vi } from 'vitest'
 
-// jsdom provides localStorage, but each test file gets a clean slate unless we clear it.
+// Provide a lightweight in-memory localStorage when running under Node so
+// repository/logic suites don't need jsdom just for localStorage access.
+function ensureLocalStorage(): void {
+  try {
+    if (
+      typeof globalThis.localStorage !== 'undefined' &&
+      typeof globalThis.localStorage.getItem === 'function' &&
+      typeof globalThis.localStorage.setItem === 'function' &&
+      typeof globalThis.localStorage.clear === 'function'
+    ) {
+      globalThis.localStorage.getItem('__probe__')
+      return
+    }
+  } catch {
+    // Fall through and install in-memory polyfill
+  }
+
+  const data = new Map<string, string>()
+  const storage: Storage = {
+    get length() {
+      return data.size
+    },
+    clear() {
+      data.clear()
+    },
+    getItem(key: string) {
+      return data.has(key) ? data.get(key)! : null
+    },
+    key(index: number) {
+      return [...data.keys()][index] ?? null
+    },
+    removeItem(key: string) {
+      data.delete(key)
+    },
+    setItem(key: string, value: string) {
+      data.set(String(key), String(value))
+    },
+  }
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: storage,
+    configurable: true,
+    writable: true,
+  })
+}
+
+ensureLocalStorage()
+
 afterEach(() => {
   try {
-    localStorage.clear()
+    globalThis.localStorage?.clear()
   } catch {
     /* ignore */
   }

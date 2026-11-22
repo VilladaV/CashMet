@@ -74,7 +74,43 @@ describe('motor de interpretación local', () => {
   it('detecta pago de nómina', () => {
     const r = interpretarMensaje('pagué 1.500.000 de salario a Juan')
     expect(r.acciones).toEqual(['pago_nomina'])
-    expect(r.params).toMatchObject({ monto: 1500000 })
+    expect(r.params).toMatchObject({ monto: 1500000, nombre: 'Juan' })
+  })
+
+  it('no divide decimales con coma en interpretarLote ("me pagaron 1,5 millones y gasté 20.000")', () => {
+    const r = interpretarLote('me pagaron 1,5 millones y gasté 20.000')
+    expect(r?.lote).toHaveLength(2)
+    expect(r?.lote?.[0].borrador).toMatchObject({ tipo: 'ingreso', monto: 1500000 })
+    expect(r?.lote?.[1].borrador).toMatchObject({ tipo: 'gasto', monto: 20000 })
+  })
+
+  it('respeta preposiciones "a <destino> desde <origen>" en interpretarTransferencia', () => {
+    const r = interpretarTransferencia('pasa 500.000 a Nequi desde Bancolombia', ['Nequi', 'Bancolombia'])
+    expect(r?.acciones).toEqual(['transferir'])
+    expect(r?.params).toMatchObject({
+      monto: 500000,
+      cuentaOrigenId: 'Bancolombia',
+      cuentaDestinoId: 'Nequi',
+    })
+  })
+
+  it('interpreta "gasté 50.000 en marzo" como gasto a confirmar y no como resumen_mes', () => {
+    const r = interpretarMensaje('gasté 50.000 en marzo')
+    expect(r.acciones).toContain('requiere_confirmacion')
+    expect(r.acciones).not.toContain('resumen_mes')
+    expect(r.borrador).toMatchObject({ tipo: 'gasto', monto: 50000 })
+  })
+
+  it('interpreta gasto mensual con día de vencimiento como crear_recurrente', () => {
+    const r = interpretarMensaje('gasto mensual internet 80.000 vence el 15')
+    expect(r.acciones).toEqual(['crear_recurrente'])
+    expect(r.params).toMatchObject({ monto: 80000, diaVencimiento: 15 })
+  })
+
+  it('reconoce placas de moto colombianas formato ABC12D', () => {
+    const r = interpretarMensaje('registra moto Yamaha FZ 2024 placa ABC12D')
+    expect(r.acciones).toEqual(['crear_vehiculo'])
+    expect(r.params).toMatchObject({ placa: 'ABC12D', tipo: 'moto' })
   })
 
   it('estima SOAT y TM con supuestos explícitos', () => {

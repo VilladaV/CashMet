@@ -39,6 +39,21 @@ describe('propiedades · actualización parcial', () => {
     expect(__get(COL, 'p1')?.impuestos).toBeUndefined()
   })
 
+  it('elimina impuestos del documento cuando se envía { impuestos: { predial: null } }', async () => {
+    __seed(COL, 'p1', {
+      nombre: 'Casa',
+      tipo: 'vivienda',
+      impuestos: { predial: { vigente: true, valorAnual: 600000, municipio: 'Manizales' } },
+      gastosMensualesCalculados: 50000,
+    })
+    await actualizarPropiedad('p1', {
+      impuestos: { predial: null as unknown as undefined },
+    })
+    const doc = __get(COL, 'p1')
+    expect(doc?.impuestos).toBeUndefined()
+    expect(doc?.gastosMensualesCalculados).toBe(0)
+  })
+
   it('crea propiedades con los campos recibidos', async () => {
     const id = await crearPropiedad({ nombre: 'Lote', tipo: 'terreno', valorPatrimonial: 100000000 })
     expect(__get(COL, id)?.nombre).toBe('Lote')

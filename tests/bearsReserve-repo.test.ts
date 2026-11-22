@@ -1,14 +1,30 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/lib/firebase/config', () => ({ db: { fake: true } }))
 vi.mock('firebase/firestore', async () => await import('./helpers/fakeFirestore'))
+vi.mock('@/ai/gemini', () => ({
+  geminiDisponible: false,
+  googleSearchBloqueadoEnSesion: () => true,
+  limpiarJson: (s: string) => s,
+  llamarGemini: vi.fn().mockResolvedValue({ res: null, cuotaAgotada: false }),
+  llamarGeminiConBusqueda: vi.fn().mockResolvedValue({
+    res: null,
+    cuotaAgotada: false,
+    usoBusqueda: false,
+    errorBusqueda: 'offline test',
+  }),
+  investigarVehiculoConGeminiAI: vi.fn().mockResolvedValue(null),
+}))
 
 import {
   __resetCacheBearsParaTests,
+  cancelarMisionProgramada,
   crearMisionOperativa,
+  guardarEventosRadar,
   guardarExtraEmpleado,
   guardarExtraVehiculo,
   hidratarEstadoBears,
+  leerEventosRadar,
   liquidarTarjetaEnCashmet,
   listarEmpleadosBears,
   listarMisiones,
@@ -18,12 +34,17 @@ import {
   verificarYCompletarMisionesVencidas,
 } from '@/features/bearsReserve/repo'
 import { exportarBackup } from '@/lib/firebase/backup'
-import { __get, __reset, __seed } from './helpers/fakeFirestore'
+import { __all, __failNextGetDoc, __get, __reset, __seed } from './helpers/fakeFirestore'
 
 beforeEach(() => {
   __reset()
   __resetCacheBearsParaTests()
   localStorage.clear()
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline test')))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe("Bear's Reserve · persistencia Firestore, liquidación y auto-cierre", () => {
@@ -283,5 +304,145 @@ describe("Bear's Reserve · persistencia Firestore, liquidación y auto-cierre",
     const docOp = __get('configuracion_sistema', 'bears_reserve_operaciones')
     expect((docCfg?.vehiculosExtra as Record<string, { disponibleParaTrabajo?: boolean }>)?.['v-gaz']?.disponibleParaTrabajo).toBe(true)
     expect(Array.isArray(docOp?.misiones) && docOp.misiones.length).toBe(1)
+  })
+
+  it('sanitizarFirestore neutraliza arrays 2D y convierte Date a ISO sin fallar en Firestore', async () => {
+    __seed('vehiculos', 'v-san', {
+      marca: 'Toyota',
+      linea: 'Hilux',
+      tipo: 'carro',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 10000, tareas: [] },
+    })
+
+    const fechaPrueba = new Date('2026-11-22T12:00:00.000Z')
+    await guardarExtraVehiculo('v-san', {
+      disponibleParaTrabajo: true,
+      // Valores prohibidos por Firestore si no se sanitizan: array 2D, Date y undefined
+      ...({
+        matrizCoordenadas: [[1, 2], [3, 4]],
+        fechaInspeccion: fechaPrueba,
+        campoVacio: undefined,
+      } as Record<string, unknown>),
+    })
+
+    const docCfg = __get('configuracion_sistema', 'bears_reserve_config')
+    const extraGuardado = (docCfg?.vehiculosExtra as Record<string, Record<string, unknown>>)?.['v-san']
+    expect(extraGuardado?.fechaInspeccion).toBe('2026-11-22T12:00:00.000Z')
+    expect(extraGuardado?.matrizCoordenadas).toEqual(['[1,2]', '[3,4]'])
+    expect('campoVacio' in (extraGuardado ?? {})).toBe(false)
+  })
+
+  it('cancelarMisionProgramada elimina el evento del calendario y limpia despachado en el radar', async () => {
+    const ahora = Date.now()
+    await guardarEventosRadar([
+      {
+        id: 'rad-cancel-1',
+        titulo: 'Despeje programado en vereda',
+        lugar: 'Vereda La Linda',
+        departamento: 'Caldas',
+        fuenteNoticia: 'Junta Veredal',
+        resumen: 'Ramas sobre vía secundaria',
+        fecha: '2026-11-22',
+        creadoEn: ahora,
+        expiraEn: ahora + 24 * 3600_000,
+        esEmergenciaGrave: false,
+        atencionOficialPresente: false,
+        esNoticiaWebReal: false,
+        recomendacionGema: 'apoyo_logistico',
+        justificacionGema: 'Apoyo veredal',
+      },
+    ])
+
+    const mision = await crearMisionOperativa({
+      id: 'mis-prog-cancel',
+      titulo: 'Despeje programado',
+      tipo: 'auxilio_comunitario',
+      prioridad: 'media',
+      origen: 'Finca El Guadual',
+      destino: 'Vereda La Linda',
+      departamento: 'Caldas',
+      prioridadGeografica: 'local_manizales',
+      terreno: 'trocha_moderada',
+      distanciaKmIdaYVuelta: 20,
+      duracionMinutos: 60,
+      vehiculosAsignados: [],
+      tripulantesAsignados: [{ id: 'e1', nombre: 'Andrés' }],
+      galonesConsumidosEstimados: 0,
+      costoCombustibleEstimadoCOP: 0,
+      desgasteLlantasIncrementoPorc: 0,
+      fecha: '2026-11-25',
+      estado: 'programada',
+      impactoSocial: 'Despeje de acceso escolar',
+      eventoRadarId: 'rad-cancel-1',
+    })
+
+    expect(mision.eventoCalendarioId).toBeTruthy()
+    expect(__all('calendario_eventos')).toHaveLength(1)
+    expect(leerEventosRadar().find((e) => e.id === 'rad-cancel-1')?.despachado).toBe(true)
+
+    await cancelarMisionProgramada('mis-prog-cancel')
+
+    expect(listarMisiones().some((m) => m.id === 'mis-prog-cancel')).toBe(false)
+    expect(__all('calendario_eventos')).toHaveLength(0)
+    expect(leerEventosRadar().find((e) => e.id === 'rad-cancel-1')?.despachado).toBe(false)
+  })
+
+  it('liquidarTarjetaEnCashmet parcial no duplica galones ni conteo de tanqueos en el segundo tramo', async () => {
+    __seed('cuentas_banco', 'cta-1', { nombre: 'Bancolombia', tipo: 'ahorros', saldoActual: 5000000, activa: true })
+    __seed('vehiculos', 'v1', {
+      marca: 'Toyota',
+      linea: 'Hilux',
+      tipo: 'carro',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 50000, tareas: [] },
+    })
+
+    await guardarExtraVehiculo('v1', {
+      disponibleParaTrabajo: true,
+      nivelCombustiblePorc: 50,
+      capacidadTanqueGalones: 20,
+      tipoCombustible: 'diesel',
+    })
+
+    // Tramo 1: 10 galones (1 tanqueo)
+    await tanquearVehiculoCompleto('v1', 'manual')
+    const liq1 = await liquidarTarjetaEnCashmet('cta-1')
+    expect(liq1.liquidaciones?.[0]).toMatchObject({ galones: 10, tanqueosCount: 1 })
+
+    // Tramo 2: 5 galones adicionales (1 tanqueo nuevo) -> solo debe reportar 5 gal y 1 tanqueo, no 15 gal y 2
+    await guardarExtraVehiculo('v1', { nivelCombustiblePorc: 75 })
+    await tanquearVehiculoCompleto('v1', 'manual')
+    const liq2 = await liquidarTarjetaEnCashmet('cta-1')
+    expect(liq2.liquidaciones).toHaveLength(2)
+    expect(liq2.liquidaciones?.[0]).toMatchObject({ galones: 5, tanqueosCount: 1 })
+    expect(liq2.liquidaciones?.[1]).toMatchObject({ galones: 10, tanqueosCount: 1 })
+  })
+
+  it('hidratarEstadoBears tras error de lectura protege Firestore y no sobrescribe datos existentes', async () => {
+    __seed('configuracion_sistema', 'bears_reserve_config', {
+      vehiculosExtra: {
+        'v-prod': { disponibleParaTrabajo: true, investigadoIA: true, capacidadTanqueGalones: 24 },
+      },
+      empleadosExtra: {},
+      rutasHabituales: [],
+      rotacionContador: 3,
+      actualizado: Date.now() - 1000,
+    })
+
+    __failNextGetDoc('configuracion_sistema', 'bears_reserve_config', new Error('unavailable'))
+    await hidratarEstadoBears()
+
+    // Si el documento sigue sin poder leerse en el siguiente intento (sin espejo local previo),
+    // guardarExtraVehiculo queda protegido y NO sobrescribe Firestore.
+    __failNextGetDoc('configuracion_sistema', 'bears_reserve_config', new Error('unavailable'))
+    await guardarExtraVehiculo('v-otro', { disponibleParaTrabajo: true })
+
+    const docRemoto = __get('configuracion_sistema', 'bears_reserve_config')
+    const extrasRemotos = docRemoto?.vehiculosExtra as Record<string, { disponibleParaTrabajo?: boolean }>
+    expect(extrasRemotos?.['v-prod']?.disponibleParaTrabajo).toBe(true)
+    expect(extrasRemotos?.['v-otro']).toBeUndefined()
   })
 })

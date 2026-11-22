@@ -73,17 +73,38 @@ describe('registrarPagoNomina', () => {
     expect(__all(COL_MOV)).toHaveLength(0)
   })
 
-  it('serializa dos pagos concurrentes y evita el doble pago', async () => {
+  it('serializa dos pagos concurrentes y evita el doble pago (NOM-03)', async () => {
     seedNomina()
-    __seed(COL_CTA, 'a', { nombre: 'Ahorros', saldoActual: 5000000 })
+    __seed(COL_CTA, 'a', { nombre: 'Ahorros', saldoActual: 3000000 })
     const [r1, r2] = await Promise.all([
       registrarPagoNomina('n1', { fecha: '2026-11-11' }),
       registrarPagoNomina('n1', { fecha: '2026-11-11' }),
     ])
-    // Ambos pueden ser válidos en un modelo de nómina mensual; lo que no puede
-    // pasar es que el saldo quede inconsistente con los movimientos creados.
     const exitosos = [r1, r2].filter((r) => r.ok).length
-    expect(__all(COL_MOV)).toHaveLength(exitosos)
-    expect(__get(COL_CTA, 'a')?.saldoActual).toBe(5000000 - exitosos * 2150000)
+    expect(exitosos).toBe(1)
+    expect(__all(COL_MOV)).toHaveLength(1)
+    expect(__get(COL_CTA, 'a')?.saldoActual).toBe(850000)
+  })
+
+  it('rechaza el pago cuando el empleado está inactivo', async () => {
+    seedNomina({ activo: false })
+    __seed(COL_CTA, 'a', { nombre: 'Ahorros', saldoActual: 5000000 })
+    const r = await registrarPagoNomina('n1', { fecha: '2026-11-11' })
+    expect(r.ok).toBe(false)
+    expect(r.error).toBe('nomina_inactiva')
+    expect(__get(COL_CTA, 'a')?.saldoActual).toBe(5000000)
+    expect(__all(COL_MOV)).toHaveLength(0)
+  })
+
+  it('rechaza montoOverride menor o igual a cero', async () => {
+    seedNomina()
+    __seed(COL_CTA, 'a', { nombre: 'Ahorros', saldoActual: 5000000 })
+    for (const montoOverride of [0, -50000, Number.NaN]) {
+      const r = await registrarPagoNomina('n1', { fecha: '2026-11-11', montoOverride })
+      expect(r.ok).toBe(false)
+      expect(r.error).toBe('monto_invalido')
+    }
+    expect(__get(COL_CTA, 'a')?.saldoActual).toBe(5000000)
+    expect(__all(COL_MOV)).toHaveLength(0)
   })
 })

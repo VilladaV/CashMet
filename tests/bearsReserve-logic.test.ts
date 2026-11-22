@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
+  BASE_BEARS_RESERVE,
   CONSUMO_RALENTI_GALONES_POR_HORA,
   PARADAS_RUTA_MERCADO_CAMPESINO,
   calcularCombustibleRalenti,
@@ -20,6 +21,7 @@ import {
   obtenerPreciosCombustibleActuales,
 } from '@/features/bearsReserve/preciosCombustible'
 import {
+  clasificarCapacidadesVehiculo,
   conductorDeRutaEnCuadrante,
   deduplicarEventosRadar,
   empleadosEnTurnoAhora,
@@ -508,5 +510,124 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
       [{ ...flota[2] }]
     )
     expect(sinHab.vehiculosElegidos).toHaveLength(0)
+  })
+})
+
+describe("Bear's Reserve · regresiones geo, despacho, catálogo y módulos", () => {
+  it('geo.ts desambigua "costado" vs Magdalena, "San Juan de Pasto" vs Chocó, La Dorada >50km y curva monótona en 35km', () => {
+    const costado = resolverCoordenadasLugar('Derrumbe en costado de la vía', 'Caldas')
+    expect(costado.lat).toBeGreaterThan(4.8)
+    expect(costado.lat).toBeLessThan(5.5) // Caldas, nunca Magdalena (~11.24)
+
+    const pasto = resolverCoordenadasLugar('San Juan de Pasto', 'Nariño')
+    expect(pasto.lat).toBeCloseTo(1.2136, 2)
+    expect(pasto.lng).toBeCloseTo(-77.2811, 2) // Nariño, nunca Chocó (~5.15)
+
+    const dorada = resolverCoordenadasLugar('La Dorada', 'Caldas')
+    const kmDorada = calcularDistanciaHaversineKm(
+      BASE_BEARS_RESERVE.lat,
+      BASE_BEARS_RESERVE.lng,
+      dorada.lat,
+      dorada.lng
+    )
+    expect(kmDorada).toBeGreaterThan(50)
+
+    // Curva estrictamente monótona alrededor del umbral de 35 km (35.0 km vs 35.1 km lineales al norte)
+    const dLat350 = 35.0 / 111.195
+    const dLat351 = 35.1 / 111.195
+    const r350 = calcularDistanciaRealDesdeBase(BASE_BEARS_RESERVE.lat + dLat350, BASE_BEARS_RESERVE.lng, true)
+    const r351 = calcularDistanciaRealDesdeBase(BASE_BEARS_RESERVE.lat + dLat351, BASE_BEARS_RESERVE.lng, true)
+    expect(r351.distanciaKmIda).toBeGreaterThanOrEqual(r350.distanciaKmIda)
+    expect(r351.tiempoMinutosIda).toBeGreaterThanOrEqual(r350.tiempoMinutosIda)
+  })
+
+  it('gemaEngine nunca despacha vehículos en_mision y un tanque en 0% no puntúa sobre 40%', () => {
+    const baseVeh = {
+      disponibleEnCashmet: true,
+      disponibleParaTrabajo: true,
+      tipoCombustible: 'diesel' as const,
+      capacidadTanqueGalones: 20,
+      consumoKmPorGalon: 20,
+      kilometrajeActual: 50000,
+      desgasteLlantasPorc: 15,
+      estadoBateriaPorc: 95,
+      totalGalonesConsumidos: 0,
+      totalCostoCombustibleCOP: 0,
+    }
+
+    const soloEnMision = [
+      { ...baseVeh, id: 'v-busy', vehiculoId: 'v-busy', marca: 'Toyota', linea: 'Hilux', tipo: 'carro' as const, estado: 'en_mision' as const, nivelCombustiblePorc: 95 },
+    ]
+    const resBusy = seleccionarVehiculosOptimosMision(
+      { titulo: 'Rescate rural', tipo: 'auxilio_comunitario' },
+      soloEnMision
+    )
+    expect(resBusy.vehiculosElegidos).toHaveLength(0)
+
+    const mezclaTanque = [
+      { ...baseVeh, id: 'v-cero', vehiculoId: 'v-cero', marca: 'Toyota', linea: 'Hilux', tipo: 'carro' as const, estado: 'disponible' as const, nivelCombustiblePorc: 0 },
+      { ...baseVeh, id: 'v-40', vehiculoId: 'v-40', marca: 'Toyota', linea: 'Hilux', tipo: 'carro' as const, estado: 'disponible' as const, nivelCombustiblePorc: 40 },
+    ]
+    const resTanque = seleccionarVehiculosOptimosMision(
+      { titulo: 'Apoyo veredal', tipo: 'auxilio_comunitario', distanciaKmTotal: 80 },
+      mezclaTanque
+    )
+    expect(resTanque.vehiculoElegido?.id).toBe('v-40')
+  })
+
+  it('rotarTurnos rota efectivamente incluso con afinidades distintas entre empleados', () => {
+    const emps = [
+      emp('e-cond-1', 'Pedro', 'Conductor pesado'),
+      emp('e-cond-2', 'Laura', 'Conductora rural'),
+      emp('e-mec-1', 'Diego', 'Mecánico automotriz'),
+      emp('e-log-1', 'Elena', 'Logística comunitaria'),
+    ]
+    const t0 = generarTurnosSemanalesIA(emps, '2026-11-16', RUTAS_HABITUALES_INICIALES, 0)
+    const t1 = generarTurnosSemanalesIA(emps, '2026-11-16', RUTAS_HABITUALES_INICIALES, 1)
+    const firma = (ts: typeof t0) => ts.map((t) => `${t.fecha}:${t.franja}:${t.empleadoId}`).join('|')
+    expect(firma(t0)).not.toBe(firma(t1))
+  })
+
+  it('"llanta extra" en notas no clasifica como gasolina extra y "Peugeot Boxer" no es moto', () => {
+    const llantaExtra = investigarFichaVehiculoIA(
+      'Renault',
+      'Duster',
+      'carro',
+      2022,
+      'Incluye llanta extra y gato hidráulico'
+    )
+    expect(llantaExtra.tipoCombustible).toBe('corriente')
+
+    const boxer = investigarFichaVehiculoIA('Peugeot', 'Boxer', 'carro', 2021)
+    expect(boxer.capacidadTanqueGalones).toBeGreaterThan(15)
+    expect(boxer.fichaInvestigadaNota).not.toMatch(/motocicleta/i)
+
+    const capBoxer = clasificarCapacidadesVehiculo({
+      id: 'v-boxer',
+      vehiculoId: 'v-boxer',
+      marca: 'Peugeot',
+      linea: 'Boxer',
+      tipo: 'carro',
+      disponibleEnCashmet: true,
+      disponibleParaTrabajo: true,
+      estado: 'disponible',
+      tipoCombustible: 'diesel',
+      capacidadTanqueGalones: 21.1,
+      nivelCombustiblePorc: 80,
+      consumoKmPorGalon: 29,
+      kilometrajeActual: 30000,
+      desgasteLlantasPorc: 10,
+      estadoBateriaPorc: 95,
+      totalGalonesConsumidos: 0,
+      totalCostoCombustibleCOP: 0,
+    })
+    expect(capBoxer.esMoto).toBe(false)
+  })
+
+  it('gemaAI.ts se importa primero sin error de TDZ (dependencias circulares resueltas)', async () => {
+    vi.resetModules()
+    const mod = await import('@/features/bearsReserve/gemaAI')
+    expect(mod.TTL_NOTICIA_WEB_MS).toBeGreaterThan(0)
+    expect(typeof mod.buscarNoticiasVialesRealesAI).toBe('function')
   })
 })

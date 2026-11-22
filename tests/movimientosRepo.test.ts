@@ -111,6 +111,21 @@ describe('crearMovimiento · saldos', () => {
     expect(saldo('a')).toBe(700)
   })
 
+  it('crearMovimiento sin cuentaBancoId devuelve el ID real guardado en Firestore', async () => {
+    const id = await crearMovimiento({
+      fecha: '2026-11-11',
+      tipo: 'gasto',
+      concepto: 'Efectivo sin cuenta',
+      monto: 15000,
+      categoria: 'Otros',
+    })
+    expect(id).toBeTruthy()
+    const guardado = __get(COL_MOV, id)
+    expect(guardado).toBeDefined()
+    expect(guardado?.concepto).toBe('Efectivo sin cuenta')
+    expect(guardado?.monto).toBe(15000)
+  })
+
   it('mueve saldo entre cuentas en una transferencia', async () => {
     seedCuenta('a', 1000)
     seedCuenta('b', 0)
@@ -323,6 +338,36 @@ describe('actualizarMovimiento', () => {
     expect(saldo('a')).toBe(800)
     expect(__get(COL_MOV, id)?.monto).toBe(200)
   })
+
+  it('limpiar cuentaBancoId borra el campo en Firestore y evita doble reversión al eliminar', async () => {
+    seedCuenta('a', 1000)
+    const id = await crearMovimiento({
+      fecha: '2026-11-11',
+      tipo: 'gasto',
+      concepto: 'Mercado',
+      monto: 200,
+      categoria: 'Mercado',
+      cuentaBancoId: 'a',
+    })
+    expect(saldo('a')).toBe(800)
+
+    await actualizarMovimiento(id, {
+      fecha: '2026-11-11',
+      tipo: 'gasto',
+      concepto: 'Mercado sin cuenta',
+      monto: 200,
+      categoria: 'Mercado',
+      cuentaBancoId: undefined,
+    })
+
+    // Saldo restaurado y campo cuentaBancoId efectivamente eliminado en Firestore
+    expect(saldo('a')).toBe(1000)
+    expect(__get(COL_MOV, id)?.cuentaBancoId).toBeUndefined()
+
+    // Eliminar después NO debe volver a acreditar la cuenta (evita doble reversión)
+    await eliminarMovimiento(id)
+    expect(saldo('a')).toBe(1000)
+  })
 })
 
 describe('eliminarMovimiento', () => {
@@ -341,7 +386,7 @@ describe('eliminarMovimiento', () => {
     expect(__get(COL_MOV, id)).toBeUndefined()
   })
 
-  it('revierte ambos lados de una transferencia', async () => {
+  it('revierte ambos lados de una transferencia respetando reads-before-writes', async () => {
     seedCuenta('a', 1000)
     seedCuenta('b', 1000)
     const id = await crearMovimiento({
@@ -356,6 +401,64 @@ describe('eliminarMovimiento', () => {
     await eliminarMovimiento(id)
     expect(saldo('a')).toBe(1000)
     expect(saldo('b')).toBe(1000)
+    expect(__get(COL_MOV, id)).toBeUndefined()
+  })
+
+  it('revierte la deuda asociada al eliminar un pago de deuda', async () => {
+    seedCuenta('a', 4000)
+    __seed('deudas', 'd1', {
+      nombre: 'Tarjeta Visa',
+      tipo: 'tarjeta',
+      saldoPendiente: 0,
+      estado: 'pagada',
+    })
+    __seed(COL_MOV, 'm-deuda', {
+      fecha: '2026-11-11',
+      tipo: 'pago_deuda',
+      concepto: 'Pago de cuota Tarjeta Visa',
+      monto: 1000,
+      categoria: 'Deudas',
+      deudaId: 'd1',
+      cuentaBancoId: 'a',
+      estado: 'confirmado',
+    })
+
+    await eliminarMovimiento('m-deuda')
+
+    expect(saldo('a')).toBe(5000)
+    expect(__get('deudas', 'd1')?.saldoPendiente).toBe(1000)
+    expect(__get('deudas', 'd1')?.estado).toBe('activa')
+    expect(__get(COL_MOV, 'm-deuda')).toBeUndefined()
+  })
+
+  it('revierte el impuesto asociado al eliminar un pago de impuesto', async () => {
+    seedCuenta('a', 500000)
+    __seed('impuestos', 'i1', {
+      nombre: 'Predial 2026',
+      tipo: 'predial',
+      valor: 500000,
+      periodicidad: 'anual',
+      pagado: true,
+      fechaPago: '2026-11-11',
+      cuentaBancoId: 'a',
+    })
+    __seed(COL_MOV, 'm-imp', {
+      fecha: '2026-11-11',
+      tipo: 'impuesto',
+      concepto: 'Pago de Predial 2026',
+      monto: 500000,
+      categoria: 'Impuestos',
+      impuestoId: 'i1',
+      cuentaBancoId: 'a',
+      estado: 'confirmado',
+    })
+
+    await eliminarMovimiento('m-imp')
+
+    expect(saldo('a')).toBe(1000000)
+    expect(__get('impuestos', 'i1')?.pagado).toBe(false)
+    expect(__get('impuestos', 'i1')?.fechaPago).toBeUndefined()
+    expect(__get(COL_MOV, 'm-imp')).toBeUndefined()
   })
 })
 
