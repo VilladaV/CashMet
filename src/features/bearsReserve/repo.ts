@@ -320,10 +320,12 @@ function sanitizarFirestore<T>(valor: T, dentroDeArray = false): T {
 // ---------------------------------------------------------------------------
 
 let cacheEstado: EstadoBearsCompleto | null = null
+let hidratadoDesdePersistencia = false
 let promesaHidratacion: Promise<EstadoBearsCompleto> | null = null
 
 export function __resetCacheBearsParaTests(): void {
   cacheEstado = null
+  hidratadoDesdePersistencia = false
   promesaHidratacion = null
   estadoSyncActual = { estado: 'conectando' }
   establecerPreciosCombustibleCache(null)
@@ -574,7 +576,7 @@ async function persistirChat(estado: EstadoBearsCompleto): Promise<void> {
  *   los fusiona y vuelve a sincronizarlos hacia Firestore.
  */
 export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCompleto> {
-  if (cacheEstado && !forzar) return cacheEstado
+  if (hidratadoDesdePersistencia && cacheEstado && !forzar) return cacheEstado
   if (promesaHidratacion && !forzar) return promesaHidratacion
 
   promesaHidratacion = (async () => {
@@ -809,6 +811,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
 
     establecerPreciosCombustibleCache(base.preciosCombustible)
     cacheEstado = base
+    hidratadoDesdePersistencia = true
     return base
   })()
 
@@ -819,11 +822,14 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
   }
 }
 
+/**
+ * Lectura síncrona segura para estados iniciales de React (`useState`).
+ * CRÍTICO: NUNCA asigna `cacheEstado` ni marca `hidratadoDesdePersistencia = true`;
+ * de lo contrario el primer render de BearsReservePortal impediría que `hidratarEstadoBears()`
+ * leyera Firestore y localStorage al recargar (F5).
+ */
 function obtenerCacheSincrono(): EstadoBearsCompleto {
-  if (!cacheEstado) {
-    cacheEstado = estadoInicialVacio()
-  }
-  return cacheEstado
+  return cacheEstado ?? estadoInicialVacio()
 }
 
 // ---------------------------------------------------------------------------
