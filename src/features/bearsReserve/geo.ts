@@ -128,69 +128,221 @@ export const PUNTOS_REFERENCIA_CALDAS: Record<string, PuntoGeografico> = {
   },
 }
 
+function normalizarTextoGeo(texto: string): string {
+  return String(texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+}
+
+function coincidePalabraGeo(texto: string, clave: string): boolean {
+  if (!texto || !clave) return false
+  const escapada = clave.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^a-z0-9])${escapada}([^a-z0-9]|$)`).test(texto)
+}
+
+interface EntradaGeo {
+  claves: string[]
+  punto: { lat: number; lng: number }
+  soloSiCaldasOVacio?: boolean
+  soloSiDepartamento?: string[]
+  excluirSiDepartamento?: string[]
+}
+
+const MUNICIPIOS_CALDAS_GEO: EntradaGeo[] = [
+  // Los 27 municipios reales de Caldas
+  { claves: ['la dorada'], punto: { lat: 5.4536, lng: -74.6631 } },
+  { claves: ['aguadas'], punto: { lat: 5.6111, lng: -75.4561 } },
+  { claves: ['riosucio'], punto: { lat: 5.4214, lng: -75.7031 }, excluirSiDepartamento: ['choco'] },
+  { claves: ['pensilvania'], punto: { lat: 5.3842, lng: -75.1614 } },
+  { claves: ['samana'], punto: { lat: 5.4128, lng: -74.9922 } },
+  { claves: ['manzanares'], punto: { lat: 5.2528, lng: -75.1553 } },
+  { claves: ['anserma'], punto: { lat: 5.2381, lng: -75.785 } },
+  { claves: ['supia'], punto: { lat: 5.4481, lng: -75.6494 } },
+  { claves: ['marmato'], punto: { lat: 5.475, lng: -75.5989 } },
+  { claves: ['viterbo'], punto: { lat: 5.0628, lng: -75.8717 } },
+  { claves: ['pacora'], punto: { lat: 5.5272, lng: -75.4594 } },
+  { claves: ['victoria'], punto: { lat: 5.3161, lng: -74.9125 }, soloSiCaldasOVacio: true },
+  { claves: ['norcasia'], punto: { lat: 5.5742, lng: -74.8886 } },
+  { claves: ['marquetalia'], punto: { lat: 5.2964, lng: -75.0531 } },
+  { claves: ['marulanda'], punto: { lat: 5.2842, lng: -75.2606 } },
+  { claves: ['filadelfia'], punto: { lat: 5.2961, lng: -75.5614 } },
+  { claves: ['belalcazar'], punto: { lat: 4.9964, lng: -75.8131 } },
+  { claves: ['palestina', 'santagueda'], punto: PUNTOS_REFERENCIA_CALDAS.palestina, excluirSiDepartamento: ['huila'] },
+  { claves: ['arauca'], punto: PUNTOS_REFERENCIA_CALDAS.palestina, soloSiCaldasOVacio: true },
+  { claves: ['risaralda'], punto: { lat: 5.1683, lng: -75.7647 }, soloSiDepartamento: ['caldas'] },
+  { claves: ['san jose'], punto: { lat: 5.0806, lng: -75.7928 }, soloSiCaldasOVacio: true },
+  { claves: ['aranzazu'], punto: { lat: 5.2719, lng: -75.4894 } },
+  { claves: ['salamina'], punto: { lat: 5.4075, lng: -75.4878 } },
+  { claves: ['la merced', 'merced'], punto: { lat: 5.4003, lng: -75.5469 }, soloSiCaldasOVacio: true },
+  { claves: ['neira'], punto: PUNTOS_REFERENCIA_CALDAS.neira },
+  { claves: ['chinchina'], punto: PUNTOS_REFERENCIA_CALDAS.chinchina },
+  { claves: ['villamaria', 'gallinazo'], punto: PUNTOS_REFERENCIA_CALDAS.villamaria },
+]
+
+const VEREDAS_LOCALES_MANIZALES_GEO: EntradaGeo[] = [
+  { claves: ['san peregrino', 'guadual'], punto: PUNTOS_REFERENCIA_CALDAS.san_peregrino, soloSiCaldasOVacio: true },
+  { claves: ['la cabana', 'cabana', 'quiebra'], punto: PUNTOS_REFERENCIA_CALDAS.la_cabana, soloSiCaldasOVacio: true },
+  { claves: ['la linda', 'morrogacho'], punto: PUNTOS_REFERENCIA_CALDAS.la_linda, soloSiCaldasOVacio: true },
+  { claves: ['desquite'], punto: PUNTOS_REFERENCIA_CALDAS.el_desquite, soloSiCaldasOVacio: true },
+  { claves: ['tablazo'], punto: PUNTOS_REFERENCIA_CALDAS.bajo_tablazo, soloSiCaldasOVacio: true },
+  { claves: ['letras', 'mesones', 'padua'], punto: PUNTOS_REFERENCIA_CALDAS.letras_mesones },
+  { claves: ['siria'], punto: PUNTOS_REFERENCIA_CALDAS.el_rosario, soloSiCaldasOVacio: true },
+  { claves: ['el rosario', 'rosario'], punto: PUNTOS_REFERENCIA_CALDAS.el_rosario, soloSiCaldasOVacio: true },
+  { claves: ['la trinidad', 'trinidad'], punto: PUNTOS_REFERENCIA_CALDAS.la_trinidad_escuela, soloSiCaldasOVacio: true },
+  { claves: ['plaza de mercado', 'mercado', 'galeria'], punto: PUNTOS_REFERENCIA_CALDAS.plaza_mercado_manizales, soloSiCaldasOVacio: true },
+  { claves: ['manizales', 'chipre'], punto: PUNTOS_REFERENCIA_CALDAS.colegios_manizales },
+  { claves: ['centro'], punto: PUNTOS_REFERENCIA_CALDAS.colegios_manizales, soloSiCaldasOVacio: true },
+]
+
+const CIUDADES_Y_MUNICIPIOS_NACIONALES_GEO: EntradaGeo[] = [
+  // Multi-palabra / desambiguados primero
+  { claves: ['san juan de pasto', 'pasto', 'tumaco', 'ipiales'], punto: { lat: 1.2136, lng: -77.2811 } },
+  { claves: ['santa rosa de cabal'], punto: PUNTOS_REFERENCIA_CALDAS.santa_rosa },
+  { claves: ['santa rosa de osos'], punto: { lat: 6.6475, lng: -75.4603 } },
+  { claves: ['santa rosa del sur'], punto: { lat: 7.9644, lng: -74.0544 } },
+  { claves: ['riosucio choco', 'riosucio'], punto: { lat: 7.4406, lng: -77.1189 }, soloSiDepartamento: ['choco'] },
+  { claves: ['riosucio choco'], punto: { lat: 7.4406, lng: -77.1189 } },
+  { claves: ['rio san juan', 'san juan choco', 'medio san juan', 'litoral del san juan'], punto: { lat: 5.158, lng: -76.688 } },
+  { claves: ['san jose del guaviare'], punto: { lat: 2.5729, lng: -72.6459 } },
+  { claves: ['villa del rosario', 'cucuta', 'ocana', 'catatumbo'], punto: { lat: 7.8939, lng: -72.5078 } },
+  { claves: ['santa rosa'], punto: PUNTOS_REFERENCIA_CALDAS.santa_rosa, soloSiDepartamento: ['risaralda', 'caldas', ''] },
+  { claves: ['pereira', 'dosquebradas'], punto: PUNTOS_REFERENCIA_CALDAS.pereira },
+  { claves: ['armenia', 'calarca', 'salento'], punto: { lat: 4.5339, lng: -75.6811 } },
+  { claves: ['ibague'], punto: { lat: 4.4389, lng: -75.2322 } },
+  { claves: ['fresno', 'mariquita', 'herveo'], punto: PUNTOS_REFERENCIA_CALDAS.fresno },
+  { claves: ['bello', 'zamora'], punto: { lat: 6.3373, lng: -75.5579 }, soloSiDepartamento: ['antioquia', ''] },
+  { claves: ['medellin', 'aburra', 'envigado', 'itagui', 'sabaneta'], punto: { lat: 6.2442, lng: -75.5812 } },
+  { claves: ['uraba', 'apartado', 'turbo', 'dabeiba'], punto: { lat: 7.883, lng: -76.6259 } },
+  { claves: ['cocorna', 'san luis'], punto: PUNTOS_REFERENCIA_CALDAS.cocorna },
+  { claves: ['quibdo', 'istmina'], punto: { lat: 5.6947, lng: -76.6611 } },
+  { claves: ['buenaventura', 'loboguerrero'], punto: { lat: 3.8801, lng: -77.0312 } },
+  { claves: ['buga', 'tulua'], punto: { lat: 3.9009, lng: -76.2978 } },
+  { claves: ['cali', 'palmira', 'jamundi'], punto: { lat: 3.4516, lng: -76.532 } },
+  { claves: ['popayan', 'rosas', 'cajibio', 'panamericana'], punto: { lat: 2.4448, lng: -76.6147 } },
+  { claves: ['monteria', 'lorica', 'mojana'], punto: { lat: 8.7479, lng: -75.8814 } },
+  { claves: ['cartagena', 'magangue'], punto: { lat: 10.391, lng: -75.4794 } },
+  { claves: ['barranquilla', 'soledad'], punto: { lat: 10.9685, lng: -74.7813 } },
+  { claves: ['santa marta', 'cienaga', 'costa caribe'], punto: { lat: 11.2408, lng: -74.199 } },
+  { claves: ['riohacha', 'uribia', 'maicao'], punto: { lat: 11.5444, lng: -72.9072 } },
+  { claves: ['sincelejo', 'san marcos'], punto: { lat: 9.3047, lng: -75.3978 } },
+  { claves: ['valledupar', 'aguachica'], punto: { lat: 10.4631, lng: -73.2532 } },
+  { claves: ['bucaramanga', 'barrancabermeja', 'san gil'], punto: { lat: 7.1254, lng: -73.1198 } },
+  { claves: ['villavicencio', 'via al llano', 'guayabetal'], punto: { lat: 4.142, lng: -73.6266 } },
+  { claves: ['neiva', 'pitalito', 'garzon'], punto: { lat: 2.9273, lng: -75.2819 } },
+  { claves: ['tunja', 'sogamoso', 'duitama'], punto: { lat: 5.5353, lng: -73.3678 } },
+  { claves: ['bogota', 'soacha', 'girardot', 'villeta'], punto: { lat: 4.711, lng: -74.0721 } },
+  { claves: ['mocoa', 'puerto asis'], punto: { lat: 1.1528, lng: -76.6521 } },
+  { claves: ['florencia'], punto: { lat: 1.6144, lng: -75.6062 } },
+  { claves: ['yopal'], punto: { lat: 5.3378, lng: -72.3959 } },
+  { claves: ['leticia'], punto: { lat: -4.2153, lng: -69.9406 } },
+  { claves: ['san andres'], punto: { lat: 12.5847, lng: -81.7006 } },
+]
+
+const DEPARTAMENTOS_COLOMBIA_GEO: Array<{ claves: string[]; punto: { lat: number; lng: number } }> = [
+  { claves: ['valle del cauca'], punto: { lat: 3.4516, lng: -76.532 } },
+  { claves: ['norte de santander'], punto: { lat: 7.8939, lng: -72.5078 } },
+  { claves: ['la guajira', 'guajira'], punto: { lat: 11.5444, lng: -72.9072 } },
+  { claves: ['risaralda'], punto: PUNTOS_REFERENCIA_CALDAS.pereira },
+  { claves: ['quindio'], punto: { lat: 4.5339, lng: -75.6811 } },
+  { claves: ['tolima'], punto: PUNTOS_REFERENCIA_CALDAS.fresno },
+  { claves: ['antioquia'], punto: PUNTOS_REFERENCIA_CALDAS.cocorna },
+  { claves: ['choco'], punto: { lat: 5.6947, lng: -76.6611 } },
+  { claves: ['cauca'], punto: { lat: 2.4448, lng: -76.6147 } },
+  { claves: ['narino'], punto: { lat: 1.2136, lng: -77.2811 } },
+  { claves: ['cordoba'], punto: { lat: 8.7479, lng: -75.8814 } },
+  { claves: ['bolivar'], punto: { lat: 10.391, lng: -75.4794 } },
+  { claves: ['atlantico'], punto: { lat: 10.9685, lng: -74.7813 } },
+  { claves: ['magdalena'], punto: { lat: 11.2408, lng: -74.199 } },
+  { claves: ['sucre'], punto: { lat: 9.3047, lng: -75.3978 } },
+  { claves: ['cesar'], punto: { lat: 10.4631, lng: -73.2532 } },
+  { claves: ['santander'], punto: { lat: 7.1254, lng: -73.1198 } },
+  { claves: ['meta'], punto: { lat: 4.142, lng: -73.6266 } },
+  { claves: ['huila'], punto: { lat: 2.9273, lng: -75.2819 } },
+  { claves: ['boyaca'], punto: { lat: 5.5353, lng: -73.3678 } },
+  { claves: ['cundinamarca'], punto: { lat: 4.711, lng: -74.0721 } },
+  { claves: ['putumayo'], punto: { lat: 1.1528, lng: -76.6521 } },
+  { claves: ['caqueta'], punto: { lat: 1.6144, lng: -75.6062 } },
+  { claves: ['casanare'], punto: { lat: 5.3378, lng: -72.3959 } },
+  { claves: ['arauca'], punto: { lat: 7.0847, lng: -70.7591 } },
+  { claves: ['amazonas'], punto: { lat: -4.2153, lng: -69.9406 } },
+  { claves: ['guaviare'], punto: { lat: 2.5729, lng: -72.6459 } },
+  { claves: ['caldas'], punto: PUNTOS_REFERENCIA_CALDAS.colegios_manizales },
+]
+
+function entradaHabilitadaParaDep(
+  item: EntradaGeo,
+  depNorm: string,
+  esCaldasOVacio: boolean
+): boolean {
+  if (item.soloSiCaldasOVacio && !esCaldasOVacio) return false
+  if (item.soloSiDepartamento) {
+    const ok = item.soloSiDepartamento.some((d) => (d === '' ? depNorm === '' : depNorm.includes(d)))
+    if (!ok) return false
+  }
+  if (item.excluirSiDepartamento) {
+    const excluido = item.excluirSiDepartamento.some((d) => depNorm.includes(d))
+    if (excluido) return false
+  }
+  return true
+}
+
 /**
  * Resuelve coordenadas aproximadas reales a partir del nombre de una vereda,
- * municipio o departamento mencionado en una llamada comunitaria.
+ * municipio o departamento mencionado en una llamada comunitaria o noticia.
  */
 export function resolverCoordenadasLugar(
   lugar: string,
   departamento = 'Caldas'
 ): { lat: number; lng: number } {
-  const texto = `${lugar} ${departamento}`
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+  const lugarNorm = normalizarTextoGeo(lugar)
+  const depNorm = normalizarTextoGeo(departamento)
+  const esCaldasOVacio =
+    !depNorm || depNorm.includes('caldas') || depNorm === 'otro' || coincidePalabraGeo(lugarNorm, 'manizales')
 
-  const diccionario: Array<{ claves: string[]; punto: PuntoGeografico }> = [
-    { claves: ['cabaña', 'cabana', 'quiebra'], punto: PUNTOS_REFERENCIA_CALDAS.la_cabana },
-    { claves: ['la linda', 'morrogacho'], punto: PUNTOS_REFERENCIA_CALDAS.la_linda },
-    { claves: ['desquite'], punto: PUNTOS_REFERENCIA_CALDAS.el_desquite },
-    { claves: ['rosario', 'siria'], punto: PUNTOS_REFERENCIA_CALDAS.el_rosario },
-    { claves: ['trinidad'], punto: PUNTOS_REFERENCIA_CALDAS.la_trinidad_escuela },
-    { claves: ['mercado', 'galeria'], punto: PUNTOS_REFERENCIA_CALDAS.plaza_mercado_manizales },
-    { claves: ['tablazo'], punto: PUNTOS_REFERENCIA_CALDAS.bajo_tablazo },
-    { claves: ['villamaria', 'gallinazo'], punto: PUNTOS_REFERENCIA_CALDAS.villamaria },
-    { claves: ['letras', 'mesones', 'padua'], punto: PUNTOS_REFERENCIA_CALDAS.letras_mesones },
-    { claves: ['neira', 'aranzazu', 'salamina'], punto: PUNTOS_REFERENCIA_CALDAS.neira },
-    { claves: ['chinchina'], punto: PUNTOS_REFERENCIA_CALDAS.chinchina },
-    { claves: ['palestina', 'arauca', 'santagueda'], punto: PUNTOS_REFERENCIA_CALDAS.palestina },
-    { claves: ['santa rosa'], punto: PUNTOS_REFERENCIA_CALDAS.santa_rosa },
-    { claves: ['pereira', 'dosquebradas', 'risaralda'], punto: PUNTOS_REFERENCIA_CALDAS.pereira },
-    { claves: ['armenia', 'quindio', 'calarca', 'salento'], punto: { nombre: 'Quindío', lat: 4.5339, lng: -75.6811 } },
-    { claves: ['ibague'], punto: { nombre: 'Ibagué (Tolima)', lat: 4.4389, lng: -75.2322 } },
-    { claves: ['fresno', 'mariquita', 'tolima', 'herveo'], punto: PUNTOS_REFERENCIA_CALDAS.fresno },
-    { claves: ['bello', 'zamora'], punto: { nombre: 'Bello (Antioquia)', lat: 6.3373, lng: -75.5579 } },
-    { claves: ['medellin', 'aburra', 'envigado', 'itagui', 'sabaneta'], punto: { nombre: 'Medellín (Antioquia)', lat: 6.2442, lng: -75.5812 } },
-    { claves: ['uraba', 'apartado', 'turbo', 'dabeiba'], punto: { nombre: 'Urabá (Antioquia)', lat: 7.883, lng: -76.6259 } },
-    { claves: ['cocorna', 'san luis', 'antioquia'], punto: PUNTOS_REFERENCIA_CALDAS.cocorna },
-    { claves: ['choco', 'quibdo', 'istmina', 'riosucio choco', 'san juan'], punto: { nombre: 'Chocó', lat: 5.6947, lng: -76.6611 } },
-    { claves: ['buenaventura', 'loboguerrero'], punto: { nombre: 'Buenaventura (Valle)', lat: 3.8801, lng: -77.0312 } },
-    { claves: ['buga', 'tulua'], punto: { nombre: 'Buga (Valle)', lat: 3.9009, lng: -76.2978 } },
-    { claves: ['valle del cauca', 'cali', 'palmira', 'jamundi'], punto: { nombre: 'Valle del Cauca', lat: 3.4516, lng: -76.532 } },
-    { claves: ['cauca', 'popayan', 'rosas', 'cajibio', 'panamericana'], punto: { nombre: 'Cauca', lat: 2.4448, lng: -76.6147 } },
-    { claves: ['narino', 'pasto', 'tumaco', 'ipiales'], punto: { nombre: 'Nariño', lat: 1.2136, lng: -77.2811 } },
-    { claves: ['cordoba', 'monteria', 'lorica', 'mojana'], punto: { nombre: 'Córdoba', lat: 8.7479, lng: -75.8814 } },
-    { claves: ['bolivar', 'cartagena', 'magangue'], punto: { nombre: 'Bolívar', lat: 10.391, lng: -75.4794 } },
-    { claves: ['atlantico', 'barranquilla', 'soledad'], punto: { nombre: 'Atlántico', lat: 10.9685, lng: -74.7813 } },
-    { claves: ['magdalena', 'santa marta', 'cienaga', 'costa'], punto: { nombre: 'Magdalena', lat: 11.2408, lng: -74.199 } },
-    { claves: ['guajira', 'riohacha', 'uribia', 'maicao'], punto: { nombre: 'La Guajira', lat: 11.5444, lng: -72.9072 } },
-    { claves: ['sucre', 'sincelejo', 'san marcos'], punto: { nombre: 'Sucre', lat: 9.3047, lng: -75.3978 } },
-    { claves: ['cesar', 'valledupar', 'aguachica'], punto: { nombre: 'Cesar', lat: 10.4631, lng: -73.2532 } },
-    { claves: ['norte de santander', 'cucuta', 'ocana', 'catatumbo'], punto: { nombre: 'Norte de Santander', lat: 7.8939, lng: -72.5078 } },
-    { claves: ['santander', 'bucaramanga', 'barrancabermeja', 'san gil'], punto: { nombre: 'Santander', lat: 7.1254, lng: -73.1198 } },
-    { claves: ['meta', 'villavicencio', 'via al llano', 'guayabetal'], punto: { nombre: 'Meta', lat: 4.142, lng: -73.6266 } },
-    { claves: ['huila', 'neiva', 'pitalito', 'garzon'], punto: { nombre: 'Huila', lat: 2.9273, lng: -75.2819 } },
-    { claves: ['boyaca', 'tunja', 'sogamoso', 'duitama'], punto: { nombre: 'Boyacá', lat: 5.5353, lng: -73.3678 } },
-    { claves: ['cundinamarca', 'bogota', 'soacha', 'girardot', 'villeta'], punto: { nombre: 'Cundinamarca', lat: 4.711, lng: -74.0721 } },
-    { claves: ['putumayo', 'mocoa', 'puerto asis'], punto: { nombre: 'Putumayo', lat: 1.1528, lng: -76.6521 } },
-    { claves: ['caqueta', 'florencia'], punto: { nombre: 'Caquetá', lat: 1.6144, lng: -75.6062 } },
-    { claves: ['casanare', 'yopal'], punto: { nombre: 'Casanare', lat: 5.3378, lng: -72.3959 } },
-    { claves: ['san peregrino', 'guadual'], punto: PUNTOS_REFERENCIA_CALDAS.san_peregrino },
-    { claves: ['manizales', 'chipre', 'centro'], punto: PUNTOS_REFERENCIA_CALDAS.colegios_manizales },
-  ]
+  // 1. Priorizar ciudades/municipios específicos nacionales y desambiguados en `lugar`
+  for (const item of CIUDADES_Y_MUNICIPIOS_NACIONALES_GEO) {
+    if (!entradaHabilitadaParaDep(item, depNorm, esCaldasOVacio)) continue
+    if (item.claves.some((k) => coincidePalabraGeo(lugarNorm, k))) {
+      return { lat: item.punto.lat, lng: item.punto.lng }
+    }
+  }
 
-  for (const item of diccionario) {
-    if (item.claves.some((k) => texto.includes(k))) {
+  // 2. Los 27 municipios reales de Caldas en `lugar`
+  for (const item of MUNICIPIOS_CALDAS_GEO) {
+    if (!entradaHabilitadaParaDep(item, depNorm, esCaldasOVacio)) continue
+    if (item.claves.some((k) => coincidePalabraGeo(lugarNorm, k))) {
+      return { lat: item.punto.lat, lng: item.punto.lng }
+    }
+  }
+
+  // 3. Veredas y sectores locales de Manizales/Caldas (condicionados a Caldas o vacío)
+  for (const item of VEREDAS_LOCALES_MANIZALES_GEO) {
+    if (!entradaHabilitadaParaDep(item, depNorm, esCaldasOVacio)) continue
+    if (item.claves.some((k) => coincidePalabraGeo(lugarNorm, k))) {
+      return { lat: item.punto.lat, lng: item.punto.lng }
+    }
+  }
+
+  // 4. Coincidencia explícita de departamento en `departamento` primero
+  if (depNorm) {
+    for (const item of DEPARTAMENTOS_COLOMBIA_GEO) {
+      if (item.claves.some((k) => coincidePalabraGeo(depNorm, k))) {
+        return { lat: item.punto.lat, lng: item.punto.lng }
+      }
+    }
+  }
+
+  // 5. Fallback: departamento mencionado explícitamente en `lugar` (evitando falsos positivos como "meta" suelta)
+  for (const item of DEPARTAMENTOS_COLOMBIA_GEO) {
+    if (item.claves.includes('meta')) {
+      if (coincidePalabraGeo(lugarNorm, 'departamento del meta') || coincidePalabraGeo(lugarNorm, 'llanos del meta')) {
+        return { lat: item.punto.lat, lng: item.punto.lng }
+      }
+      continue
+    }
+    if (item.claves.some((k) => coincidePalabraGeo(lugarNorm, k))) {
       return { lat: item.punto.lat, lng: item.punto.lng }
     }
   }
@@ -207,6 +359,14 @@ export function calcularDistanciaHaversineKm(
   lat2: number,
   lon2: number
 ): number {
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return 0
+  }
   const R = 6371 // Radio de la Tierra en km
   const dLat = ((lat2 - lat1) * Math.PI) / 180
   const dLon = ((lon2 - lon1) * Math.PI) / 180
@@ -216,7 +376,8 @@ export function calcularDistanciaHaversineKm(
       Math.cos((lat2 * Math.PI) / 180) *
       Math.sin(dLon / 2) *
       Math.sin(dLon / 2)
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  const aAcotado = Math.min(1, Math.max(0, a))
+  const c = 2 * Math.atan2(Math.sqrt(aAcotado), Math.sqrt(1 - aAcotado))
   return R * c
 }
 
@@ -256,8 +417,8 @@ export function calcularDistanciaRutaParadas(
 
 /**
  * Calcula la distancia real por carretera/trocha desde Finca El Guadual a un punto.
- * Adapta automáticamente el factor de sinuosidad y velocidad promedio entre trocha local (≤35 km)
- * y carretera nacional de montaña (>35 km) para que los tiempos a otras regiones sean realistas.
+ * Usa transición continua y estrictamente monótona por tramos (acceso local ≤25 km + carretera nacional >25 km)
+ * reutilizando `factorSinuosidadMontaña` para eliminar saltos bruscos en 35 km.
  */
 export function calcularDistanciaRealDesdeBase(
   destinoLat: number,
@@ -277,15 +438,25 @@ export function calcularDistanciaRealDesdeBase(
     destinoLng
   )
   const esLargaDistancia = linealKm > 35
-  const usarTrocha = esTrocha && !esLargaDistancia
-  const factor = usarTrocha ? 1.54 : 1.42
-  const kmIda = Math.max(2, Number((linealKm * factor).toFixed(1)))
+
+  // Tramo 1 (0..25 km lineales): acceso veredal/regional desde la Cordillera Central
+  // Tramo 2 (>25 km lineales): carretera nacional de montaña
+  const tramoLocalLineal = Math.min(linealKm, 25)
+  const tramoNacionalLineal = Math.max(0, linealKm - 25)
+
+  const kmTramoLocal = tramoLocalLineal * factorSinuosidadMontaña(esTrocha)
+  const kmTramoNacional = tramoNacionalLineal * factorSinuosidadMontaña(false)
+  const kmCalculado = kmTramoLocal + kmTramoNacional
+  const kmIda = Math.max(2, Number(kmCalculado.toFixed(1)))
   const kmTotal = Number((kmIda * 2).toFixed(1))
 
   // Velocidad promedio realista en Colombia para camioneta 4x4 / camión:
-  // ~28 km/h en trocha veredal, ~48 km/h en carretera nacional de montaña
-  const velPromedioKmH = usarTrocha ? 28 : esLargaDistancia ? 48 : 38
-  const tiempoIda = kmIda > 0 ? Math.max(8, Math.round((kmIda / velPromedioKmH) * 60)) : 0
+  // ~28 km/h en trocha veredal, ~38 km/h en vía regional, ~48 km/h en carretera nacional de montaña
+  const velLocalKmH = esTrocha ? 28 : 38
+  const velNacionalKmH = 48
+  const horasIda =
+    kmCalculado > 0 ? kmTramoLocal / velLocalKmH + kmTramoNacional / velNacionalKmH : kmIda / velLocalKmH
+  const tiempoIda = kmIda > 0 ? Math.max(8, Math.round(horasIda * 60)) : 0
   const tiempoTotal = tiempoIda * 2
 
   return {
@@ -336,14 +507,25 @@ export function estimarLogisticaMisionDesdeBase(
       ? { lat: destino.lat, lng: destino.lng }
       : resolverCoordenadasLugar(destino.lugar, destino.departamento || 'Caldas')
 
-  const texto = `${destino.titulo || ''} ${destino.lugar || ''}`.toLowerCase()
-  const pareceVereda = /vereda|trocha|finca|camino|tablazo|caba[ñn]a|la linda|desquite|rosario/.test(texto)
+  const texto = normalizarTextoGeo(
+    `${destino.titulo || ''} ${destino.lugar || ''} ${destino.tipoMision || ''}`
+  )
+  const pareceVereda =
+    /vereda|trocha|finca|camino|tablazo|cabana|la linda|desquite|rosario|rural|rescate_barrizal|desvarado_rural/.test(
+      texto
+    )
 
   let kmIda: number
   let minutosIda: number
   let fuenteCalculo: 'gps_carretera' | 'estimado_cordillera' = 'estimado_cordillera'
 
-  if (osrmIda && osrmIda.distanciaKm > 0 && osrmIda.duracionMinutos > 0) {
+  if (
+    osrmIda &&
+    Number.isFinite(osrmIda.distanciaKm) &&
+    osrmIda.distanciaKm > 0 &&
+    Number.isFinite(osrmIda.duracionMinutos) &&
+    osrmIda.duracionMinutos > 0
+  ) {
     kmIda = Number(osrmIda.distanciaKm.toFixed(1))
     // Factor de convoy/camión en carretera de montaña colombiana (~18% sobre auto ligero OSRM)
     minutosIda = Math.max(8, Math.round(osrmIda.duracionMinutos * 1.18))
@@ -360,11 +542,17 @@ export function estimarLogisticaMisionDesdeBase(
 
   // Tiempo realista de trabajo / maniobra en el lugar según tipo de emergencia
   let minutosServicioEnSitio = 55
-  if (/volcamiento|derrumbe|deslizamiento|barrizal|barro|atascad|atollam|rescate|suspendido/.test(texto)) {
+  if (
+    /volcamiento|derrumbe|deslizamiento|barrizal|barro|atascad|atollam|rescate|suspendido/.test(texto)
+  ) {
     minutosServicioEnSitio = 75
-  } else if (/[aá]rbol|despeje|acueducto|quebrada|inundaci|creciente/.test(texto)) {
+  } else if (
+    /arbol|despeje|acueducto|quebrada|inundaci|creciente|desvar|varad|mecan|apoyo_vial/.test(texto)
+  ) {
     minutosServicioEnSitio = 65
-  } else if (/m[eé]dic|traslado|insumos|trasteo|v[ií]veres|agua|escolar/.test(texto)) {
+  } else if (
+    /medic|traslado|insumos|trasteo|viveres|agua|escolar|transporte_humanitario/.test(texto)
+  ) {
     minutosServicioEnSitio = 40
   }
   if (destino.esEmergenciaGrave) {
@@ -396,6 +584,7 @@ export function estimarLogisticaMisionDesdeBase(
 }
 
 export function formatearDuracionCorta(minutos: number): string {
+  if (!Number.isFinite(minutos)) return '0m'
   const m = Math.max(0, Math.round(minutos))
   if (m < 60) return `${m} min`
   const h = Math.floor(m / 60)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
@@ -33,6 +33,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import MapaOperaciones from './MapaOperaciones'
+import { construirIdCumplimientoRuta } from './constants'
 import {
   calcularDistanciaRutaParadas,
   estimarLogisticaMisionDesdeBase,
@@ -44,15 +45,16 @@ import {
 import { trazarRutaCarreteraGps } from './ruteoGps'
 import { seleccionarConvoyMisionConIA } from './gemaAI'
 import {
+  conductorDeRutaEnCuadrante,
   seleccionarVehiculosOptimosMision,
   seleccionarTripulacionMision,
 } from './gemaEngine'
-import { obtenerConductorRuta } from './repo'
-import { hoyISO } from '@/lib/fechas'
+import { hoyISO, isoLocal } from '@/lib/fechas'
 
 let counterMision = 1
 function crearMisionId(): string {
-  return `mis-${Date.now()}-${counterMision++}`
+  const rand = Math.random().toString(36).slice(2, 6)
+  return `mis-${Date.now()}-${counterMision++}-${rand}`
 }
 
 function horaActualHHMM(): string {
@@ -60,9 +62,17 @@ function horaActualHHMM(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
+function mananaISO(): string {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return isoLocal(d)
+}
+
 function textoVigenciaRestante(expiraEn?: number, ahora = Date.now()): string {
   if (!expiraEn) return 'Vigente hoy'
-  const horas = Math.max(1, Math.ceil((expiraEn - ahora) / (60 * 60 * 1000)))
+  const diff = expiraEn - ahora
+  if (diff <= 0) return 'Vencida'
+  const horas = Math.max(1, Math.ceil(diff / (60 * 60 * 1000)))
   if (horas >= 24) {
     const dias = Math.floor(horas / 24)
     const rem = horas % 24
@@ -91,7 +101,6 @@ interface Props {
     llamadasAgregadas: number
     diagnosticoWeb?: string
   }>
-  onActualizarEventosRadar?: (eventos: EventoRadarLocal[]) => Promise<void> | void
   onAgregarEventoRadar?: (ev: EventoRadarLocal) => Promise<void> | void
 }
 
@@ -117,34 +126,126 @@ export default function MisionesTab({
   const [subVista, setSubVista] = useState<SubVistaMisiones>('radar')
   const [filtroRadar, setFiltroRadar] = useState<'todos' | 'caldas' | 'otros'>('todos')
   const [busyRutaId, setBusyRutaId] = useState<string | null>(null)
+  const [busyMisionId, setBusyMisionId] = useState<string | null>(null)
+  const [busyDescartarId, setBusyDescartarId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(null)
   const [ahoraMs, setAhoraMs] = useState(() => Date.now())
+  const feedbackTimerRef = useRef<number | null>(null)
 
-  // Actualizar reloj cada 15s para barras de progreso en vivo
+  // Memoizar arreglos pasados a MapaOperaciones para evitar reconstrucción innecesaria del mapa
+  const misionesEnCurso = useMemo(
+    () => misiones.filter((m) => m.estado === 'en_curso'),
+    [misiones]
+  )
+  const misionesProgramadas = useMemo(
+    () => misiones.filter((m) => m.estado === 'programada'),
+    [misiones]
+  )
+  const misionesCerradas = useMemo(
+    () =>
+      misiones.filter(
+        (m) => m.estado === 'completada' || m.estado === 'inconclusa_repliegue'
+      ),
+    [misiones]
+  )
+  const eventosMapa = useMemo(
+    () =>
+      eventosRadar.filter(
+        (ev) => !ev.id.includes('standby') && !ev.titulo.toLowerCase().includes('standby')
+      ),
+    [eventosRadar]
+  )
+
+  const tieneTemporizadoresEnRadar = useMemo(
+    () => misionesEnCurso.length > 0 || eventosMapa.some((ev) => Boolean(ev.expiraEn)),
+    [misionesEnCurso, eventosMapa]
+  )
+
+  // Actualizar reloj cada 15s SOLO cuando la vista radar está activa y hay misiones en curso o eventos con vigencia
   useEffect(() => {
+    if (subVista !== 'radar' || !tieneTemporizadoresEnRadar) return
     const id = window.setInterval(() => setAhoraMs(Date.now()), 15_000)
     return () => window.clearInterval(id)
+  }, [subVista, tieneTemporizadoresEnRadar])
+
+  // Limpiar timeout de feedback al desmontar
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current !== null) {
+        window.clearTimeout(feedbackTimerRef.current)
+      }
+    }
   }, [])
 
-  const mostrarFeedback = (tipo: 'ok' | 'error', texto: string, ms = 5500) => {
+  const mostrarFeedback = useCallback((tipo: 'ok' | 'error', texto: string, ms = 5500) => {
+    if (feedbackTimerRef.current !== null) {
+      window.clearTimeout(feedbackTimerRef.current)
+    }
     setFeedback({ tipo, texto })
-    window.setTimeout(() => {
+    feedbackTimerRef.current = window.setTimeout(() => {
       setFeedback((prev) => (prev?.texto === texto ? null : prev))
+      feedbackTimerRef.current = null
     }, ms)
-  }
+  }, [])
 
   // Estados para radar dinámico
   const [escaneandoRadar, setEscaneandoRadar] = useState(false)
   const [despachandoEventoId, setDespachandoEventoId] = useState<string | null>(null)
   const [modalReportarAbierto, setModalReportarAbierto] = useState(false)
+  const [guardandoReporte, setGuardandoReporte] = useState(false)
   const [reporteTitulo, setReporteTitulo] = useState('')
   const [reporteLugar, setReporteLugar] = useState('Vereda San Peregrino · Caldas')
   const [reporteDepartamento, setReporteDepartamento] = useState('Caldas')
   const [reporteResumen, setReporteResumen] = useState('')
   const [reporteGrave, setReporteGrave] = useState(false)
 
+  // Formulario de nueva misión manual o programada
+  const [modalAbierto, setModalAbierto] = useState(false)
+  const [guardandoMision, setGuardandoMision] = useState(false)
+  const [titulo, setTitulo] = useState('Apoyo Comunitario y Traslado de Víveres')
+  const [destino, setDestino] = useState('Vereda La Cabaña · Manizales')
+  const [distanciaKm, setDistanciaKm] = useState('28')
+  const [duracionMinutos, setDuracionMinutos] = useState('90')
+  const [terreno, setTerreno] = useState<MisionComunitaria['terreno']>('trocha_moderada')
+  const [vehiculosSeleccionados, setVehiculosSeleccionados] = useState<string[]>([])
+  const [tripulantesSeleccionados, setTripulantesSeleccionados] = useState<string[]>([])
+  const [esProgramada, setEsProgramada] = useState(false)
+  const [fechaMision, setFechaMision] = useState(hoyISO)
+  const [errorModal, setErrorModal] = useState('')
+
+  // Editor de trazado de rutas habituales
+  const [modalEditarRutaAbierto, setModalEditarRutaAbierto] = useState(false)
+  const [guardandoRuta, setGuardandoRuta] = useState(false)
+  const [rutaEditando, setRutaEditando] = useState<RutaHabitual | null>(null)
+  const [paradasEditando, setParadasEditando] = useState<
+    Array<{ nombre: string; lat: number; lng: number }>
+  >([])
+  const [nuevoPuntoRefKey, setNuevoPuntoRefKey] = useState('la_cabana')
+  const [nuevoPuntoNombreManual, setNuevoPuntoNombreManual] = useState('')
+  const [minutosRalentiEditando, setMinutosRalentiEditando] = useState('35')
+
+  // Cerrar modales con Escape
+  useEffect(() => {
+    if (!modalAbierto && !modalEditarRutaAbierto && !modalReportarAbierto) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (modalReportarAbierto && !guardandoReporte) setModalReportarAbierto(false)
+      else if (modalEditarRutaAbierto && !guardandoRuta) setModalEditarRutaAbierto(false)
+      else if (modalAbierto && !guardandoMision) setModalAbierto(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [
+    modalAbierto,
+    modalEditarRutaAbierto,
+    modalReportarAbierto,
+    guardandoReporte,
+    guardandoRuta,
+    guardandoMision,
+  ])
+
   const ejecutarEscaneoRadar = async () => {
-    if (!onEscanearRadarReal) return
+    if (!onEscanearRadarReal || escaneandoRadar) return
     setEscaneandoRadar(true)
     try {
       const res = await onEscanearRadarReal()
@@ -175,53 +276,56 @@ export default function MisionesTab({
   }
 
   const guardarNuevoReporte = async () => {
-    if (!reporteTitulo.trim()) return
-    const coords = resolverCoordenadasLugar(reporteLugar, reporteDepartamento)
-    const ahora = Date.now()
-    const nuevo: EventoRadarLocal = {
-      id: `rad-man-${ahora}`,
-      titulo: reporteTitulo.trim(),
-      lugar: reporteLugar.trim() || 'Manizales · Caldas',
-      departamento: reporteDepartamento.trim() || 'Caldas',
-      lat: coords.lat,
-      lng: coords.lng,
-      fuenteNoticia: 'Llamada directa a Guardia Bear\'s Reserve',
-      resumen: reporteResumen.trim() || 'Llamada comunitaria solicitando apoyo.',
-      fecha: hoyISO(),
-      creadoEn: ahora,
-      expiraEn: ahora + 36 * 60 * 60 * 1000,
-      esEmergenciaGrave: reporteGrave,
-      atencionOficialPresente: false,
-      esNoticiaWebReal: false,
-      recomendacionGema: reporteGrave ? 'intervenir_urgente' : 'apoyo_logistico',
-      justificacionGema:
-        'Situación reportada directamente por la comunidad veredal. Evaluar disponibilidad y alistar dotación.',
+    if (!reporteTitulo.trim() || guardandoReporte) return
+    setGuardandoReporte(true)
+    try {
+      const coords = resolverCoordenadasLugar(reporteLugar, reporteDepartamento)
+      const ahora = Date.now()
+      const rand = Math.random().toString(36).slice(2, 6)
+      const nuevo: EventoRadarLocal = {
+        id: `rad-man-${ahora}-${rand}`,
+        titulo: reporteTitulo.trim(),
+        lugar: reporteLugar.trim() || 'Manizales · Caldas',
+        departamento: reporteDepartamento.trim() || 'Caldas',
+        lat: coords.lat,
+        lng: coords.lng,
+        fuenteNoticia: "Llamada directa a Guardia Bear's Reserve",
+        resumen: reporteResumen.trim() || 'Llamada comunitaria solicitando apoyo.',
+        fecha: hoyISO(),
+        creadoEn: ahora,
+        expiraEn: ahora + 36 * 60 * 60 * 1000,
+        esEmergenciaGrave: reporteGrave,
+        atencionOficialPresente: false,
+        esNoticiaWebReal: false,
+        recomendacionGema: reporteGrave ? 'intervenir_urgente' : 'apoyo_logistico',
+        justificacionGema:
+          'Situación reportada directamente por la comunidad veredal. Evaluar disponibilidad y alistar dotación.',
+      }
+      if (onAgregarEventoRadar) {
+        await onAgregarEventoRadar(nuevo)
+      }
+      setModalReportarAbierto(false)
+      setReporteTitulo('')
+      setReporteLugar('Vereda San Peregrino · Caldas')
+      setReporteDepartamento('Caldas')
+      setReporteResumen('')
+      setReporteGrave(false)
+      mostrarFeedback('ok', `📻 ¡Llamada veredal "${nuevo.titulo}" registrada en el Radar!`)
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo registrar la llamada veredal.'
+      )
+    } finally {
+      setGuardandoReporte(false)
     }
-    if (onAgregarEventoRadar) {
-      await onAgregarEventoRadar(nuevo)
-    }
-    setModalReportarAbierto(false)
-    setReporteTitulo('')
-    setReporteResumen('')
-    mostrarFeedback('ok', `📻 ¡Llamada veredal "${nuevo.titulo}" registrada en el Radar!`)
   }
-
-  // Formulario de nueva misión manual o programada
-  const [modalAbierto, setModalAbierto] = useState(false)
-  const [titulo, setTitulo] = useState('Apoyo Comunitario y Traslado de Víveres')
-  const [destino, setDestino] = useState('Vereda La Cabaña · Manizales')
-  const [distanciaKm, setDistanciaKm] = useState('28')
-  const [duracionMinutos, setDuracionMinutos] = useState('90')
-  const [terreno, setTerreno] = useState<MisionComunitaria['terreno']>('trocha_moderada')
-  const [vehiculosSeleccionados, setVehiculosSeleccionados] = useState<string[]>([])
-  const [tripulantesSeleccionados, setTripulantesSeleccionados] = useState<string[]>([])
-  const [esProgramada, setEsProgramada] = useState(false)
-  const [fechaMision, setFechaMision] = useState(hoyISO)
-  const [errorModal, setErrorModal] = useState('')
 
   const abrirModalNuevaMision = () => {
     setErrorModal('')
-    const libre = vehiculos.find((v) => v.disponibleParaTrabajo && v.estado !== 'en_mision')
+    const libre = vehiculos.find(
+      (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento'
+    )
     const empActivo = empleados.find((e) => e.activo)
     setVehiculosSeleccionados(libre ? [libre.id] : [])
     setTripulantesSeleccionados(empActivo ? [empActivo.id] : [])
@@ -230,16 +334,6 @@ export default function MisionesTab({
     setModalAbierto(true)
   }
 
-  // Editor de trazado de rutas habituales
-  const [modalEditarRutaAbierto, setModalEditarRutaAbierto] = useState(false)
-  const [rutaEditando, setRutaEditando] = useState<RutaHabitual | null>(null)
-  const [paradasEditando, setParadasEditando] = useState<
-    Array<{ nombre: string; lat: number; lng: number }>
-  >([])
-  const [nuevoPuntoRefKey, setNuevoPuntoRefKey] = useState('la_cabana')
-  const [nuevoPuntoNombreManual, setNuevoPuntoNombreManual] = useState('')
-  const [minutosRalentiEditando, setMinutosRalentiEditando] = useState('35')
-
   const abrirEditorRuta = (r: RutaHabitual) => {
     setRutaEditando(r)
     setParadasEditando(
@@ -247,7 +341,7 @@ export default function MisionesTab({
         ? [...r.coordenadasParadas]
         : [{ ...BASE_BEARS_RESERVE, nombre: 'Base Finca El Guadual' }]
     )
-    setMinutosRalentiEditando(String(r.minutosRalenti || 35))
+    setMinutosRalentiEditando(String(r.minutosRalenti ?? 35))
     setModalEditarRutaAbierto(true)
   }
 
@@ -278,35 +372,71 @@ export default function MisionesTab({
   }
 
   const guardarCambiosRuta = async () => {
-    if (!rutaEditando) return
-    const minutosRalentiNum = Math.max(0, Number(minutosRalentiEditando) || 30)
-    const calc = calcularDistanciaRutaParadas(paradasEditando, true)
-    const kmFinal = calc.distanciaKm > 0 ? calc.distanciaKm : rutaEditando.distanciaKm
-    const minRodamiento =
-      calc.minutosRodamiento > 0 ? calc.minutosRodamiento : rutaEditando.minutosRodamiento || 55
+    if (!rutaEditando || guardandoRuta) return
+    if (paradasEditando.length < 2) {
+      mostrarFeedback('error', 'Una ruta debe tener al menos 2 paradas (origen y destino).')
+      return
+    }
 
-    const rutaActualizada: RutaHabitual = {
-      ...rutaEditando,
-      coordenadasParadas: paradasEditando,
-      distanciaKm: kmFinal,
-      minutosRodamiento: minRodamiento,
-      minutosRalenti: minutosRalentiNum,
-      duracionMinutos: minRodamiento + minutosRalentiNum,
+    const parsedRalenti = Number(minutosRalentiEditando)
+    const minutosRalentiNum = Number.isFinite(parsedRalenti)
+      ? Math.max(0, Math.round(parsedRalenti))
+      : 30
+
+    const paradasOriginales = rutaEditando.coordenadasParadas || []
+    const paradasCambiaron =
+      paradasOriginales.length !== paradasEditando.length ||
+      paradasEditando.some(
+        (p, idx) =>
+          p.lat !== paradasOriginales[idx]?.lat ||
+          p.lng !== paradasOriginales[idx]?.lng ||
+          p.nombre !== paradasOriginales[idx]?.nombre
+      )
+
+    setGuardandoRuta(true)
+    try {
+      let kmFinal = rutaEditando.distanciaKm
+      let minRodamiento = rutaEditando.minutosRodamiento || 55
+
+      if (paradasCambiaron) {
+        const gps = await trazarRutaCarreteraGps(paradasEditando).catch(() => null)
+        if (gps && gps.distanciaKm > 0) {
+          kmFinal = gps.distanciaKm
+          minRodamiento = gps.duracionMinutos > 0 ? gps.duracionMinutos : minRodamiento
+        } else {
+          const calc = calcularDistanciaRutaParadas(paradasEditando, true)
+          if (calc.distanciaKm > 0) kmFinal = calc.distanciaKm
+          if (calc.minutosRodamiento > 0) minRodamiento = calc.minutosRodamiento
+        }
+      }
+
+      const rutaActualizada: RutaHabitual = {
+        ...rutaEditando,
+        coordenadasParadas: paradasEditando,
+        distanciaKm: kmFinal,
+        minutosRodamiento: minRodamiento,
+        minutosRalenti: minutosRalentiNum,
+        duracionMinutos: minRodamiento + minutosRalentiNum,
+      }
+      if (onActualizarRuta) {
+        await onActualizarRuta(rutaActualizada)
+      }
+      setModalEditarRutaAbierto(false)
+      mostrarFeedback(
+        'ok',
+        `✅ Trazado de "${rutaActualizada.nombre}" guardado en Firestore (${kmFinal} km · ~${minRodamiento + minutosRalentiNum} min).`
+      )
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudieron guardar los cambios de la ruta.'
+      )
+    } finally {
+      setGuardandoRuta(false)
     }
-    if (onActualizarRuta) {
-      await onActualizarRuta(rutaActualizada)
-    }
-    setModalEditarRutaAbierto(false)
-    mostrarFeedback(
-      'ok',
-      `✅ Trazado de "${rutaActualizada.nombre}" guardado en Firestore (${kmFinal} km · ~${minRodamiento + minutosRalentiNum} min).`
-    )
   }
 
-  // Despacho desde evento del Radar:
-  // 1. Calcula ruta real por carretera (OSRM) ida + servicio en sitio + vuelta
-  // 2. Gemini IA interpreta la situación y compara todos los vehículos habilitados libres para armar el vehículo o convoy óptimo (1–3)
-  // 3. Asigna 1 conductor por vehículo + roles técnicos según el cuadrante
+  // Despacho desde evento del Radar
   const despacharDesdeEvento = async (ev: EventoRadarLocal) => {
     if (despachandoEventoId) return
 
@@ -319,7 +449,7 @@ export default function MisionesTab({
         'error',
         hayHabilitados
           ? 'Todos tus vehículos habilitados están en misión o mantenimiento ahora mismo. Espera a que regrese uno o habilita otro en Flota.'
-          : 'No tienes vehículos habilitados para Bear\'s Reserve. Activa al menos uno en la pestaña Flota & Combustible.'
+          : "No tienes vehículos habilitados para Bear's Reserve. Activa al menos uno en la pestaña Flota & Combustible."
       )
       return
     }
@@ -335,7 +465,10 @@ export default function MisionesTab({
             : 'auxilio_comunitario'
 
       const coordsDestino =
-        typeof ev.lat === 'number' && typeof ev.lng === 'number'
+        typeof ev.lat === 'number' &&
+        Number.isFinite(ev.lat) &&
+        typeof ev.lng === 'number' &&
+        Number.isFinite(ev.lng)
           ? { lat: ev.lat, lng: ev.lng }
           : resolverCoordenadasLugar(ev.lugar, ev.departamento || 'Caldas')
 
@@ -379,12 +512,16 @@ export default function MisionesTab({
       let usoGeminiFlota = false
 
       if (seleccionIA && seleccionIA.vehiculosElegidos.length > 0) {
-        vehiculosConvoy = seleccionIA.vehiculosElegidos
+        vehiculosConvoy = seleccionIA.vehiculosElegidos.filter(
+          (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento'
+        )
         motivoFlota = seleccionIA.motivoGema
         tipoFinal = seleccionIA.tipoMision
         terrenoCalculado = seleccionIA.terrenoSugerido
         usoGeminiFlota = true
-      } else {
+      }
+
+      if (vehiculosConvoy.length === 0) {
         const seleccionLocal = seleccionarVehiculosOptimosMision(
           {
             titulo: ev.titulo,
@@ -394,21 +531,33 @@ export default function MisionesTab({
             esEmergenciaGrave: ev.esEmergenciaGrave,
             distanciaKmTotal: logistica.distanciaKmTotalIdaYVuelta,
           },
-          vehiculos,
+          habilitadosLibres,
           Math.min(2, personalActivoCount)
         )
-        vehiculosConvoy = seleccionLocal.vehiculosElegidos
+        vehiculosConvoy = seleccionLocal.vehiculosElegidos.filter(
+          (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento'
+        )
         motivoFlota = seleccionLocal.motivoGema
+        usoGeminiFlota = false
       }
 
-      // 3. Tripulación por vehículo elegido (1 conductor por vehículo + roles técnicos)
+      if (vehiculosConvoy.length === 0) {
+        mostrarFeedback(
+          'error',
+          'No hay vehículos habilitados y disponibles para despachar esta misión (todos están en misión o mantenimiento).'
+        )
+        return
+      }
+
+      // 3. Tripulación por vehículo elegido (excluye personal ya en misiones activas)
       const seleccionTripulacion = seleccionarTripulacionMision(
         { titulo: ev.titulo, tipo: tipoFinal, impactoSocial: ev.resumen },
         vehiculosConvoy,
         empleados,
         turnos,
         hoyISO(),
-        horaActualHHMM()
+        horaActualHHMM(),
+        misionesEnCurso
       )
 
       const prioridadGeo: MisionComunitaria['prioridadGeografica'] =
@@ -454,12 +603,18 @@ export default function MisionesTab({
       }
 
       await onCrearMision(nueva)
-      const tagRuta = logistica.fuenteCalculo === 'gps_carretera' ? 'GPS carretera' : 'estimado cordillera'
+      const tagRuta =
+        logistica.fuenteCalculo === 'gps_carretera' ? 'GPS carretera' : 'estimado cordillera'
       const tagFlota = usoGeminiFlota ? '✨ Gemini IA' : 'Respaldo local'
       mostrarFeedback(
         'ok',
         `🚨 ¡Misión despachada (${tagFlota} · ${vehiculosConvoy.length} vehículo${vehiculosConvoy.length > 1 ? 's' : ''} · ${tagRuta})! ${logistica.distanciaKmTotalIdaYVuelta} km total (~${formatearDuracionCorta(logistica.duracionTotalMinutos)}). ${motivoFlota}`,
         8500
+      )
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo despachar la misión desde el radar.'
       )
     } finally {
       setDespachandoEventoId(null)
@@ -468,21 +623,28 @@ export default function MisionesTab({
 
   // Despachar misión manual o programada con validación estricta
   const crearMisionManual = async () => {
+    if (guardandoMision) return
+
     const tituloLimpio = titulo.trim()
     const destinoLimpio = destino.trim()
     const kmNum = Number(distanciaKm)
     const minNum = Number(duracionMinutos)
+    const hoyStr = hoyISO()
 
     if (!tituloLimpio || !destinoLimpio) {
       setErrorModal('Completa el título y el destino de la misión.')
       return
     }
-    if (!Number.isFinite(kmNum) || kmNum <= 0) {
-      setErrorModal('La distancia ida y vuelta debe ser mayor a 0 km.')
+    if (!Number.isFinite(kmNum) || kmNum <= 0 || kmNum > 3000) {
+      setErrorModal('La distancia ida y vuelta debe estar entre 1 y 3000 km.')
       return
     }
-    if (!Number.isFinite(minNum) || minNum < 10) {
-      setErrorModal('La duración estimada debe ser de al menos 10 minutos.')
+    if (!Number.isFinite(minNum) || minNum < 10 || minNum > 1440) {
+      setErrorModal('La duración estimada debe estar entre 10 y 1440 minutos (24h).')
+      return
+    }
+    if (esProgramada && fechaMision <= hoyStr) {
+      setErrorModal('Para programar una misión futura, selecciona una fecha a partir de mañana.')
       return
     }
     if (vehiculosSeleccionados.length === 0) {
@@ -494,52 +656,77 @@ export default function MisionesTab({
       return
     }
 
-    setErrorModal('')
     const vehsObj = vehiculos
-      .filter((v) => vehiculosSeleccionados.includes(v.id))
+      .filter(
+        (v) =>
+          vehiculosSeleccionados.includes(v.id) &&
+          v.disponibleParaTrabajo &&
+          v.estado !== 'mantenimiento' &&
+          (esProgramada || v.estado !== 'en_mision')
+      )
       .map((v) => ({ id: v.id, nombre: `${v.marca} ${v.linea}`, placa: v.placa }))
 
-    const empsObj = empleados
-      .filter((e) => tripulantesSeleccionados.includes(e.id))
-      .map((e) => ({ id: e.id, nombre: e.nombreCompleto }))
-
-    const coords = resolverCoordenadasLugar(destinoLimpio, 'Caldas')
-    const hoy = hoyISO()
-    const quedaProgramada = esProgramada && fechaMision > hoy
-
-    const nueva: MisionComunitaria = {
-      id: crearMisionId(),
-      titulo: tituloLimpio,
-      tipo: quedaProgramada ? 'transporte_humanitario' : 'auxilio_comunitario',
-      prioridad: 'alta',
-      origen: BASE_BEARS_RESERVE.nombre,
-      destino: destinoLimpio,
-      departamento: 'Caldas',
-      prioridadGeografica: 'local_manizales',
-      terreno,
-      distanciaKmIdaYVuelta: Number(kmNum.toFixed(1)),
-      duracionMinutos: Math.round(minNum),
-      latDestino: coords.lat,
-      lngDestino: coords.lng,
-      vehiculosAsignados: vehsObj,
-      tripulantesAsignados: empsObj,
-      galonesConsumidosEstimados: 0,
-      costoCombustibleEstimadoCOP: 0,
-      desgasteLlantasIncrementoPorc: 0,
-      fecha: quedaProgramada ? fechaMision : hoy,
-      estado: quedaProgramada ? 'programada' : 'en_curso',
-      impactoSocial: 'Asistencia y apoyo directo a familias campesinas sin ánimo de lucro.',
-      esNoticiaWebReal: false,
+    if (vehsObj.length === 0) {
+      setErrorModal('Los vehículos seleccionados no están disponibles para este despacho.')
+      return
     }
 
-    await onCrearMision(nueva)
-    setModalAbierto(false)
-    mostrarFeedback(
-      'ok',
-      quedaProgramada
-        ? `📅 Misión agendada para el ${fechaMision} y sincronizada en el Calendario de CashMet.`
-        : `🚨 Misión despachada: "${nueva.titulo}". Se cerrará automáticamente por Gema IA en ~${nueva.duracionMinutos} min.`
-    )
+    const empsObj = empleados
+      .filter((e) => tripulantesSeleccionados.includes(e.id) && e.activo)
+      .map((e) => ({ id: e.id, nombre: e.nombreCompleto }))
+
+    if (empsObj.length === 0) {
+      setErrorModal('Selecciona al menos un tripulante activo.')
+      return
+    }
+
+    setErrorModal('')
+    setGuardandoMision(true)
+    try {
+      const coords = resolverCoordenadasLugar(destinoLimpio, 'Caldas')
+      const quedaProgramada = esProgramada && fechaMision > hoyStr
+      const minutosRalentiEstimados = Math.round(Math.min(minNum * 0.2, 60))
+
+      const nueva: MisionComunitaria = {
+        id: crearMisionId(),
+        titulo: tituloLimpio,
+        tipo: quedaProgramada ? 'transporte_humanitario' : 'auxilio_comunitario',
+        prioridad: 'alta',
+        origen: BASE_BEARS_RESERVE.nombre,
+        destino: destinoLimpio,
+        departamento: 'Caldas',
+        prioridadGeografica: 'local_manizales',
+        terreno,
+        distanciaKmIdaYVuelta: Number(kmNum.toFixed(1)),
+        duracionMinutos: Math.round(minNum),
+        minutosRalentiEstimados,
+        minutosRodamientoEstimados: Math.max(5, Math.round(minNum) - minutosRalentiEstimados),
+        latDestino: coords.lat,
+        lngDestino: coords.lng,
+        vehiculosAsignados: vehsObj,
+        tripulantesAsignados: empsObj,
+        galonesConsumidosEstimados: 0,
+        costoCombustibleEstimadoCOP: 0,
+        desgasteLlantasIncrementoPorc: 0,
+        fecha: quedaProgramada ? fechaMision : hoyStr,
+        estado: quedaProgramada ? 'programada' : 'en_curso',
+        impactoSocial: 'Asistencia y apoyo directo a familias campesinas sin ánimo de lucro.',
+        esNoticiaWebReal: false,
+      }
+
+      await onCrearMision(nueva)
+      setModalAbierto(false)
+      mostrarFeedback(
+        'ok',
+        quedaProgramada
+          ? `📅 Misión agendada para el ${fechaMision} y sincronizada en el Calendario de CashMet.`
+          : `🚨 Misión despachada: "${nueva.titulo}". Se cerrará automáticamente por Gema IA en ~${formatearDuracionCorta(nueva.duracionMinutos)}.`
+      )
+    } catch (e: unknown) {
+      setErrorModal(e instanceof Error ? e.message : 'No se pudo registrar la misión.')
+    } finally {
+      setGuardandoMision(false)
+    }
   }
 
   const ejecutarCumplimientoRuta = async (r: RutaHabitual) => {
@@ -554,21 +741,69 @@ export default function MisionesTab({
     }
   }
 
-  const eventosFiltrados = eventosRadar
-    .filter((ev) => !ev.id.includes('standby') && !ev.titulo.toLowerCase().includes('standby'))
-    .filter((ev) => {
-      if (filtroRadar === 'caldas') return ev.departamento === 'Caldas'
-      if (filtroRadar === 'otros') return ev.departamento !== 'Caldas'
-      return true
-    })
+  const manejarIniciarProgramada = async (m: MisionComunitaria) => {
+    if (!onIniciarMisionProgramada || busyMisionId) return
+    setBusyMisionId(m.id)
+    try {
+      await onIniciarMisionProgramada(m.id)
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo iniciar la misión programada.'
+      )
+    } finally {
+      setBusyMisionId(null)
+    }
+  }
 
-  const misionesEnCurso = misiones.filter((m) => m.estado === 'en_curso')
-  const misionesProgramadas = misiones.filter((m) => m.estado === 'programada')
-  const misionesCerradas = misiones.filter(
-    (m) => m.estado === 'completada' || m.estado === 'inconclusa_repliegue'
+  const manejarCancelarProgramada = async (m: MisionComunitaria) => {
+    if (!onCancelarMisionProgramada || busyMisionId) return
+    const ok = window.confirm(
+      `¿Confirmas cancelar la misión programada "${m.titulo}" (${m.fecha})? También se eliminará del Calendario.`
+    )
+    if (!ok) return
+    setBusyMisionId(m.id)
+    try {
+      await onCancelarMisionProgramada(m.id)
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo cancelar la misión programada.'
+      )
+    } finally {
+      setBusyMisionId(null)
+    }
+  }
+
+  const manejarDescartarEvento = async (ev: EventoRadarLocal) => {
+    if (!onDescartarEventoRadar || busyDescartarId) return
+    const ok = window.confirm(`¿Descartar la alerta "${ev.titulo}" del radar?`)
+    if (!ok) return
+    setBusyDescartarId(ev.id)
+    try {
+      await onDescartarEventoRadar(ev.id)
+    } catch (e: unknown) {
+      mostrarFeedback(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo descartar el evento del radar.'
+      )
+    } finally {
+      setBusyDescartarId(null)
+    }
+  }
+
+  const eventosFiltrados = useMemo(
+    () =>
+      eventosMapa.filter((ev) => {
+        if (filtroRadar === 'caldas') return ev.departamento === 'Caldas'
+        if (filtroRadar === 'otros') return ev.departamento !== 'Caldas'
+        return true
+      }),
+    [eventosMapa, filtroRadar]
   )
 
   const hoy = hoyISO()
+  const manana = mananaISO()
 
   return (
     <div className="space-y-4 text-xs">
@@ -663,7 +898,7 @@ export default function MisionesTab({
       {/* ----------------- VISTA 0: MAPA TÁCTICO DE OPERACIONES ----------------- */}
       {subVista === 'mapa' && (
         <MapaOperaciones
-          eventosRadar={eventosRadar}
+          eventosRadar={eventosMapa}
           misiones={misionesEnCurso}
           rutasHabituales={rutasHabituales}
           onActualizarRuta={onActualizarRuta}
@@ -673,7 +908,7 @@ export default function MisionesTab({
       {/* ----------------- VISTA 1: RADAR Y MISIONES EN CURSO ----------------- */}
       {subVista === 'radar' && (
         <div className="space-y-4">
-          {/* Misiones en curso con temporizador automático y resolución IA (SIN botones manuales) */}
+          {/* Misiones en curso con temporizador automático y resolución IA */}
           {misionesEnCurso.length > 0 && (
             <div className="rounded-3xl border border-emerald-400/30 bg-emerald-500/[0.06] p-4 shadow-xl">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
@@ -691,10 +926,22 @@ export default function MisionesTab({
               <div className="mt-3 space-y-3">
                 {misionesEnCurso.map((m) => {
                   const totalMs = Math.max(60_000, (m.duracionMinutos || 60) * 60_000)
-                  const inicio = m.iniciadaEn ?? ahoraMs
-                  const fin = m.finalizaEstimadaEn ?? inicio + totalMs
+                  const tieneInicio =
+                    typeof m.iniciadaEn === 'number' && Number.isFinite(m.iniciadaEn)
+                  const tieneFin =
+                    typeof m.finalizaEstimadaEn === 'number' &&
+                    Number.isFinite(m.finalizaEstimadaEn)
+                  const tieneTemporizador = tieneInicio || tieneFin
+                  const inicio = tieneInicio
+                    ? m.iniciadaEn!
+                    : tieneFin
+                      ? m.finalizaEstimadaEn! - totalMs
+                      : ahoraMs
+                  const fin = tieneFin ? m.finalizaEstimadaEn! : inicio + totalMs
                   const transcurrido = Math.max(0, ahoraMs - inicio)
-                  const progreso = Math.min(99, Math.round((transcurrido / totalMs) * 100))
+                  const progreso = tieneTemporizador
+                    ? Math.min(99, Math.round((transcurrido / totalMs) * 100))
+                    : 50
                   const minRestantes = Math.max(0, Math.ceil((fin - ahoraMs) / 60_000))
 
                   return (
@@ -747,9 +994,11 @@ export default function MisionesTab({
 
                         <div className="text-right">
                           <div className="font-mono text-xs font-black text-emerald-300">
-                            {minRestantes > 0
-                              ? `~${formatearDuracionCorta(minRestantes)} restantes`
-                              : 'Cerrando con Gema IA...'}
+                            {!tieneTemporizador
+                              ? 'En operación activa'
+                              : minRestantes > 0
+                                ? `~${formatearDuracionCorta(minRestantes)} restantes`
+                                : 'Cerrando con Gema IA...'}
                           </div>
                           <div className="text-[10px] text-mist-500">
                             {m.horaInicio ? `Salida ${m.horaInicio}` : ''}
@@ -761,14 +1010,16 @@ export default function MisionesTab({
                       <div className="space-y-1">
                         <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.08]">
                           <div
-                            className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-400 transition-all duration-700"
+                            className={`h-full rounded-full bg-gradient-to-r from-emerald-400 via-teal-400 to-sky-400 transition-all duration-700 ${
+                              !tieneTemporizador ? 'animate-pulse' : ''
+                            }`}
                             style={{ width: `${Math.max(4, progreso)}%` }}
                           />
                         </div>
                         <div className="flex items-center justify-between text-[10px] text-mist-400">
                           <span>{m.impactoSocial}</span>
                           <span className="font-mono font-bold text-mist-300 shrink-0 ml-2">
-                            {progreso}%
+                            {tieneTemporizador ? `${progreso}%` : 'Activa'}
                           </span>
                         </div>
                       </div>
@@ -779,7 +1030,7 @@ export default function MisionesTab({
             </div>
           )}
 
-          {/* Misiones Programadas (separadas de las que están en curso) */}
+          {/* Misiones Programadas */}
           {misionesProgramadas.length > 0 && (
             <div className="rounded-3xl border border-sky-400/25 bg-sky-500/[0.05] p-4 shadow-xl">
               <div className="flex items-center gap-2 border-b border-white/10 pb-2">
@@ -802,7 +1053,8 @@ export default function MisionesTab({
                         </span>
                       </div>
                       <div className="text-[11px] text-mist-400">
-                        {m.destino} · {m.distanciaKmIdaYVuelta} km · ~{m.duracionMinutos} min ·{' '}
+                        {m.destino} · {m.distanciaKmIdaYVuelta} km · ~
+                        {formatearDuracionCorta(m.duracionMinutos)} ·{' '}
                         {m.vehiculosAsignados.map((v) => v.nombre).join(', ')}
                       </div>
                     </div>
@@ -810,17 +1062,20 @@ export default function MisionesTab({
                       {onIniciarMisionProgramada && (
                         <button
                           type="button"
-                          onClick={() => void onIniciarMisionProgramada(m.id)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-emerald-500/20 border border-emerald-400/30 px-2.5 py-1 text-[11px] font-bold text-emerald-200 hover:bg-emerald-500/30"
+                          disabled={Boolean(busyMisionId)}
+                          onClick={() => void manejarIniciarProgramada(m)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-emerald-500/20 border border-emerald-400/30 px-2.5 py-1 text-[11px] font-bold text-emerald-200 hover:bg-emerald-500/30 disabled:opacity-45"
                         >
-                          <Play className="h-3 w-3" /> Iniciar ahora
+                          <Play className="h-3 w-3" />{' '}
+                          {busyMisionId === m.id ? 'Iniciando...' : 'Iniciar ahora'}
                         </button>
                       )}
                       {onCancelarMisionProgramada && (
                         <button
                           type="button"
-                          onClick={() => void onCancelarMisionProgramada(m.id)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-red-500/15 border border-red-400/30 px-2.5 py-1 text-[11px] font-bold text-red-300 hover:bg-red-500/25"
+                          disabled={Boolean(busyMisionId)}
+                          onClick={() => void manejarCancelarProgramada(m)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-red-500/15 border border-red-400/30 px-2.5 py-1 text-[11px] font-bold text-red-300 hover:bg-red-500/25 disabled:opacity-45"
                         >
                           <XCircle className="h-3 w-3" /> Cancelar
                         </button>
@@ -832,7 +1087,7 @@ export default function MisionesTab({
             </div>
           )}
 
-          {/* Radar principal con noticias web reales + llamadas veredales con vigencia 1–2 días */}
+          {/* Radar principal con noticias web reales + llamadas veredales */}
           <div className="rounded-3xl border border-amber-400/25 bg-gradient-to-br from-amber-500/[0.08] via-black/30 to-night-900 p-4 shadow-xl">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
               <div className="flex items-center gap-2">
@@ -922,7 +1177,11 @@ export default function MisionesTab({
                   const esCaldas = ev.departamento === 'Caldas'
                   const yaDespachado =
                     Boolean(ev.despachado) ||
-                    misiones.some((m) => m.eventoRadarId === ev.id || m.titulo === ev.titulo)
+                    misiones.some(
+                      (m) =>
+                        m.eventoRadarId === ev.id ||
+                        (m.estado === 'en_curso' && m.fecha === hoy && m.titulo === ev.titulo)
+                    )
                   const est = estimarLogisticaMisionDesdeBase({
                     lat: ev.lat,
                     lng: ev.lng,
@@ -1001,7 +1260,6 @@ export default function MisionesTab({
                         )}
                       </div>
 
-                      {/* Distancia desde Base Finca El Guadual + desglose ida/servicio/vuelta */}
                       <div
                         className={`flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border px-2.5 py-1.5 text-[10.5px] font-semibold ${badgeDistColor}`}
                       >
@@ -1038,10 +1296,12 @@ export default function MisionesTab({
                           {onDescartarEventoRadar && (
                             <button
                               type="button"
-                              onClick={() => void onDescartarEventoRadar(ev.id)}
-                              className="cursor-pointer text-mist-500 hover:text-rose-400 transition"
+                              disabled={Boolean(busyDescartarId)}
+                              onClick={() => void manejarDescartarEvento(ev)}
+                              className="cursor-pointer text-mist-500 hover:text-rose-400 transition disabled:opacity-40"
                             >
-                              <Trash2 className="h-3 w-3 inline mr-0.5" /> Descartar
+                              <Trash2 className="h-3 w-3 inline mr-0.5" />{' '}
+                              {busyDescartarId === ev.id ? 'Descartando...' : 'Descartar'}
                             </button>
                           )}
                         </div>
@@ -1053,9 +1313,9 @@ export default function MisionesTab({
                         ) : (
                           <button
                             type="button"
-                            disabled={despachandoEventoId === ev.id}
+                            disabled={Boolean(despachandoEventoId)}
                             onClick={() => void despacharDesdeEvento(ev)}
-                            className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95 disabled:opacity-60"
+                            className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 px-3 py-1 font-black text-[#2a1702] transition hover:brightness-110 active:scale-95 disabled:opacity-50"
                           >
                             <Truck className="h-3.5 w-3.5" />
                             <span>
@@ -1103,10 +1363,24 @@ export default function MisionesTab({
             ) : (
               <div className="mt-3 space-y-3">
                 {misionesCerradas.map((m) => {
-                  const horasMin =
-                    m.duracionMinutos < 60
-                      ? `${m.duracionMinutos} min`
-                      : `${(m.duracionMinutos / 60).toFixed(1)} h`
+                  const esRepliegue =
+                    m.resultado === 'fallida_dificultad' || m.estado === 'inconclusa_repliegue'
+                  const esParcial = !esRepliegue && m.resultado === 'parcial'
+                  const esExito = !esRepliegue && !esParcial && m.resultado === 'exito'
+                  const badgeClase = esExito
+                    ? 'bg-emerald-400/20 text-emerald-300'
+                    : esParcial
+                      ? 'bg-amber-400/20 text-amber-300'
+                      : esRepliegue
+                        ? 'bg-red-400/20 text-red-300'
+                        : 'bg-sky-400/20 text-sky-200'
+                  const badgeTexto = esExito
+                    ? 'Éxito'
+                    : esParcial
+                      ? 'Parcial'
+                      : esRepliegue
+                        ? 'Repliegue'
+                        : 'Completada'
 
                   return (
                     <div
@@ -1116,20 +1390,8 @@ export default function MisionesTab({
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-2">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-extrabold text-white">{m.titulo}</span>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${
-                              m.resultado === 'exito'
-                                ? 'bg-emerald-400/20 text-emerald-300'
-                                : m.resultado === 'parcial'
-                                  ? 'bg-amber-400/20 text-amber-300'
-                                  : 'bg-red-400/20 text-red-300'
-                            }`}
-                          >
-                            {m.resultado === 'exito'
-                              ? 'Éxito'
-                              : m.resultado === 'parcial'
-                                ? 'Parcial'
-                                : 'Repliegue'}
+                          <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${badgeClase}`}>
+                            {badgeTexto}
                           </span>
                           {m.resueltaPorIA && (
                             <span className="rounded-full border border-sky-400/30 bg-sky-400/10 px-2 py-0.5 text-[9px] font-bold text-sky-300">
@@ -1141,7 +1403,7 @@ export default function MisionesTab({
                         <div className="flex items-center gap-3 text-[11px] text-mist-400">
                           <span className="flex items-center gap-1">
                             <Clock className="h-3 w-3 text-amber-300" />
-                            {horasMin}
+                            {formatearDuracionCorta(m.duracionMinutos)}
                           </span>
                           <span className="flex items-center gap-1">
                             <Navigation className="h-3 w-3 text-emerald-300" />
@@ -1207,10 +1469,20 @@ export default function MisionesTab({
 
             <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
               {rutasHabituales.map((r) => {
-                const idEsperadoHoy = r.tipoHorario ? `${hoy}-${r.tipoHorario}` : hoy
+                const idEsperadoHoy = construirIdCumplimientoRuta(r, hoy)
                 const yaCumplidaHoy = r.ultimoCumplimientoFecha === idEsperadoHoy
-                const conductor = obtenerConductorRuta(r.id, hoy, r.tipoHorario)
+                const conductor = conductorDeRutaEnCuadrante(turnos, r.id, hoy, r.tipoHorario) || {
+                  id: 'coord-user',
+                  nombre: 'Tú (Coordinador General)',
+                }
                 const esHueco = conductor.id === 'coord-user'
+                const vehiculosHabilitados = vehiculos.filter((v) => v.disponibleParaTrabajo)
+                const vehDefaultInhabilitado =
+                  Boolean(r.vehiculoIdDefault) &&
+                  !vehiculosHabilitados.some((v) => v.id === r.vehiculoIdDefault)
+                const vehDefaultInfo = r.vehiculoIdDefault
+                  ? vehiculos.find((v) => v.id === r.vehiculoIdDefault)
+                  : undefined
 
                 return (
                   <div
@@ -1239,7 +1511,7 @@ export default function MisionesTab({
                       </span>
                       <span>
                         · Ralentí en paradas:{' '}
-                        <b className="text-amber-300">{r.minutosRalenti || 35} min</b>
+                        <b className="text-amber-300">{r.minutosRalenti ?? 35} min</b>
                       </span>
                       <span>
                         · Total: <b className="text-sky-300">~{r.duracionMinutos || 90} min</b>
@@ -1263,22 +1535,30 @@ export default function MisionesTab({
                         onChange={(e) => {
                           const nuevoId = e.target.value
                           if (onActualizarRuta) {
-                            void onActualizarRuta({
-                              ...r,
-                              vehiculoIdDefault: nuevoId || undefined,
-                            })
+                            void Promise.resolve(
+                              onActualizarRuta({
+                                ...r,
+                                vehiculoIdDefault: nuevoId || undefined,
+                              })
+                            ).catch(() => {})
                           }
                         }}
                         className="field-dark h-7 rounded-lg px-2 text-[10px] font-semibold text-amber-200"
                       >
                         <option value="">Auto-asignar por Gema IA</option>
-                        {vehiculos
-                          .filter((v) => v.disponibleParaTrabajo)
-                          .map((v) => (
-                            <option key={v.id} value={v.id}>
-                              {v.marca} {v.linea} {v.placa ? `(${v.placa})` : ''}
-                            </option>
-                          ))}
+                        {vehDefaultInhabilitado && r.vehiculoIdDefault && (
+                          <option value={r.vehiculoIdDefault}>
+                            ⚠️ No habilitado:{' '}
+                            {vehDefaultInfo
+                              ? `${vehDefaultInfo.marca} ${vehDefaultInfo.linea}`
+                              : r.vehiculoIdDefault}
+                          </option>
+                        )}
+                        {vehiculosHabilitados.map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.marca} {v.linea} {v.placa ? `(${v.placa})` : ''}
+                          </option>
+                        ))}
                       </select>
                     </div>
 
@@ -1341,16 +1621,21 @@ export default function MisionesTab({
 
       {/* Modal para nueva misión manual o programada */}
       {modalAbierto && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
-          <div className="surface-glow w-full max-w-lg rounded-3xl border border-white/15 bg-night-900 p-5 text-xs shadow-2xl">
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+        >
+          <div className="surface-glow max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-white/15 bg-night-900 p-5 text-xs shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <h3 className="text-sm font-extrabold text-white">
                 Despachar o Programar Misión Comunitaria
               </h3>
               <button
                 type="button"
+                disabled={guardandoMision}
                 onClick={() => setModalAbierto(false)}
-                className="cursor-pointer text-mist-400 hover:text-white"
+                className="cursor-pointer text-mist-400 hover:text-white disabled:opacity-40"
               >
                 ✕
               </button>
@@ -1383,6 +1668,7 @@ export default function MisionesTab({
                   <input
                     type="number"
                     min={1}
+                    max={3000}
                     step="0.5"
                     value={distanciaKm}
                     onChange={(e) => setDistanciaKm(e.target.value)}
@@ -1395,7 +1681,7 @@ export default function MisionesTab({
                   <input
                     type="number"
                     min={10}
-                    max={720}
+                    max={1440}
                     value={duracionMinutos}
                     onChange={(e) => setDuracionMinutos(e.target.value)}
                     className="field-dark h-9 rounded-xl px-2.5 text-xs"
@@ -1421,12 +1707,14 @@ export default function MisionesTab({
 
               {/* Vehículos disponibles */}
               <div className="flex flex-col gap-1">
-                <span className="text-mist-400 font-bold">Vehículo(s) disponible(s)</span>
+                <span className="text-mist-400 font-bold">
+                  Vehículo(s) disponible(s){esProgramada ? ' (para fecha futura)' : ''}
+                </span>
                 <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto rounded-xl border border-white/10 bg-black/40 p-2">
                   {vehiculos
-                    .filter((v) => v.disponibleParaTrabajo)
+                    .filter((v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento')
                     .map((v) => {
-                      const ocupado = v.estado === 'en_mision'
+                      const ocupado = !esProgramada && v.estado === 'en_mision'
                       const sel = vehiculosSeleccionados.includes(v.id)
                       return (
                         <button
@@ -1449,7 +1737,12 @@ export default function MisionesTab({
                           }`}
                         >
                           {sel ? '✓ ' : ''}
-                          {v.marca} {v.linea} {ocupado ? '(En misión)' : ''}
+                          {v.marca} {v.linea}{' '}
+                          {v.estado === 'en_mision'
+                            ? esProgramada
+                              ? '(En misión hoy)'
+                              : '(En misión)'
+                            : ''}
                         </button>
                       )
                     })}
@@ -1496,7 +1789,21 @@ export default function MisionesTab({
                   <input
                     type="checkbox"
                     checked={esProgramada}
-                    onChange={(e) => setEsProgramada(e.target.checked)}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      setEsProgramada(checked)
+                      if (checked) {
+                        if (fechaMision <= hoy) setFechaMision(manana)
+                      } else {
+                        setFechaMision(hoy)
+                        setVehiculosSeleccionados((prev) =>
+                          prev.filter((id) => {
+                            const v = vehiculos.find((x) => x.id === id)
+                            return v && v.estado !== 'en_mision'
+                          })
+                        )
+                      }
+                    }}
                     className="h-4 w-4 accent-emerald-400"
                   />
                   <span>Programar para fecha futura (se guarda en Calendario CashMet)</span>
@@ -1505,7 +1812,7 @@ export default function MisionesTab({
                 {esProgramada && (
                   <input
                     type="date"
-                    min={hoy}
+                    min={manana}
                     value={fechaMision}
                     onChange={(e) => setFechaMision(e.target.value)}
                     className="field-dark h-8 rounded-lg px-2 text-xs"
@@ -1519,15 +1826,21 @@ export default function MisionesTab({
             <div className="flex gap-2 border-t border-white/10 pt-3">
               <button
                 type="button"
+                disabled={guardandoMision}
                 onClick={() => void crearMisionManual()}
-                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702]"
+                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702] disabled:opacity-50"
               >
-                {esProgramada && fechaMision > hoy ? 'Agendar Misión' : 'Despachar Inmediatamente'}
+                {guardandoMision
+                  ? 'Guardando...'
+                  : esProgramada && fechaMision > hoy
+                    ? 'Agendar Misión'
+                    : 'Despachar Inmediatamente'}
               </button>
               <button
                 type="button"
+                disabled={guardandoMision}
                 onClick={() => setModalAbierto(false)}
-                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
+                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white disabled:opacity-40"
               >
                 Cancelar
               </button>
@@ -1538,21 +1851,26 @@ export default function MisionesTab({
 
       {/* Modal Editor de Trazado de Rutas Habituales */}
       {modalEditarRutaAbierto && rutaEditando && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
-          <div className="surface-glow w-full max-w-lg rounded-3xl border border-sky-400/25 bg-night-900 p-5 text-xs shadow-2xl">
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+        >
+          <div className="surface-glow max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-sky-400/25 bg-night-900 p-5 text-xs shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div>
                 <h3 className="text-sm font-extrabold text-white">
                   Definir Trazado y Paradas: {rutaEditando.nombre}
                 </h3>
                 <p className="text-[11px] text-mist-400">
-                  Al guardar se recalcula automáticamente la distancia y duración de la ruta.
+                  Al guardar se recalcula automáticamente la distancia y duración si modificas las paradas.
                 </p>
               </div>
               <button
                 type="button"
+                disabled={guardandoRuta}
                 onClick={() => setModalEditarRutaAbierto(false)}
-                className="cursor-pointer text-mist-400 hover:text-white"
+                className="cursor-pointer text-mist-400 hover:text-white disabled:opacity-40"
               >
                 ✕
               </button>
@@ -1568,7 +1886,7 @@ export default function MisionesTab({
                 <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
                   {paradasEditando.map((p, idx) => (
                     <div
-                      key={idx}
+                      key={`${p.lat}-${p.lng}-${idx}`}
                       className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-black/40 p-2 text-[11px]"
                     >
                       <div className="flex items-center gap-2 truncate">
@@ -1660,15 +1978,17 @@ export default function MisionesTab({
             <div className="flex gap-2 border-t border-white/10 pt-3">
               <button
                 type="button"
+                disabled={guardandoRuta || paradasEditando.length < 2}
                 onClick={() => void guardarCambiosRuta()}
-                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-sky-400 to-teal-400 py-2 font-black text-[#04241a] hover:brightness-110"
+                className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-sky-400 to-teal-400 py-2 font-black text-[#04241a] hover:brightness-110 disabled:opacity-45"
               >
-                Guardar Trazado de Ruta
+                {guardandoRuta ? 'Calculando y guardando...' : 'Guardar Trazado de Ruta'}
               </button>
               <button
                 type="button"
+                disabled={guardandoRuta}
                 onClick={() => setModalEditarRutaAbierto(false)}
-                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
+                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white disabled:opacity-40"
               >
                 Cancelar
               </button>
@@ -1679,8 +1999,12 @@ export default function MisionesTab({
 
       {/* Modal para reportar nueva llamada veredal */}
       {modalReportarAbierto && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md">
-          <div className="surface-glow w-full max-w-lg rounded-3xl border border-amber-400/25 bg-night-900 p-5 text-xs shadow-2xl">
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-md"
+        >
+          <div className="surface-glow max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-3xl border border-amber-400/25 bg-night-900 p-5 text-xs shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/10 pb-3">
               <div>
                 <h3 className="text-sm font-extrabold text-white">
@@ -1692,8 +2016,9 @@ export default function MisionesTab({
               </div>
               <button
                 type="button"
+                disabled={guardandoReporte}
                 onClick={() => setModalReportarAbierto(false)}
-                className="cursor-pointer text-mist-400 hover:text-white"
+                className="cursor-pointer text-mist-400 hover:text-white disabled:opacity-40"
               >
                 ✕
               </button>
@@ -1763,15 +2088,16 @@ export default function MisionesTab({
               <button
                 type="button"
                 onClick={() => void guardarNuevoReporte()}
-                disabled={!reporteTitulo.trim()}
+                disabled={!reporteTitulo.trim() || guardandoReporte}
                 className="flex-1 cursor-pointer rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 py-2 font-black text-[#2a1702] hover:brightness-110 disabled:opacity-40"
               >
-                Agregar al Radar de Operaciones
+                {guardandoReporte ? 'Registrando...' : 'Agregar al Radar de Operaciones'}
               </button>
               <button
                 type="button"
+                disabled={guardandoReporte}
                 onClick={() => setModalReportarAbierto(false)}
-                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white"
+                className="cursor-pointer rounded-xl bg-white/10 px-4 py-2 text-mist-300 hover:text-white disabled:opacity-40"
               >
                 Cancelar
               </button>

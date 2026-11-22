@@ -9,8 +9,13 @@ import {
   type Vehiculo,
 } from '@/lib/firebase/vehiculosRepo'
 import { crearMovimiento } from '@/lib/firebase/movimientosRepo'
-import { crearEvento } from '@/lib/firebase/calendarioRepo'
-import { hoyISO } from '@/lib/fechas'
+import { crearEvento, eliminarEvento } from '@/lib/firebase/calendarioRepo'
+import { hoyISO, isoLocal } from '@/lib/fechas'
+import {
+  CAPACIDAD_TANQUE_FALLBACK_GAL,
+  UMBRAL_RESERVA_COMBUSTIBLE_PORC,
+  construirIdCumplimientoRuta,
+} from './constants'
 import {
   calcularConsumoMision,
   esPrecioDesactualizado,
@@ -66,12 +71,48 @@ const CLAVE_SNAPSHOT_COMPLETO = 'bears_reserve_snapshot_completo_v2'
 const CLAVE_SNAPSHOT_OPERACIONES = 'bears_reserve_operaciones_snap_v1'
 const INTERVALO_ESCANEO_RADAR_MS = 6 * 60 * 60 * 1000 // Auto-refrescar radar cada 6 horas
 
+function sufijoAleatorio(): string {
+  return Math.random().toString(36).slice(2, 7)
+}
+
+function lunesDeEstaSemanaISO(): string {
+  const d = new Date()
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+  return isoLocal(d)
+}
+
 export interface EstadoSyncFirestore {
   estado: 'conectando' | 'sincronizado' | 'error'
   ultimoError?: string
   ultimaEscrituraOkEn?: number
 }
 
+interface EstadoDocSync {
+  estado: 'conectando' | 'sincronizado' | 'error'
+  ultimoError?: string
+  ultimaEscrituraOkEn?: number
+}
+
+function crearEstadoPorDocInicial(): Record<string, EstadoDocSync> {
+  return {
+    [DOC_CONFIG]: { estado: 'conectando' },
+    [DOC_OPERACIONES]: { estado: 'conectando' },
+    [DOC_COMBUSTIBLE]: { estado: 'conectando' },
+    [DOC_CHAT]: { estado: 'conectando' },
+  }
+}
+
+function crearHidratadoPorDocInicial(): Record<string, boolean> {
+  return {
+    [DOC_CONFIG]: false,
+    [DOC_OPERACIONES]: false,
+    [DOC_COMBUSTIBLE]: false,
+    [DOC_CHAT]: false,
+  }
+}
+
+let estadoPorDoc: Record<string, EstadoDocSync> = crearEstadoPorDocInicial()
+let hidratadoPorDoc: Record<string, boolean> = crearHidratadoPorDocInicial()
 let estadoSyncActual: EstadoSyncFirestore = { estado: 'conectando' }
 const listenersSync = new Set<(st: EstadoSyncFirestore) => void>()
 
@@ -84,6 +125,34 @@ function emitirEstadoSync(nuevo: EstadoSyncFirestore): void {
       /* ignore listener error */
     }
   }
+}
+
+function actualizarEstadoDoc(docId: string, parcial: EstadoDocSync): void {
+  estadoPorDoc[docId] = {
+    ...estadoPorDoc[docId],
+    ...parcial,
+  }
+  const valores = Object.values(estadoPorDoc)
+  const conError = valores.find((v) => v.estado === 'error')
+  const ultimaOk = valores.reduce<number | undefined>((max, v) => {
+    if (typeof v.ultimaEscrituraOkEn !== 'number') return max
+    return max === undefined ? v.ultimaEscrituraOkEn : Math.max(max, v.ultimaEscrituraOkEn)
+  }, estadoSyncActual.ultimaEscrituraOkEn)
+
+  if (conError) {
+    emitirEstadoSync({
+      estado: 'error',
+      ultimoError: conError.ultimoError,
+      ultimaEscrituraOkEn: ultimaOk,
+    })
+    return
+  }
+
+  const hayConectando = valores.some((v) => v.estado === 'conectando')
+  emitirEstadoSync({
+    estado: hayConectando ? 'conectando' : 'sincronizado',
+    ultimaEscrituraOkEn: ultimaOk,
+  })
 }
 
 export function leerEstadoSyncFirestore(): EstadoSyncFirestore {
@@ -103,6 +172,14 @@ export function suscribirEstadoSyncFirestore(
 // Colas de escritura serializadas por documento para impedir sobrescrituras fuera de orden en Firestore
 const colasEscrituraDoc: Record<string, Promise<unknown>> = {}
 
+// Locks in-flight para prevenir doble cierre de misión o doble tanqueo simultáneo
+const misionesEnCierre = new Set<string>()
+const vehiculosEnTanqueo = new Set<string>()
+
+// Último caché conocido de CashMet para no activar Demo ante fallo transitorio
+let ultimoCacheNomina: Nomina[] | null = null
+let ultimoCacheVehiculos: Vehiculo[] | null = null
+
 interface SnapshotLocalCompleto {
   config?: {
     vehiculosExtra: Record<string, Partial<VehiculoOperativo>>
@@ -110,6 +187,7 @@ interface SnapshotLocalCompleto {
     rutasHabituales: RutaHabitual[]
     rotacionContador: number
     actualizado: number
+    pendienteSync?: boolean
   }
   operaciones?: {
     turnos: TurnoSemanal[]
@@ -118,17 +196,28 @@ interface SnapshotLocalCompleto {
     ultimoEscaneoRadarEn: number
     ultimoDiagnosticoRadar: string
     actualizado: number
+    pendienteSync?: boolean
   }
   combustible?: {
     tarjetaCombustible: TarjetaCombustibleReserva
     historialTarjetas: TarjetaCombustibleReserva[]
     preciosCombustible: PreciosCombustible
     actualizado: number
+    pendienteSync?: boolean
   }
   chat?: {
     chatMensajes: MensajeGema[]
     actualizado: number
+    pendienteSync?: boolean
   }
+}
+
+function seccionDeDoc(docId: string): keyof SnapshotLocalCompleto | null {
+  if (docId === DOC_CONFIG) return 'config'
+  if (docId === DOC_OPERACIONES) return 'operaciones'
+  if (docId === DOC_COMBUSTIBLE) return 'combustible'
+  if (docId === DOC_CHAT) return 'chat'
+  return null
 }
 
 function leerSnapshotCompletoLocal(): SnapshotLocalCompleto {
@@ -163,6 +252,41 @@ function guardarSeccionSnapshotLocal<K extends keyof SnapshotLocalCompleto>(
     localStorage.setItem(CLAVE_SNAPSHOT_COMPLETO, JSON.stringify(actual))
   } catch {
     /* quota o navegación privada */
+  }
+}
+
+function marcarSeccionSincronizadaLocal(
+  seccion: keyof SnapshotLocalCompleto,
+  actualizadoConfirmado: number
+): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    const actual = leerSnapshotCompletoLocal()
+    const sec = actual[seccion]
+    if (sec && sec.actualizado === actualizadoConfirmado && sec.pendienteSync) {
+      sec.pendienteSync = false
+      localStorage.setItem(CLAVE_SNAPSHOT_COMPLETO, JSON.stringify(actual))
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function limpiarClavesLegacyLocalStorage(): void {
+  if (typeof localStorage === 'undefined') return
+  const claves = [
+    CLAVE_STORAGE_LEGACY,
+    CLAVE_SNAPSHOT_OPERACIONES,
+    'bears_reserve_habilitados_map_v1',
+    'bears_reserve_empleados_habilitados_map_v1',
+    'bears_reserve_rotacion_contador_v1',
+  ]
+  for (const clave of claves) {
+    try {
+      localStorage.removeItem(clave)
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -262,6 +386,21 @@ export function saldoPendienteTarjeta(tarjeta: TarjetaCombustibleReserva): numbe
   return Math.max(0, Math.round(tarjeta.saldoAcumuladoCOP - liquidado))
 }
 
+/**
+ * Compacta el historial mensual de tarjetas para mantener DOC_COMBUSTIBLE muy por debajo
+ * del límite de 1 MiB de Firestore: conserva últimos 12 meses y acota los tanqueos archivados.
+ */
+function compactarHistorialTarjetas(
+  historial: TarjetaCombustibleReserva[]
+): TarjetaCombustibleReserva[] {
+  if (!Array.isArray(historial)) return []
+  return historial.slice(0, 12).map((h) => ({
+    ...h,
+    tanqueos: Array.isArray(h.tanqueos) ? h.tanqueos.slice(0, 25) : [],
+    liquidaciones: Array.isArray(h.liquidaciones) ? h.liquidaciones.slice(0, 12) : [],
+  }))
+}
+
 function estadoInicialVacio(): EstadoBearsCompleto {
   const mesActual = hoyISO().slice(0, 7)
   return {
@@ -283,24 +422,28 @@ function estadoInicialVacio(): EstadoBearsCompleto {
 
 /**
  * Sanitiza recursivamente cualquier objeto para Firestore:
- * elimina `undefined`, `NaN`, funciones y evita arrays anidados (prohibidos por Firestore),
- * pero conserva `false`, `0`, `""`, `[]` y `{}`.
+ * elimina `undefined`, `NaN`, funciones y símbolos; convierte `Date` a ISO string;
+ * neutraliza arrays anidados en cualquier nivel (prohibidos por Firestore),
+ * conservando `false`, `0`, `""`, `[]` y `{}`.
  */
-function sanitizarFirestore<T>(valor: T, dentroDeArray = false): T {
+function sanitizarFirestore<T>(valor: T): T {
   if (valor === null || valor === undefined) return valor
   if (typeof valor === 'function' || typeof valor === 'symbol') return undefined as unknown as T
+  if (valor instanceof Date) {
+    return valor.toISOString() as unknown as T
+  }
   if (typeof valor === 'number') {
     return (Number.isFinite(valor) ? valor : 0) as unknown as T
   }
   if (Array.isArray(valor)) {
     const limpio = valor
-      .filter((item) => item !== undefined && typeof item !== 'function')
+      .filter((item) => item !== undefined && typeof item !== 'function' && typeof item !== 'symbol')
       .map((item) => {
-        // Firestore prohíbe arrays directamente dentro de arrays
-        if (dentroDeArray && Array.isArray(item)) {
-          return JSON.stringify(item)
+        // Firestore prohíbe arrays directamente dentro de arrays (incluso nivel 2)
+        if (Array.isArray(item)) {
+          return JSON.stringify(sanitizarFirestore(item))
         }
-        return sanitizarFirestore(item, true)
+        return sanitizarFirestore(item)
       })
     return limpio as unknown as T
   }
@@ -308,7 +451,7 @@ function sanitizarFirestore<T>(valor: T, dentroDeArray = false): T {
     const out: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(valor as Record<string, unknown>)) {
       if (!k || v === undefined || typeof v === 'function' || typeof v === 'symbol') continue
-      out[k] = sanitizarFirestore(v, false)
+      out[k] = sanitizarFirestore(v)
     }
     return out as T
   }
@@ -322,12 +465,20 @@ function sanitizarFirestore<T>(valor: T, dentroDeArray = false): T {
 let cacheEstado: EstadoBearsCompleto | null = null
 let hidratadoDesdePersistencia = false
 let promesaHidratacion: Promise<EstadoBearsCompleto> | null = null
+let hidratacionSeq = 0
 
 export function __resetCacheBearsParaTests(): void {
   cacheEstado = null
   hidratadoDesdePersistencia = false
   promesaHidratacion = null
+  hidratacionSeq++
+  estadoPorDoc = crearEstadoPorDocInicial()
+  hidratadoPorDoc = crearHidratadoPorDocInicial()
   estadoSyncActual = { estado: 'conectando' }
+  misionesEnCierre.clear()
+  vehiculosEnTanqueo.clear()
+  ultimoCacheNomina = null
+  ultimoCacheVehiculos = null
   establecerPreciosCombustibleCache(null)
 }
 
@@ -364,12 +515,16 @@ function migrarMesTarjetaSiCambio(estado: EstadoBearsCompleto): boolean {
     estado.tarjetaCombustible = nuevaTarjetaMes(mesActual)
     return true
   }
-  if (estado.tarjetaCombustible.mes !== mesActual) {
+  // Usar `<` en vez de `!==` para evitar archivar el mes actual ante desfases de reloj hacia atrás
+  if (estado.tarjetaCombustible.mes < mesActual) {
     const anterior = estado.tarjetaCombustible
     if (anterior.saldoAcumuladoCOP > 0 || anterior.tanqueos.length > 0) {
       const yaArchivada = estado.historialTarjetas.some((h) => h.id === anterior.id)
       if (!yaArchivada) {
-        estado.historialTarjetas = [anterior, ...estado.historialTarjetas].slice(0, 24)
+        estado.historialTarjetas = compactarHistorialTarjetas([
+          anterior,
+          ...estado.historialTarjetas,
+        ])
       }
     }
     estado.tarjetaCombustible = nuevaTarjetaMes(mesActual)
@@ -440,7 +595,12 @@ function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null 
 
   if (!encontroAlgo) return null
 
-  const rotacionContador = Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
+  let rotacionContador = 0
+  try {
+    rotacionContador = Number(localStorage.getItem('bears_reserve_rotacion_contador_v1') || 0)
+  } catch {
+    rotacionContador = 0
+  }
 
   let eventosSeguros: EventoRadarLocal[] = []
   try {
@@ -461,33 +621,67 @@ function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null 
   }
 }
 
-function persistirDoc(docId: string, data: Record<string, unknown>, actualizado: number): Promise<void> {
+function persistirDoc(
+  docId: string,
+  data: Record<string, unknown>,
+  actualizado: number,
+  estricto = false
+): Promise<boolean> {
+  // Bloquear escritura en Firestore si la lectura inicial de este documento falló sin espejo local válido
+  if (!hidratadoPorDoc[docId]) {
+    const msg = `${docId}: escritura protegida (lectura inicial incompleta)`
+    actualizarEstadoDoc(docId, {
+      estado: 'error',
+      ultimoError: msg,
+    })
+    if (estricto) {
+      return Promise.reject(
+        new Error(
+          `No se pudo guardar en Firestore porque la lectura inicial de ${docId} falló. Reintenta sincronización.`
+        )
+      )
+    }
+    return Promise.resolve(false)
+  }
+
   // Captura inmutable ANTES de encolar para evitar que mutaciones posteriores alteren esta escritura
   const payload = sanitizarFirestore({ ...data, actualizado })
+  const seccion = seccionDeDoc(docId)
   const previa = colasEscrituraDoc[docId] || Promise.resolve()
   const tarea = previa
     .catch(() => undefined)
-    .then(async () => {
+    .then(async (): Promise<boolean> => {
       try {
         await setDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId), payload)
-        emitirEstadoSync({ estado: 'sincronizado', ultimaEscrituraOkEn: Date.now() })
+        if (seccion) {
+          marcarSeccionSincronizadaLocal(seccion, actualizado)
+        }
+        actualizarEstadoDoc(docId, {
+          estado: 'sincronizado',
+          ultimoError: undefined,
+          ultimaEscrituraOkEn: Date.now(),
+        })
+        return true
       } catch (err) {
         const codigo =
           (err as { code?: string })?.code ||
           (err instanceof Error ? err.message : 'error_desconocido')
         console.warn(`Error persistiendo ${docId} en Firestore:`, err)
-        emitirEstadoSync({
+        actualizarEstadoDoc(docId, {
           estado: 'error',
           ultimoError: `${docId}: ${codigo}`,
-          ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn,
         })
+        if (estricto) {
+          throw new Error(`No se pudo confirmar la escritura en Firestore (${docId}: ${codigo}).`)
+        }
+        return false
       }
     })
   colasEscrituraDoc[docId] = tarea
   return tarea
 }
 
-async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
+async function persistirConfig(estado: EstadoBearsCompleto): Promise<boolean> {
   const ahora = Date.now()
   guardarSeccionSnapshotLocal('config', {
     vehiculosExtra: sanitizarFirestore(estado.vehiculosExtra),
@@ -495,8 +689,9 @@ async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
     rutasHabituales: sanitizarFirestore(estado.rutasHabituales),
     rotacionContador: estado.rotacionContador,
     actualizado: ahora,
+    pendienteSync: true,
   })
-  await persistirDoc(
+  return await persistirDoc(
     DOC_CONFIG,
     {
       vehiculosExtra: estado.vehiculosExtra,
@@ -508,7 +703,7 @@ async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
   )
 }
 
-async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> {
+async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<boolean> {
   const ahora = Date.now()
   const misionesRec = estado.misiones.slice(0, 250)
   guardarSeccionSnapshotLocal('operaciones', {
@@ -518,8 +713,9 @@ async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> 
     ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
     ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
     actualizado: ahora,
+    pendienteSync: true,
   })
-  await persistirDoc(
+  return await persistirDoc(
     DOC_OPERACIONES,
     {
       turnos: estado.turnos,
@@ -532,34 +728,49 @@ async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> 
   )
 }
 
-async function persistirCombustible(estado: EstadoBearsCompleto): Promise<void> {
+async function persistirCombustible(
+  estado: EstadoBearsCompleto,
+  estricto = false
+): Promise<boolean> {
   const ahora = Date.now()
-  const histRec = estado.historialTarjetas.slice(0, 24)
+  const histRec = compactarHistorialTarjetas(estado.historialTarjetas)
+  estado.historialTarjetas = histRec
+  const tarjetaActiva: TarjetaCombustibleReserva = {
+    ...estado.tarjetaCombustible,
+    tanqueos: Array.isArray(estado.tarjetaCombustible.tanqueos)
+      ? estado.tarjetaCombustible.tanqueos.slice(0, 200)
+      : [],
+  }
+  estado.tarjetaCombustible = tarjetaActiva
+
   guardarSeccionSnapshotLocal('combustible', {
-    tarjetaCombustible: sanitizarFirestore(estado.tarjetaCombustible),
+    tarjetaCombustible: sanitizarFirestore(tarjetaActiva),
     historialTarjetas: sanitizarFirestore(histRec),
     preciosCombustible: sanitizarFirestore(estado.preciosCombustible),
     actualizado: ahora,
+    pendienteSync: true,
   })
-  await persistirDoc(
+  return await persistirDoc(
     DOC_COMBUSTIBLE,
     {
-      tarjetaCombustible: estado.tarjetaCombustible,
+      tarjetaCombustible: tarjetaActiva,
       historialTarjetas: histRec,
       preciosCombustible: estado.preciosCombustible,
     },
-    ahora
+    ahora,
+    estricto
   )
 }
 
-async function persistirChat(estado: EstadoBearsCompleto): Promise<void> {
+async function persistirChat(estado: EstadoBearsCompleto): Promise<boolean> {
   const ahora = Date.now()
   const msgsRec = estado.chatMensajes.slice(-60)
   guardarSeccionSnapshotLocal('chat', {
     chatMensajes: sanitizarFirestore(msgsRec),
     actualizado: ahora,
+    pendienteSync: true,
   })
-  await persistirDoc(
+  return await persistirDoc(
     DOC_CHAT,
     {
       chatMensajes: msgsRec,
@@ -571,40 +782,74 @@ async function persistirChat(estado: EstadoBearsCompleto): Promise<void> {
 /**
  * Hidrata el estado completo de Bear's Reserve desde Firestore + espejo local de seguridad.
  * - Lee cada documento por separado (un fallo en uno no borra los demás).
- * - Nunca sobreescribe Firestore con un estado vacío.
- * - Si el espejo local tiene datos más recientes que Firestore (p. ej. recarga rápida F5 o error previo de red),
- *   los fusiona y vuelve a sincronizarlos hacia Firestore.
+ * - Si un documento falla en lectura y no tiene espejo local válido, bloquea escrituras
+ *   hacia ese documento para jamás sobrescribir producción con estado vacío.
+ * - Si el espejo local tiene cambios pendientes más recientes que Firestore, prevalece
+ *   el estado local completo (respetando cancelaciones y listas vaciadas).
  */
 export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCompleto> {
   if (hidratadoDesdePersistencia && cacheEstado && !forzar) return cacheEstado
   if (promesaHidratacion && !forzar) return promesaHidratacion
 
-  promesaHidratacion = (async () => {
+  const miSeq = ++hidratacionSeq
+  const miPromesa = (async (): Promise<EstadoBearsCompleto> => {
     const base = estadoInicialVacio()
     let existiaEnFirestore = false
     const erroresLectura: string[] = []
+    const snapLocal = leerSnapshotCompletoLocal()
 
     const tsRemoto = { config: 0, operaciones: 0, combustible: 0, chat: 0 }
 
     const leerDocSeguro = async (docId: string) => {
       try {
-        return await getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId))
+        const snap = await getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId))
+        return { ok: true as const, snap }
       } catch (err) {
         const codigo =
           (err as { code?: string })?.code ||
           (err instanceof Error ? err.message : 'error_lectura')
-        erroresLectura.push(`${docId}: ${codigo}`)
+        const detalle = `${docId}: ${codigo}`
+        erroresLectura.push(detalle)
         console.warn(`Error leyendo ${docId} desde Firestore:`, err)
-        return null
+        return { ok: false as const, snap: null, error: detalle }
       }
     }
 
-    const [snapCfg, snapOp, snapComb, snapChat] = await Promise.all([
+    const [resCfg, resOp, resComb, resChat] = await Promise.all([
       leerDocSeguro(DOC_CONFIG),
       leerDocSeguro(DOC_OPERACIONES),
       leerDocSeguro(DOC_COMBUSTIBLE),
       leerDocSeguro(DOC_CHAT),
     ])
+
+    const snapCfg = resCfg.snap
+    const snapOp = resOp.snap
+    const snapComb = resComb.snap
+    const snapChat = resChat.snap
+
+    // Registrar por documento si puede persistirse con seguridad (lectura OK o espejo local válido)
+    const resultadosDoc = [
+      { docId: DOC_CONFIG, res: resCfg, tieneEspejo: Boolean(snapLocal.config) },
+      { docId: DOC_OPERACIONES, res: resOp, tieneEspejo: Boolean(snapLocal.operaciones) },
+      { docId: DOC_COMBUSTIBLE, res: resComb, tieneEspejo: Boolean(snapLocal.combustible) },
+      { docId: DOC_CHAT, res: resChat, tieneEspejo: Boolean(snapLocal.chat) },
+    ]
+    for (const item of resultadosDoc) {
+      if (item.res.ok) {
+        hidratadoPorDoc[item.docId] = true
+        actualizarEstadoDoc(item.docId, {
+          estado: 'sincronizado',
+          ultimoError: undefined,
+          ultimaEscrituraOkEn: estadoPorDoc[item.docId]?.ultimaEscrituraOkEn ?? Date.now(),
+        })
+      } else {
+        hidratadoPorDoc[item.docId] = item.tieneEspejo
+        actualizarEstadoDoc(item.docId, {
+          estado: 'error',
+          ultimoError: item.res.error,
+        })
+      }
+    }
 
     if (snapCfg?.exists()) {
       existiaEnFirestore = true
@@ -631,7 +876,9 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
       existiaEnFirestore = true
       const d = snapComb.data() as Partial<EstadoBearsCompleto> & { actualizado?: number }
       if (d.tarjetaCombustible) base.tarjetaCombustible = d.tarjetaCombustible
-      base.historialTarjetas = Array.isArray(d.historialTarjetas) ? d.historialTarjetas : []
+      base.historialTarjetas = compactarHistorialTarjetas(
+        Array.isArray(d.historialTarjetas) ? d.historialTarjetas : []
+      )
       if (d.preciosCombustible && d.preciosCombustible.corrientePorGalon > 0) {
         base.preciosCombustible = d.preciosCombustible
       }
@@ -645,8 +892,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
       tsRemoto.chat = Number(d.actualizado) || 0
     }
 
-    // Reconciliación con el espejo local completo (evita pérdida de vehículos habilitados o misiones al recargar)
-    const snapLocal = leerSnapshotCompletoLocal()
+    // Reconciliación con el espejo local completo por documento y sub-campo
     let debeResincConfig = false
     let debeResincOp = false
     let debeResincComb = false
@@ -654,23 +900,45 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
 
     if (snapLocal.config) {
       const localMasReciente = snapLocal.config.actualizado > tsRemoto.config
-      const localTieneVehiculosQueFaltan =
-        Object.keys(base.vehiculosExtra).length === 0 &&
-        Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0
-      const localTieneEmpleadosQueFaltan =
-        Object.keys(base.empleadosExtra).length === 0 &&
-        Object.keys(snapLocal.config.empleadosExtra || {}).length > 0
+      const localPendiente = Boolean(snapLocal.config.pendienteSync)
 
-      if (!snapCfg?.exists() || localMasReciente || localTieneVehiculosQueFaltan || localTieneEmpleadosQueFaltan) {
-        if (Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0) {
+      if (!snapCfg?.exists() || (localMasReciente && localPendiente)) {
+        // Estado local completo prevalece (respetando listas/mapas vaciados o editados offline)
+        base.vehiculosExtra = { ...(snapLocal.config.vehiculosExtra || {}) }
+        base.empleadosExtra = { ...(snapLocal.config.empleadosExtra || {}) }
+        if (Array.isArray(snapLocal.config.rutasHabituales)) {
+          base.rutasHabituales = normalizarRutas(snapLocal.config.rutasHabituales)
+        }
+        base.rotacionContador = Number(snapLocal.config.rotacionContador) || 0
+        debeResincConfig = true
+      } else {
+        // Reconciliación independiente por sub-campo (vehiculosExtra vs empleadosExtra)
+        const localTieneVehiculosQueFaltan =
+          Object.keys(base.vehiculosExtra).length === 0 &&
+          Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0
+        const localTieneEmpleadosQueFaltan =
+          Object.keys(base.empleadosExtra).length === 0 &&
+          Object.keys(snapLocal.config.empleadosExtra || {}).length > 0
+
+        if (
+          (localMasReciente || localTieneVehiculosQueFaltan) &&
+          Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0
+        ) {
           base.vehiculosExtra = { ...base.vehiculosExtra, ...snapLocal.config.vehiculosExtra }
           debeResincConfig = true
         }
-        if (Object.keys(snapLocal.config.empleadosExtra || {}).length > 0) {
+        if (
+          (localMasReciente || localTieneEmpleadosQueFaltan) &&
+          Object.keys(snapLocal.config.empleadosExtra || {}).length > 0
+        ) {
           base.empleadosExtra = { ...base.empleadosExtra, ...snapLocal.config.empleadosExtra }
           debeResincConfig = true
         }
-        if (localMasReciente && Array.isArray(snapLocal.config.rutasHabituales) && snapLocal.config.rutasHabituales.length > 0) {
+        if (
+          localMasReciente &&
+          Array.isArray(snapLocal.config.rutasHabituales) &&
+          snapLocal.config.rutasHabituales.length > 0
+        ) {
           base.rutasHabituales = normalizarRutas(snapLocal.config.rutasHabituales)
           base.rotacionContador = Number(snapLocal.config.rotacionContador) || base.rotacionContador
           debeResincConfig = true
@@ -680,59 +948,77 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
 
     if (snapLocal.operaciones) {
       const localMasReciente = snapLocal.operaciones.actualizado > tsRemoto.operaciones
+      const localPendiente = Boolean(snapLocal.operaciones.pendienteSync)
       const misionesLocales = Array.isArray(snapLocal.operaciones.misiones)
         ? snapLocal.operaciones.misiones
         : []
-      const faltanMisionesEnCurso = misionesLocales.some(
-        (ml) => ml.estado === 'en_curso' && !base.misiones.some((mr) => mr.id === ml.id)
-      )
 
-      if (!snapOp?.exists() || localMasReciente || faltanMisionesEnCurso) {
-        if (localMasReciente || !snapOp?.exists()) {
-          if (Array.isArray(snapLocal.operaciones.turnos) && snapLocal.operaciones.turnos.length > 0) {
-            base.turnos = snapLocal.operaciones.turnos
-          }
-          if (misionesLocales.length > 0) {
-            const idsRem = new Set(base.misiones.map((m) => m.id))
-            base.misiones = [
-              ...misionesLocales,
-              ...base.misiones.filter((m) => !misionesLocales.some((ml) => ml.id === m.id) && idsRem.has(m.id)),
-            ]
-          }
-          const evLocales = deduplicarEventosRadar(
-            filtrarEventosRadarVigentes(snapLocal.operaciones.eventosRadar || [])
-          )
-          if (evLocales.length > 0) {
-            base.eventosRadar = evLocales
-            base.ultimoEscaneoRadarEn = Number(snapLocal.operaciones.ultimoEscaneoRadarEn) || base.ultimoEscaneoRadarEn
-            base.ultimoDiagnosticoRadar =
-              String(snapLocal.operaciones.ultimoDiagnosticoRadar || '') || base.ultimoDiagnosticoRadar
-          }
-        } else if (faltanMisionesEnCurso) {
-          const faltantes = misionesLocales.filter(
-            (ml) => ml.estado === 'en_curso' && !base.misiones.some((mr) => mr.id === ml.id)
-          )
-          base.misiones = [...faltantes, ...base.misiones]
-        }
+      if (!snapOp?.exists() || (localMasReciente && localPendiente)) {
+        // Prevalece el estado local completo: respeta cancelaciones de misiones programadas y listas vaciadas
+        base.turnos = Array.isArray(snapLocal.operaciones.turnos)
+          ? snapLocal.operaciones.turnos
+          : []
+        base.misiones = misionesLocales
+        base.eventosRadar = deduplicarEventosRadar(
+          filtrarEventosRadarVigentes(snapLocal.operaciones.eventosRadar || [])
+        )
+        base.ultimoEscaneoRadarEn = Number(snapLocal.operaciones.ultimoEscaneoRadarEn) || 0
+        base.ultimoDiagnosticoRadar = String(snapLocal.operaciones.ultimoDiagnosticoRadar || '')
         debeResincOp = true
+      } else if (localMasReciente) {
+        if (Array.isArray(snapLocal.operaciones.turnos)) {
+          base.turnos = snapLocal.operaciones.turnos
+        }
+        base.misiones = misionesLocales
+        base.eventosRadar = deduplicarEventosRadar(
+          filtrarEventosRadarVigentes(snapLocal.operaciones.eventosRadar || [])
+        )
+        base.ultimoEscaneoRadarEn =
+          Number(snapLocal.operaciones.ultimoEscaneoRadarEn) || base.ultimoEscaneoRadarEn
+        base.ultimoDiagnosticoRadar =
+          String(snapLocal.operaciones.ultimoDiagnosticoRadar || '') || base.ultimoDiagnosticoRadar
+        debeResincOp = true
+      } else {
+        const faltantesEnCurso = misionesLocales.filter(
+          (ml) => ml.estado === 'en_curso' && !base.misiones.some((mr) => mr.id === ml.id)
+        )
+        if (faltantesEnCurso.length > 0) {
+          base.misiones = [...faltantesEnCurso, ...base.misiones]
+          debeResincOp = true
+        }
       }
     }
 
-    if (snapLocal.combustible && (!snapComb?.exists() || snapLocal.combustible.actualizado > tsRemoto.combustible)) {
-      if (snapLocal.combustible.tarjetaCombustible) {
-        base.tarjetaCombustible = snapLocal.combustible.tarjetaCombustible
+    if (snapLocal.combustible) {
+      const localMasReciente = snapLocal.combustible.actualizado > tsRemoto.combustible
+      const localPendiente = Boolean(snapLocal.combustible.pendienteSync)
+      if (!snapComb?.exists() || (localMasReciente && localPendiente) || localMasReciente) {
+        if (snapLocal.combustible.tarjetaCombustible) {
+          base.tarjetaCombustible = snapLocal.combustible.tarjetaCombustible
+        }
+        if (Array.isArray(snapLocal.combustible.historialTarjetas)) {
+          base.historialTarjetas = compactarHistorialTarjetas(snapLocal.combustible.historialTarjetas)
+        }
+        if (snapLocal.combustible.preciosCombustible?.corrientePorGalon > 0) {
+          base.preciosCombustible = snapLocal.combustible.preciosCombustible
+        }
+        debeResincComb = true
       }
-      if (Array.isArray(snapLocal.combustible.historialTarjetas)) {
-        base.historialTarjetas = snapLocal.combustible.historialTarjetas
-      }
-      if (snapLocal.combustible.preciosCombustible?.corrientePorGalon > 0) {
-        base.preciosCombustible = snapLocal.combustible.preciosCombustible
-      }
-      debeResincComb = true
     }
 
-    if (snapLocal.chat && (!snapChat?.exists() || snapLocal.chat.actualizado > tsRemoto.chat)) {
-      if (Array.isArray(snapLocal.chat.chatMensajes) && snapLocal.chat.chatMensajes.length > 0) {
+    if (snapLocal.chat) {
+      const localMasReciente = snapLocal.chat.actualizado > tsRemoto.chat
+      const localPendiente = Boolean(snapLocal.chat.pendienteSync)
+      if (!snapChat?.exists() || (localMasReciente && localPendiente)) {
+        if (Array.isArray(snapLocal.chat.chatMensajes)) {
+          base.chatMensajes = snapLocal.chat.chatMensajes
+          debeResincChat = true
+        }
+      } else if (
+        localMasReciente &&
+        Array.isArray(snapLocal.chat.chatMensajes) &&
+        snapLocal.chat.chatMensajes.length > 0
+      ) {
         base.chatMensajes = snapLocal.chat.chatMensajes
         debeResincChat = true
       }
@@ -740,6 +1026,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
 
     // Recuperación legacy desde localStorage antiguo (solo si hay datos reales; NUNCA escribe documentos vacíos)
     const legacy = leerMigracionLegacyLocalStorage()
+    let migroLegacy = false
     if (legacy) {
       if (
         Object.keys(base.vehiculosExtra).length === 0 &&
@@ -748,6 +1035,7 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
       ) {
         base.vehiculosExtra = legacy.vehiculosExtra
         debeResincConfig = true
+        migroLegacy = true
       }
       if (
         Object.keys(base.empleadosExtra).length === 0 &&
@@ -756,31 +1044,38 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
       ) {
         base.empleadosExtra = legacy.empleadosExtra
         debeResincConfig = true
+        migroLegacy = true
       }
       if (!existiaEnFirestore && erroresLectura.length === 0) {
         if (legacy.rutasHabituales) {
           base.rutasHabituales = normalizarRutas(legacy.rutasHabituales)
           debeResincConfig = true
+          migroLegacy = true
         }
         if (typeof legacy.rotacionContador === 'number' && legacy.rotacionContador > 0) {
           base.rotacionContador = legacy.rotacionContador
           debeResincConfig = true
+          migroLegacy = true
         }
         if (legacy.turnos?.length && base.turnos.length === 0) {
           base.turnos = legacy.turnos
           debeResincOp = true
+          migroLegacy = true
         }
         if (legacy.misiones?.length && base.misiones.length === 0) {
           base.misiones = legacy.misiones
           debeResincOp = true
+          migroLegacy = true
         }
         if (legacy.eventosRadar?.length && base.eventosRadar.length === 0) {
           base.eventosRadar = legacy.eventosRadar
           debeResincOp = true
+          migroLegacy = true
         }
         if (legacy.tarjetaCombustible && base.tarjetaCombustible.tanqueos.length === 0) {
           base.tarjetaCombustible = legacy.tarjetaCombustible
           debeResincComb = true
+          migroLegacy = true
         }
       }
     }
@@ -788,37 +1083,40 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
     const cambioMes = migrarMesTarjetaSiCambio(base)
     if (cambioMes) debeResincComb = true
 
-    if (erroresLectura.length > 0) {
-      emitirEstadoSync({
-        estado: 'error',
-        ultimoError: erroresLectura[0],
-        ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn,
-      })
-    } else {
-      emitirEstadoSync({
-        estado: 'sincronizado',
-        ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn ?? Date.now(),
-      })
-      const tareasResinc: Promise<void>[] = []
+    if (erroresLectura.length === 0) {
+      const tareasResinc: Array<Promise<boolean>> = []
       if (debeResincConfig) tareasResinc.push(persistirConfig(base))
       if (debeResincOp) tareasResinc.push(persistirOperaciones(base))
       if (debeResincComb) tareasResinc.push(persistirCombustible(base))
       if (debeResincChat) tareasResinc.push(persistirChat(base))
       if (tareasResinc.length > 0) {
-        await Promise.all(tareasResinc)
+        const resultados = await Promise.all(tareasResinc)
+        if (migroLegacy && resultados.every(Boolean)) {
+          limpiarClavesLegacyLocalStorage()
+        }
+      } else if (migroLegacy) {
+        limpiarClavesLegacyLocalStorage()
       }
     }
 
-    establecerPreciosCombustibleCache(base.preciosCombustible)
-    cacheEstado = base
-    hidratadoDesdePersistencia = true
+    if (miSeq === hidratacionSeq) {
+      establecerPreciosCombustibleCache(base.preciosCombustible)
+      cacheEstado = base
+      // Solo marcar hidratación completa si NO hubo errores de lectura
+      if (erroresLectura.length === 0) {
+        hidratadoDesdePersistencia = true
+      }
+    }
     return base
   })()
 
+  promesaHidratacion = miPromesa
   try {
-    return await promesaHidratacion
+    return await miPromesa
   } finally {
-    promesaHidratacion = null
+    if (promesaHidratacion === miPromesa) {
+      promesaHidratacion = null
+    }
   }
 }
 
@@ -885,7 +1183,8 @@ const VEHICULOS_DEMO: Vehiculo[] = [
 function transformarEmpleado(
   nomina: Nomina,
   extra: Partial<EmpleadoOperativo> | undefined,
-  turnosSemana: TurnoSemanal[]
+  turnosTodos: TurnoSemanal[],
+  semanaActualISO: string
 ): EmpleadoOperativo {
   const nombre = nomina.nombreCompleto || 'Colaborador'
   const cargo = nomina.cargo || 'Operador'
@@ -894,7 +1193,11 @@ function transformarEmpleado(
   const cargoLower = cargo.toLowerCase()
   if (cargoLower.includes('chofer') || cargoLower.includes('conductor')) {
     habilidadesDefault.push('Conducción en alta montaña', 'Navegación de trochas')
-  } else if (cargoLower.includes('mecanic') || cargoLower.includes('mecánic') || cargoLower.includes('tecnic')) {
+  } else if (
+    cargoLower.includes('mecanic') ||
+    cargoLower.includes('mecánic') ||
+    cargoLower.includes('tecnic')
+  ) {
     habilidadesDefault.push('Mecánica de emergencia', 'Manejo de winche y eslingas')
   } else {
     habilidadesDefault.push('Logística comunitaria', 'Primeros auxilios básicos', 'Apoyo operativo')
@@ -908,8 +1211,8 @@ function transformarEmpleado(
       ? extra.activo
       : true
 
-  const horasCalculadas = turnosSemana
-    .filter((t) => t.empleadoId === nomina.id)
+  const horasCalculadas = turnosTodos
+    .filter((t) => t.semanaISO === semanaActualISO && t.empleadoId === nomina.id)
     .reduce((acc, t) => acc + t.horas, 0)
 
   return {
@@ -958,16 +1261,17 @@ function transformarVehiculo(
       ? 'mantenimiento'
       : idsEnMision.has(v.id)
         ? 'en_mision'
-        : nivelComb <= 15
+        : nivelComb <= UMBRAL_RESERVA_COMBUSTIBLE_PORC
           ? 'reserva'
           : 'disponible'
 
   const kmCashmet = v.mantenimiento?.kilometrajeActual ?? 0
-  const kmFinal = esDemo
-    ? Math.max(kmCashmet, extra?.kilometrajeActual ?? 0)
-    : kmCashmet > 0
-      ? kmCashmet
-      : extra?.kilometrajeActual ?? 0
+  const kmFinal = Math.max(kmCashmet, extra?.kilometrajeActual ?? 0)
+
+  const capacidadTanqueGalones =
+    extra?.capacidadTanqueGalones ??
+    fichaFallback.capacidadTanqueGalones ??
+    CAPACIDAD_TANQUE_FALLBACK_GAL
 
   return {
     id: v.id,
@@ -990,7 +1294,7 @@ function transformarVehiculo(
     fichaInvestigadaNota: extra?.fichaInvestigadaNota ?? fichaFallback.fichaInvestigadaNota,
     estado: estadoCalculado,
     tipoCombustible: extra?.tipoCombustible ?? fichaFallback.tipoCombustible,
-    capacidadTanqueGalones: extra?.capacidadTanqueGalones ?? fichaFallback.capacidadTanqueGalones,
+    capacidadTanqueGalones,
     capacidadTanqueLitros: extra?.capacidadTanqueLitros ?? fichaFallback.capacidadTanqueLitros,
     nivelCombustiblePorc: nivelComb,
     consumoKmPorGalon: extra?.consumoKmPorGalon ?? fichaFallback.consumoKmPorGalon,
@@ -1007,20 +1311,58 @@ function transformarVehiculo(
 // ---------------------------------------------------------------------------
 
 export async function listarEmpleadosBears(): Promise<EmpleadoOperativo[]> {
-  const [nominados, estado] = await Promise.all([
-    listarNomina().catch(() => []),
+  const [resNom, estado] = await Promise.all([
+    listarNomina()
+      .then((lista) => ({ ok: true as const, lista }))
+      .catch((err) => {
+        console.warn('Error leyendo nómina de CashMet:', err)
+        return { ok: false as const, lista: [] as Nomina[] }
+      }),
     hidratarEstadoBears(),
   ])
-  const fuente = nominados.length > 0 ? nominados : EMPLEADOS_DEMO
-  return fuente.map((n) => transformarEmpleado(n, estado.empleadosExtra[n.id], estado.turnos))
+
+  let nominados: Nomina[]
+  let esDemo = false
+  if (resNom.ok) {
+    ultimoCacheNomina = resNom.lista
+    nominados = resNom.lista
+    esDemo = nominados.length === 0
+  } else {
+    // Nunca activar Demo por error transitorio de red/Firestore
+    nominados = ultimoCacheNomina ?? []
+    esDemo = false
+  }
+
+  const fuente = esDemo ? EMPLEADOS_DEMO : nominados
+  const semanaActual = lunesDeEstaSemanaISO()
+  return fuente.map((n) =>
+    transformarEmpleado(n, estado.empleadosExtra[n.id], estado.turnos, semanaActual)
+  )
 }
 
 export async function listarVehiculosBears(): Promise<VehiculoOperativo[]> {
-  const [listaCashmet, estado] = await Promise.all([
-    listarVehiculos().catch(() => []),
+  const [resVeh, estado] = await Promise.all([
+    listarVehiculos()
+      .then((lista) => ({ ok: true as const, lista }))
+      .catch((err) => {
+        console.warn('Error leyendo vehículos de CashMet:', err)
+        return { ok: false as const, lista: [] as Vehiculo[] }
+      }),
     hidratarEstadoBears(),
   ])
-  const esDemo = listaCashmet.length === 0
+
+  let listaCashmet: Vehiculo[]
+  let esDemo = false
+  if (resVeh.ok) {
+    ultimoCacheVehiculos = resVeh.lista
+    listaCashmet = resVeh.lista
+    esDemo = listaCashmet.length === 0
+  } else {
+    // Nunca activar Demo por error transitorio de red/Firestore
+    listaCashmet = ultimoCacheVehiculos ?? []
+    esDemo = false
+  }
+
   const fuente = esDemo ? VEHICULOS_DEMO : listaCashmet
 
   const idsEnMision = new Set<string>()
@@ -1113,7 +1455,8 @@ export async function investigarVehiculosPendientesIA(
   conCatalogoLocal: number
   nombres: string[]
 }> {
-  const vehiculos = await listarVehiculosBears()
+  // Leer flota una sola vez y persistir config una sola vez al final
+  const [vehiculos, estado] = await Promise.all([listarVehiculosBears(), hidratarEstadoBears()])
   const pendientes = forzarTodos
     ? vehiculos.filter((v) => v.disponibleParaTrabajo)
     : vehiculos.filter((v) => v.disponibleParaTrabajo && !v.investigadoIA)
@@ -1123,12 +1466,48 @@ export async function investigarVehiculosPendientesIA(
   let conCatalogoLocal = 0
 
   for (const v of pendientes) {
-    const res = await investigarVehiculoIndividualIA(v.id)
-    if (res.vehiculo) {
-      nombres.push(`${v.marca} ${v.linea}`)
-      if (res.usoGemini) conGemini++
-      else conCatalogoLocal++
+    const fichaGemini = await investigarVehiculoConGeminiAI({
+      marca: v.marca,
+      linea: v.linea,
+      tipo: v.tipo,
+      modelo: v.modelo,
+      notas: v.notasCashmet,
+      carroceria: v.carroceria,
+      cilindraje: v.cilindraje,
+      capacidadTexto: v.capacidadTexto,
+    })
+
+    const usoGemini = Boolean(fichaGemini)
+    const ficha =
+      fichaGemini ??
+      investigarFichaVehiculoIA(
+        v.marca,
+        v.linea,
+        v.tipo,
+        v.modelo,
+        v.notasCashmet,
+        v.carroceria,
+        v.capacidadTexto
+      )
+
+    estado.vehiculosExtra[v.id] = {
+      ...(estado.vehiculosExtra[v.id] || {}),
+      investigadoIA: true,
+      fuenteFicha: usoGemini ? 'gemini' : 'catalogo_local',
+      fichaInvestigadaNota: ficha.fichaInvestigadaNota,
+      capacidadTanqueGalones: ficha.capacidadTanqueGalones,
+      capacidadTanqueLitros: ficha.capacidadTanqueLitros,
+      consumoKmPorGalon: ficha.consumoKmPorGalon,
+      tipoCombustible: ficha.tipoCombustible,
     }
+
+    nombres.push(`${v.marca} ${v.linea}`)
+    if (usoGemini) conGemini++
+    else conCatalogoLocal++
+  }
+
+  if (nombres.length > 0) {
+    await persistirConfig(estado)
   }
 
   return {
@@ -1154,26 +1533,49 @@ export async function guardarRotacionContador(contador: number): Promise<void> {
 }
 
 export function listarTurnos(): TurnoSemanal[] {
-  return obtenerCacheSincrono().turnos
+  return [...obtenerCacheSincrono().turnos]
 }
 
-export async function guardarTurnos(turnos: TurnoSemanal[]): Promise<void> {
+/**
+ * Guarda los turnos de la semana indicada (o las semanas presentes en `turnos`)
+ * conservando historial de las últimas 4 semanas.
+ */
+export async function guardarTurnos(
+  turnos: TurnoSemanal[],
+  semanaObjetivo?: string
+): Promise<void> {
   const estado = await hidratarEstadoBears()
-  estado.turnos = turnos
+  const semanasNuevas = new Set(turnos.map((t) => t.semanaISO).filter(Boolean))
+  if (semanaObjetivo) {
+    semanasNuevas.add(semanaObjetivo)
+  }
+  if (semanasNuevas.size === 0) {
+    semanasNuevas.add(lunesDeEstaSemanaISO())
+  }
+
+  const turnosOtrasSemanas = (estado.turnos || []).filter((t) => !semanasNuevas.has(t.semanaISO))
+  const combinados = [...turnosOtrasSemanas, ...turnos]
+  const semanasRecientes = new Set(
+    Array.from(new Set(combinados.map((t) => t.semanaISO).filter(Boolean)))
+      .sort()
+      .slice(-4)
+  )
+
+  estado.turnos = combinados.filter((t) => !t.semanaISO || semanasRecientes.has(t.semanaISO))
   await persistirOperaciones(estado)
 }
 
 export function listarMisiones(): MisionComunitaria[] {
-  return obtenerCacheSincrono().misiones
+  return [...obtenerCacheSincrono().misiones]
 }
 
 export async function guardarMision(mision: MisionComunitaria): Promise<void> {
   const estado = await hidratarEstadoBears()
   const idx = estado.misiones.findIndex((m) => m.id === mision.id)
   if (idx >= 0) {
-    estado.misiones[idx] = mision
+    estado.misiones = estado.misiones.map((m, i) => (i === idx ? mision : m))
   } else {
-    estado.misiones.unshift(mision)
+    estado.misiones = [mision, ...estado.misiones]
   }
   await persistirOperaciones(estado)
 }
@@ -1202,7 +1604,13 @@ export async function crearMisionOperativa(
   let costoTotal = 0
   let desgasteMax = 0
   for (const v of vehsParticipantes) {
-    const c = calcularConsumoMision(v.tipo, km, misionBase.terreno, v.consumoKmPorGalon, v.tipoCombustible)
+    const c = calcularConsumoMision(
+      v.tipo,
+      km,
+      misionBase.terreno,
+      v.consumoKmPorGalon,
+      v.tipoCombustible
+    )
     const galRal = calcularCombustibleRalenti(v.tipo, misionBase.minutosRalentiEstimados || 0)
     const galVeh = Number((c.galones + galRal).toFixed(2))
     galTotal += galVeh
@@ -1212,7 +1620,10 @@ export async function crearMisionOperativa(
 
   const ahora = Date.now()
   const esEnCurso = misionBase.estado === 'en_curso'
-  const horaIni = new Date(ahora).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+  const horaIni = new Date(ahora).toLocaleTimeString('es-CO', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
   const horaFinEst = new Date(ahora + durMin * 60_000).toLocaleTimeString('es-CO', {
     hour: '2-digit',
     minute: '2-digit',
@@ -1230,7 +1641,7 @@ export async function crearMisionOperativa(
         recurrente: false,
         recordatorios: [{ minutosAntes: 1440 }, { minutosAntes: 60 }],
         relacionado: {
-          vehiculoId: misionBase.vehiculosAsignados[0]?.id,
+          vehiculoId: misionBase.vehiculosAsignados?.[0]?.id,
         },
       })
     } catch {
@@ -1249,7 +1660,7 @@ export async function crearMisionOperativa(
     finalizaEstimadaEn: esEnCurso
       ? misionBase.finalizaEstimadaEn ?? ahora + durMin * 60_000
       : undefined,
-    horaInicio: esEnCurso ? misionBase.horaInicio ?? horaIni : undefined,
+    horaInicio: esEnCurso ? misionBase.horaInicio ?? horaIni : misionBase.horaInicio,
     horaFin: esEnCurso ? misionBase.horaFin ?? horaFinEst : undefined,
     eventoCalendarioId,
   }
@@ -1261,8 +1672,11 @@ export async function crearMisionOperativa(
   }
 
   const idx = estado.misiones.findIndex((m) => m.id === mision.id)
-  if (idx >= 0) estado.misiones[idx] = mision
-  else estado.misiones.unshift(mision)
+  if (idx >= 0) {
+    estado.misiones = estado.misiones.map((m, i) => (i === idx ? mision : m))
+  } else {
+    estado.misiones = [mision, ...estado.misiones]
+  }
 
   await persistirOperaciones(estado)
   return mision
@@ -1278,7 +1692,10 @@ export async function iniciarMisionProgramada(misionId: string): Promise<MisionC
   m.estado = 'en_curso'
   m.iniciadaEn = ahora
   m.finalizaEstimadaEn = ahora + durMin * 60_000
-  m.horaInicio = new Date(ahora).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+  m.horaInicio = new Date(ahora).toLocaleTimeString('es-CO', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
   m.horaFin = new Date(m.finalizaEstimadaEn).toLocaleTimeString('es-CO', {
     hour: '2-digit',
     minute: '2-digit',
@@ -1290,12 +1707,37 @@ export async function iniciarMisionProgramada(misionId: string): Promise<MisionC
 
 export async function cancelarMisionProgramada(misionId: string): Promise<void> {
   const estado = await hidratarEstadoBears()
-  estado.misiones = estado.misiones.filter((m) => !(m.id === misionId && m.estado === 'programada'))
+  const objetivo = estado.misiones.find((m) => m.id === misionId && m.estado === 'programada')
+  if (!objetivo) return
+
+  estado.misiones = estado.misiones.filter(
+    (m) => !(m.id === misionId && m.estado === 'programada')
+  )
+
+  if (objetivo.eventoCalendarioId) {
+    await eliminarEvento(objetivo.eventoCalendarioId).catch((err) => {
+      console.warn('No se pudo eliminar el evento asociado en Calendario:', err)
+    })
+  }
+
+  if (objetivo.eventoRadarId) {
+    const hayOtraMisionActiva = estado.misiones.some(
+      (m) =>
+        m.eventoRadarId === objetivo.eventoRadarId &&
+        (m.estado === 'en_curso' || m.estado === 'programada')
+    )
+    if (!hayOtraMisionActiva) {
+      estado.eventosRadar = estado.eventosRadar.map((ev) =>
+        ev.id === objetivo.eventoRadarId ? { ...ev, despachado: false } : ev
+      )
+    }
+  }
+
   await persistirOperaciones(estado)
 }
 
 export function listarRutasHabituales(): RutaHabitual[] {
-  return obtenerCacheSincrono().rutasHabituales
+  return [...obtenerCacheSincrono().rutasHabituales]
 }
 
 export async function guardarRutaHabitual(ruta: RutaHabitual): Promise<void> {
@@ -1303,9 +1745,9 @@ export async function guardarRutaHabitual(ruta: RutaHabitual): Promise<void> {
   const copia = { ...ruta }
   const idx = estado.rutasHabituales.findIndex((r) => r.id === copia.id)
   if (idx >= 0) {
-    estado.rutasHabituales[idx] = copia
+    estado.rutasHabituales = estado.rutasHabituales.map((r, i) => (i === idx ? copia : r))
   } else {
-    estado.rutasHabituales.push(copia)
+    estado.rutasHabituales = [...estado.rutasHabituales, copia]
   }
   await persistirConfig(estado)
 }
@@ -1383,7 +1825,9 @@ async function ejecutarSincronizacionRadar(forzar = false): Promise<{
   const estado = await hidratarEstadoBears()
   const ahora = Date.now()
 
-  const vigentesAntes = deduplicarEventosRadar(filtrarEventosRadarVigentes(estado.eventosRadar, ahora))
+  const vigentesAntes = deduplicarEventosRadar(
+    filtrarEventosRadarVigentes(estado.eventosRadar, ahora)
+  )
   const cambioLimpieza = vigentesAntes.length !== estado.eventosRadar.length
   estado.eventosRadar = vigentesAntes
 
@@ -1411,12 +1855,16 @@ async function ejecutarSincronizacionRadar(forzar = false): Promise<{
   let llamadasNuevas: EventoRadarLocal[] = []
   let diagnosticoWeb = estado.ultimoDiagnosticoRadar || ''
   let baseConservar = estado.eventosRadar
+  let busquedaWebActiva = false
 
   // 1. Buscar noticias web reales de TODO Colombia (<48h) curadas por Gemini IA
   if (forzar || noticiasVigentes.length < 2) {
-    const resWeb = await buscarNoticiasVialesRealesAI(forzar ? baseSinWebActiva : estado.eventosRadar)
+    const resWeb = await buscarNoticiasVialesRealesAI(
+      forzar ? baseSinWebActiva : estado.eventosRadar
+    )
     diagnosticoWeb = resWeb.diagnostico
     if (resWeb.busquedaWebActiva) {
+      busquedaWebActiva = true
       noticiasReales = resWeb.eventos
       if (forzar) baseConservar = baseSinWebActiva
     }
@@ -1435,7 +1883,10 @@ async function ejecutarSincronizacionRadar(forzar = false): Promise<{
   estado.eventosRadar = deduplicarEventosRadar(
     filtrarEventosRadarVigentes([...noticiasReales, ...llamadasNuevas, ...baseConservar], ahora)
   ).slice(0, 12)
-  estado.ultimoEscaneoRadarEn = ahora
+  // Solo avanzar la ventana de cooldown si la búsqueda web respondió activamente
+  if (busquedaWebActiva) {
+    estado.ultimoEscaneoRadarEn = ahora
+  }
   estado.ultimoDiagnosticoRadar = diagnosticoWeb
 
   await persistirOperaciones(estado)
@@ -1453,15 +1904,15 @@ async function ejecutarSincronizacionRadar(forzar = false): Promise<{
 
 export function leerTarjetaCombustible(): TarjetaCombustibleReserva {
   const estado = obtenerCacheSincrono()
-  return estado.tarjetaCombustible
+  return { ...estado.tarjetaCombustible }
 }
 
 export function leerHistorialTarjetas(): TarjetaCombustibleReserva[] {
-  return obtenerCacheSincrono().historialTarjetas || []
+  return [...(obtenerCacheSincrono().historialTarjetas || [])]
 }
 
 export function leerPreciosCombustible(): PreciosCombustible {
-  return obtenerCacheSincrono().preciosCombustible || obtenerPreciosCombustibleActuales()
+  return { ...(obtenerCacheSincrono().preciosCombustible || obtenerPreciosCombustibleActuales()) }
 }
 
 export async function sincronizarPreciosCombustibleReales(
@@ -1478,7 +1929,7 @@ export async function sincronizarPreciosCombustibleReales(
     estado.preciosCombustible = reales
     establecerPreciosCombustibleCache(reales)
     await persistirCombustible(estado)
-    return { precios: reales, actualizadoDesdeWeb: true }
+    return { precios: reales, actualizadoDesdeWeb: Boolean(reales.esFuenteReal) }
   }
 
   establecerPreciosCombustibleCache(estado.preciosCombustible)
@@ -1491,11 +1942,26 @@ export async function guardarPreciosCombustibleManuales(valores: {
   extraPorGalon: number
 }): Promise<PreciosCombustible> {
   const estado = await hidratarEstadoBears()
+  const actual = estado.preciosCombustible || PRECIOS_COMBUSTIBLE_BASE_COLOMBIA
+  const sanitizarPrecio = (val: number, fallback: number): number => {
+    if (!Number.isFinite(val)) return fallback
+    return Math.max(1000, Math.min(100_000, Math.round(val)))
+  }
+
   const ahora = Date.now()
   const nuevos: PreciosCombustible = {
-    corrientePorGalon: Math.max(1000, Math.round(valores.corrientePorGalon)),
-    dieselPorGalon: Math.max(1000, Math.round(valores.dieselPorGalon)),
-    extraPorGalon: Math.max(1000, Math.round(valores.extraPorGalon)),
+    corrientePorGalon: sanitizarPrecio(
+      valores.corrientePorGalon,
+      actual.corrientePorGalon || PRECIOS_COMBUSTIBLE_BASE_COLOMBIA.corrientePorGalon
+    ),
+    dieselPorGalon: sanitizarPrecio(
+      valores.dieselPorGalon,
+      actual.dieselPorGalon || PRECIOS_COMBUSTIBLE_BASE_COLOMBIA.dieselPorGalon
+    ),
+    extraPorGalon: sanitizarPrecio(
+      valores.extraPorGalon,
+      actual.extraPorGalon || PRECIOS_COMBUSTIBLE_BASE_COLOMBIA.extraPorGalon
+    ),
     actualizado: `${hoyISO()} · Editado manualmente`,
     fuente: 'Configuración manual del coordinador',
     consultadoEn: ahora,
@@ -1516,58 +1982,69 @@ export async function tanquearVehiculoCompleto(
   vehiculoId: string,
   motivo: TanqueoRegistro['motivo'] = 'reserva_automatica'
 ): Promise<{ tanqueo: TanqueoRegistro; tarjeta: TarjetaCombustibleReserva }> {
-  const estado = await hidratarEstadoBears()
-  migrarMesTarjetaSiCambio(estado)
-
-  const vehiculos = await listarVehiculosBears()
-  const v = vehiculos.find((x) => x.id === vehiculoId || x.vehiculoId === vehiculoId)
-  if (!v) throw new Error('Vehículo no encontrado')
-
-  const capacidad = v.capacidadTanqueGalones || 18
-  const nivelActualPorc = Math.max(0, Math.min(100, v.nivelCombustiblePorc ?? 50))
-  const galonesFaltantes = Number((capacidad * (1 - nivelActualPorc / 100)).toFixed(2))
-  if (galonesFaltantes <= 0.05) {
-    throw new Error('El tanque ya está lleno.')
+  if (vehiculosEnTanqueo.has(vehiculoId)) {
+    throw new Error('Ya hay un tanqueo en curso para este vehículo. Espera un momento.')
   }
+  vehiculosEnTanqueo.add(vehiculoId)
+  try {
+    const estado = await hidratarEstadoBears()
+    migrarMesTarjetaSiCambio(estado)
 
-  const precioGalon = obtenerPrecioGalon(v.tipoCombustible)
-  const totalCOP = Math.round(galonesFaltantes * precioGalon)
-  const hoy = hoyISO()
-  const ahoraHora = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+    const vehiculos = await listarVehiculosBears()
+    const v = vehiculos.find((x) => x.id === vehiculoId || x.vehiculoId === vehiculoId)
+    if (!v) throw new Error('Vehículo no encontrado')
 
-  const tanqueo: TanqueoRegistro = {
-    id: `tq-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    vehiculoId: v.id,
-    vehiculoPlaca: v.placa,
-    vehiculoNombre: `${v.marca} ${v.linea}`,
-    fecha: hoy,
-    hora: ahoraHora,
-    galones: galonesFaltantes,
-    tipoCombustible: v.tipoCombustible,
-    precioPorGalon: precioGalon,
-    totalCOP,
-    odometroKm: v.kilometrajeActual,
-    motivo,
+    const capacidad = v.capacidadTanqueGalones || CAPACIDAD_TANQUE_FALLBACK_GAL
+    const nivelActualPorc = Math.max(0, Math.min(100, v.nivelCombustiblePorc ?? 50))
+    const galonesFaltantes = Number((capacidad * (1 - nivelActualPorc / 100)).toFixed(2))
+    if (galonesFaltantes <= 0.05) {
+      throw new Error('El tanque ya está lleno.')
+    }
+
+    const precioGalon = obtenerPrecioGalon(v.tipoCombustible)
+    const totalCOP = Math.round(galonesFaltantes * precioGalon)
+    const hoy = hoyISO()
+    const ahoraHora = new Date().toLocaleTimeString('es-CO', {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+
+    const tanqueo: TanqueoRegistro = {
+      id: `tq-${Date.now()}-${sufijoAleatorio()}`,
+      vehiculoId: v.id,
+      vehiculoPlaca: v.placa,
+      vehiculoNombre: `${v.marca} ${v.linea}`,
+      fecha: hoy,
+      hora: ahoraHora,
+      galones: galonesFaltantes,
+      tipoCombustible: v.tipoCombustible,
+      precioPorGalon: precioGalon,
+      totalCOP,
+      odometroKm: v.kilometrajeActual,
+      motivo,
+    }
+
+    estado.vehiculosExtra[v.id] = {
+      ...(estado.vehiculosExtra[v.id] || {}),
+      nivelCombustiblePorc: 100,
+      totalCostoCombustibleCOP: (v.totalCostoCombustibleCOP || 0) + totalCOP,
+    }
+
+    estado.tarjetaCombustible.saldoAcumuladoCOP += totalCOP
+    estado.tarjetaCombustible.totalGalonesMes = Number(
+      (estado.tarjetaCombustible.totalGalonesMes + galonesFaltantes).toFixed(2)
+    )
+    estado.tarjetaCombustible.tanqueos.unshift(tanqueo)
+    // Al acumular un nuevo tanqueo vuelve a existir saldo pendiente por liquidar
+    estado.tarjetaCombustible.liquidadoEnCashmet =
+      saldoPendienteTarjeta(estado.tarjetaCombustible) <= 0
+
+    await Promise.all([persistirConfig(estado), persistirCombustible(estado)])
+
+    return { tanqueo, tarjeta: estado.tarjetaCombustible }
+  } finally {
+    vehiculosEnTanqueo.delete(vehiculoId)
   }
-
-  estado.vehiculosExtra[v.id] = {
-    ...(estado.vehiculosExtra[v.id] || {}),
-    nivelCombustiblePorc: 100,
-    totalCostoCombustibleCOP: (v.totalCostoCombustibleCOP || 0) + totalCOP,
-  }
-
-  estado.tarjetaCombustible.saldoAcumuladoCOP += totalCOP
-  estado.tarjetaCombustible.totalGalonesMes = Number(
-    (estado.tarjetaCombustible.totalGalonesMes + galonesFaltantes).toFixed(2)
-  )
-  estado.tarjetaCombustible.tanqueos.unshift(tanqueo)
-  // Al acumular un nuevo tanqueo vuelve a existir saldo pendiente por liquidar
-  estado.tarjetaCombustible.liquidadoEnCashmet =
-    saldoPendienteTarjeta(estado.tarjetaCombustible) <= 0
-
-  await Promise.all([persistirConfig(estado), persistirCombustible(estado)])
-
-  return { tanqueo, tarjeta: estado.tarjetaCombustible }
 }
 
 // Lock contra doble clic en liquidación
@@ -1587,6 +2064,8 @@ export async function liquidarTarjetaEnCashmet(
   liquidacionEnCurso = true
   try {
     const estado = await hidratarEstadoBears()
+    migrarMesTarjetaSiCambio(estado)
+
     const tarjeta =
       tarjetaIdObjetivo && tarjetaIdObjetivo !== estado.tarjetaCombustible.id
         ? estado.historialTarjetas.find((t) => t.id === tarjetaIdObjetivo)
@@ -1599,12 +2078,26 @@ export async function liquidarTarjetaEnCashmet(
       throw new Error('No hay saldo pendiente por liquidar en esta tarjeta.')
     }
 
+    const prevLiquidaciones = tarjeta.liquidaciones || []
+    const galonesYaLiquidados = prevLiquidaciones.reduce(
+      (acc, l) => acc + (Number(l.galones) || 0),
+      0
+    )
+    const tanqueosYaLiquidados = prevLiquidaciones.reduce(
+      (acc, l) => acc + (Number(l.tanqueosCount) || 0),
+      0
+    )
+    const galonesTramo = Number(
+      Math.max(0, (tarjeta.totalGalonesMes || 0) - galonesYaLiquidados).toFixed(2)
+    )
+    const tanqueosTramo = Math.max(0, (tarjeta.tanqueos?.length || 0) - tanqueosYaLiquidados)
+
     const hoy = hoyISO()
     const movId = await crearMovimiento({
       fecha: hoy,
       tipo: 'gasto',
       concepto: `Combustible Bear's Reserve (${tarjeta.mes})`,
-      descripcion: `Liquidación de combustible flota comunitaria Bear's Reserve (${tarjeta.totalGalonesMes} gal mes · ${tarjeta.tanqueos.length} tanqueos).`,
+      descripcion: `Liquidación de combustible flota comunitaria Bear's Reserve (${galonesTramo} gal · ${tanqueosTramo} tanqueo(s) del tramo).`,
       monto: pendiente,
       categoria: 'Transporte',
       cuentaBancoId,
@@ -1612,23 +2105,24 @@ export async function liquidarTarjetaEnCashmet(
     })
 
     const registro: LiquidacionCombustibleRegistro = {
-      id: `liq-${Date.now()}`,
+      id: `liq-${Date.now()}-${sufijoAleatorio()}`,
       fecha: hoy,
       montoCOP: pendiente,
-      galones: tarjeta.totalGalonesMes,
-      tanqueosCount: tarjeta.tanqueos.length,
+      galones: galonesTramo,
+      tanqueosCount: tanqueosTramo,
       cuentaBancoId,
       movimientoId: movId,
     }
 
     tarjeta.saldoLiquidadoCOP = (tarjeta.saldoLiquidadoCOP || 0) + pendiente
-    tarjeta.liquidaciones = [registro, ...(tarjeta.liquidaciones || [])]
+    tarjeta.liquidaciones = [registro, ...prevLiquidaciones]
     tarjeta.liquidadoEnCashmet = saldoPendienteTarjeta(tarjeta) <= 0
     tarjeta.fechaLiquidacion = hoy
     tarjeta.cuentaBancoIdCashmet = cuentaBancoId
     tarjeta.movimientoIdCashmet = movId
 
-    await persistirCombustible(estado)
+    // Modo estricto: si Firestore falla tras crearMovimiento, reportar el error explícitamente
+    await persistirCombustible(estado, true)
     return tarjeta
   } finally {
     liquidacionEnCurso = false
@@ -1643,9 +2137,10 @@ export async function liquidarTarjetaEnCashmet(
  * Completa una misión comunitaria (usado por el motor automático con IA y por rutas habituales):
  * - Si no se fuerza `resultadoManual`, usa Gemini IA (o respaldo realista) para decidir resultado,
  *   factor de distancia real y crónica narrativa humana.
- * - Suma km reales al odómetro en CashMet.
- * - Consume combustible respetando `tipoCombustible` real del vehículo (sin doble conteo).
- * - Si baja a ≤15%, auto-tanquea al 100% y lo carga a la Tarjeta.
+ * - Suma km reales al odómetro en CashMet (tolerante a fallos por vehículo).
+ * - Consume combustible respetando `tipoCombustible` real del vehículo (sin doble conteo),
+ *   soportando consumos > 1 tanque con auto-tanqueo en ruta.
+ * - Si baja a ≤ UMBRAL_RESERVA_COMBUSTIBLE_PORC, auto-tanquea al 100% y lo carga a la Tarjeta.
  */
 export async function completarMisionComunitaria(
   misionId: string,
@@ -1655,120 +2150,236 @@ export async function completarMisionComunitaria(
   tanqueosAutomaticos: TanqueoRegistro[]
   cronica: string
 }> {
-  const estado = await hidratarEstadoBears()
-  const mision = estado.misiones.find((m) => m.id === misionId)
-  if (!mision) throw new Error('Misión no encontrada')
-
-  // Idempotencia estricta
-  if (mision.estado === 'completada' || mision.estado === 'inconclusa_repliegue') {
-    return {
-      mision,
-      tanqueosAutomaticos: [],
-      cronica: mision.cronicaHistoria ?? '',
+  if (misionesEnCierre.has(misionId)) {
+    const estadoEnCurso = await hidratarEstadoBears()
+    const mActual = estadoEnCurso.misiones.find((m) => m.id === misionId)
+    if (mActual) {
+      return {
+        mision: mActual,
+        tanqueosAutomaticos: [],
+        cronica: mActual.cronicaHistoria ?? '',
+      }
     }
+    throw new Error('La misión ya se encuentra en proceso de cierre.')
   }
 
-  const todosVehiculos = await listarVehiculosBears()
-  const vehiculosIds = (mision.vehiculosAsignados || []).map((x) => x.id)
-  const vehiculosParticipantes = todosVehiculos.filter(
-    (v) => vehiculosIds.includes(v.id) || vehiculosIds.includes(v.vehiculoId)
-  )
-  const nombresTrip = (mision.tripulantesAsignados || []).map((t) => t.nombre)
+  misionesEnCierre.add(misionId)
+  try {
+    const estado = await hidratarEstadoBears()
+    const mision = estado.misiones.find((m) => m.id === misionId)
+    if (!mision) throw new Error('Misión no encontrada')
 
-  // Evaluar desenlace con Gemini IA (o respaldo determinista realista)
-  let resultado: 'exito' | 'parcial' | 'fallida_dificultad' = resultadoManual || 'exito'
-  let factorDistanciaReal = 1.0
-  let cronica = ''
-  let resueltaPorIA = false
-
-  if (!resultadoManual) {
-    const resIA = await resolverMisionConIA(mision, vehiculosParticipantes, nombresTrip)
-    if (resIA) {
-      resultado = resIA.resultado
-      factorDistanciaReal = resIA.factorDistanciaReal
-      cronica = resIA.cronicaHistoria
-      resueltaPorIA = true
-    } else {
-      const resLocal = evaluarDesenlaceMisionLocal(mision, vehiculosParticipantes, nombresTrip)
-      resultado = resLocal.resultado
-      factorDistanciaReal = resLocal.factorDistanciaReal
-      cronica = resLocal.cronicaHistoria
-    }
-  } else {
-    const resLocal = evaluarDesenlaceMisionLocal(mision, vehiculosParticipantes, nombresTrip)
-    resultado = resultadoManual
-    factorDistanciaReal = resultadoManual === 'fallida_dificultad' ? 0.65 : 1.0
-    cronica = resLocal.cronicaHistoria
-  }
-
-  const kmReales = Math.max(0, Number((mision.distanciaKmIdaYVuelta * factorDistanciaReal).toFixed(1)))
-  const tanqueosAuto: TanqueoRegistro[] = []
-  let totalGalonesMision = 0
-  let totalCostoMision = 0
-  let maxDesgaste = 0
-
-  for (const v of vehiculosParticipantes) {
-    const { galones: galonesRodamiento, desgasteLlantasPorc } = calcularConsumoMision(
-      v.tipo,
-      kmReales,
-      mision.terreno,
-      v.consumoKmPorGalon,
-      v.tipoCombustible
-    )
-    const galonesRalenti = calcularCombustibleRalenti(v.tipo, mision.minutosRalentiEstimados || 0)
-    const galones = Number((galonesRodamiento + galonesRalenti).toFixed(2))
-    const costoVeh = Math.round(galones * obtenerPrecioGalon(v.tipoCombustible))
-
-    totalGalonesMision += galones
-    totalCostoMision += costoVeh
-    maxDesgaste = Math.max(maxDesgaste, desgasteLlantasPorc)
-
-    const nuevoKm = Math.round(v.kilometrajeActual + kmReales)
-    if (v.vehiculoId && !v.vehiculoId.startsWith('veh-demo')) {
-      const existe = await obtenerVehiculo(v.vehiculoId).catch(() => null)
-      if (existe) {
-        await actualizarKilometraje(v.vehiculoId, nuevoKm)
+    // Idempotencia estricta
+    if (mision.estado === 'completada' || mision.estado === 'inconclusa_repliegue') {
+      return {
+        mision,
+        tanqueosAutomaticos: [],
+        cronica: mision.cronicaHistoria ?? '',
       }
     }
 
-    const galonesCapacidad = v.capacidadTanqueGalones || 20
-    const porcConsumido = (galones / galonesCapacidad) * 100
-    const nuevoNivel = Math.max(1, Math.min(100, Math.round(v.nivelCombustiblePorc - porcConsumido)))
-    const nuevoDesgaste = Math.min(
-      100,
-      Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2))
+    const todosVehiculos = await listarVehiculosBears()
+    const vehiculosIds = (mision.vehiculosAsignados || []).map((x) => x.id)
+    const vehiculosParticipantes = todosVehiculos.filter(
+      (v) => vehiculosIds.includes(v.id) || vehiculosIds.includes(v.vehiculoId)
     )
+    const nombresTrip = (mision.tripulantesAsignados || []).map((t) => t.nombre)
 
-    // Siempre sumamos `galones` una sola vez aquí (sin duplicar en tanquearVehiculoCompleto)
-    await guardarExtraVehiculo(v.id, {
-      kilometrajeActual: nuevoKm,
-      nivelCombustiblePorc: nuevoNivel,
-      desgasteLlantasPorc: nuevoDesgaste,
-      totalGalonesConsumidos: Number(((v.totalGalonesConsumidos || 0) + galones).toFixed(2)),
+    // Evaluar desenlace con Gemini IA (o respaldo determinista realista)
+    let resultado: 'exito' | 'parcial' | 'fallida_dificultad' = resultadoManual || 'exito'
+    let factorDistanciaReal = 1.0
+    let cronica = ''
+    let resueltaPorIA = false
+
+    if (!resultadoManual) {
+      const resIA = await resolverMisionConIA(mision, vehiculosParticipantes, nombresTrip)
+      if (resIA) {
+        resultado = resIA.resultado
+        factorDistanciaReal = resIA.factorDistanciaReal
+        cronica = resIA.cronicaHistoria
+        resueltaPorIA = true
+      } else {
+        const resLocal = evaluarDesenlaceMisionLocal(mision, vehiculosParticipantes, nombresTrip)
+        resultado = resLocal.resultado
+        factorDistanciaReal = resLocal.factorDistanciaReal
+        cronica = resLocal.cronicaHistoria
+      }
+    } else {
+      const resLocal = evaluarDesenlaceMisionLocal(
+        mision,
+        vehiculosParticipantes,
+        nombresTrip,
+        resultadoManual
+      )
+      resultado = resultadoManual
+      factorDistanciaReal =
+        resultadoManual === 'fallida_dificultad'
+          ? 0.65
+          : resultadoManual === 'parcial'
+            ? 0.92
+            : 1.0
+      cronica = resLocal.cronicaHistoria
+    }
+
+    const kmReales = Math.max(
+      0,
+      Number((mision.distanciaKmIdaYVuelta * factorDistanciaReal).toFixed(1))
+    )
+    const tanqueosAuto: TanqueoRegistro[] = []
+    let totalGalonesMision = 0
+    let totalCostoMision = 0
+    let maxDesgaste = 0
+    const hoy = hoyISO()
+    const ahoraHora = new Date().toLocaleTimeString('es-CO', {
+      hour: '2-digit',
+      minute: '2-digit',
     })
 
-    if (nuevoNivel <= 15) {
-      const resTq = await tanquearVehiculoCompleto(v.id, 'reserva_automatica')
-      tanqueosAuto.push(resTq.tanqueo)
+    const registrarAutoTanqueoEnMemoria = (
+      v: VehiculoOperativo,
+      galRepuestos: number,
+      odometroKm: number
+    ): number => {
+      if (galRepuestos <= 0.05) return 0
+      migrarMesTarjetaSiCambio(estado)
+      const precioGalon = obtenerPrecioGalon(v.tipoCombustible)
+      const totalCOP = Math.round(galRepuestos * precioGalon)
+      const tq: TanqueoRegistro = {
+        id: `tq-${Date.now()}-${sufijoAleatorio()}`,
+        vehiculoId: v.id,
+        vehiculoPlaca: v.placa,
+        vehiculoNombre: `${v.marca} ${v.linea}`,
+        fecha: hoy,
+        hora: ahoraHora,
+        galones: galRepuestos,
+        tipoCombustible: v.tipoCombustible,
+        precioPorGalon: precioGalon,
+        totalCOP,
+        odometroKm,
+        motivo: 'reserva_automatica',
+      }
+      estado.tarjetaCombustible.saldoAcumuladoCOP += totalCOP
+      estado.tarjetaCombustible.totalGalonesMes = Number(
+        (estado.tarjetaCombustible.totalGalonesMes + galRepuestos).toFixed(2)
+      )
+      estado.tarjetaCombustible.tanqueos.unshift(tq)
+      estado.tarjetaCombustible.liquidadoEnCashmet =
+        saldoPendienteTarjeta(estado.tarjetaCombustible) <= 0
+      tanqueosAuto.push(tq)
+      return totalCOP
     }
-  }
 
-  mision.distanciaKmIdaYVuelta = kmReales
-  mision.estado = resultado === 'fallida_dificultad' ? 'inconclusa_repliegue' : 'completada'
-  mision.resultado = resultado
-  mision.cronicaHistoria = cronica
-  mision.resueltaPorIA = resueltaPorIA
-  mision.galonesConsumidosEstimados = Number(totalGalonesMision.toFixed(2))
-  mision.costoCombustibleEstimadoCOP = totalCostoMision
-  mision.desgasteLlantasIncrementoPorc = Number(maxDesgaste.toFixed(2))
-  mision.horaFin = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+    for (const v of vehiculosParticipantes) {
+      const { galones: galonesRodamiento, desgasteLlantasPorc } = calcularConsumoMision(
+        v.tipo,
+        kmReales,
+        mision.terreno,
+        v.consumoKmPorGalon,
+        v.tipoCombustible
+      )
+      const galonesRalenti = calcularCombustibleRalenti(
+        v.tipo,
+        mision.minutosRalentiEstimados || 0
+      )
+      const galones = Number((galonesRodamiento + galonesRalenti).toFixed(2))
+      const costoVeh = Math.round(galones * obtenerPrecioGalon(v.tipoCombustible))
 
-  await persistirOperaciones(estado)
+      totalGalonesMision += galones
+      totalCostoMision += costoVeh
+      maxDesgaste = Math.max(maxDesgaste, desgasteLlantasPorc)
 
-  return {
-    mision,
-    tanqueosAutomaticos: tanqueosAuto,
-    cronica,
+      const nuevoKm = Math.round(v.kilometrajeActual + kmReales)
+      if (v.vehiculoId && !v.vehiculoId.startsWith('veh-demo')) {
+        try {
+          const existe = await obtenerVehiculo(v.vehiculoId)
+          if (existe) {
+            await actualizarKilometraje(v.vehiculoId, nuevoKm)
+          }
+        } catch (err) {
+          console.warn(`No se pudo actualizar odómetro en CashMet para ${v.vehiculoId}:`, err)
+        }
+      }
+
+      const galonesCapacidad = v.capacidadTanqueGalones || CAPACIDAD_TANQUE_FALLBACK_GAL
+      const nivelInicialPorc = Math.max(0, Math.min(100, v.nivelCombustiblePorc ?? 85))
+      let galEnTanque = galonesCapacidad * (nivelInicialPorc / 100)
+      let restantePorConsumir = galones
+      let costoTanqueosVeh = 0
+      const galReserva = galonesCapacidad * (UMBRAL_RESERVA_COMBUSTIBLE_PORC / 100)
+
+      // Manejo de consumo > 1 tanque: auto-tanqueo en ruta cuantas veces sea necesario
+      let iteraciones = 0
+      while (restantePorConsumir > galEnTanque && iteraciones < 20) {
+        iteraciones++
+        const galDisponiblesTramo =
+          galEnTanque > galReserva ? galEnTanque - galReserva : galEnTanque
+        if (galDisponiblesTramo > 0) {
+          restantePorConsumir = Math.max(0, restantePorConsumir - galDisponiblesTramo)
+          galEnTanque = Math.max(0, galEnTanque - galDisponiblesTramo)
+        }
+        const galRepuestosRuta = Number(Math.max(0, galonesCapacidad - galEnTanque).toFixed(2))
+        costoTanqueosVeh += registrarAutoTanqueoEnMemoria(v, galRepuestosRuta, nuevoKm)
+        galEnTanque = galonesCapacidad
+      }
+
+      const galFinal = Math.max(0, galEnTanque - restantePorConsumir)
+      let nuevoNivel = Math.max(1, Math.min(100, Math.round((galFinal / galonesCapacidad) * 100)))
+
+      if (nuevoNivel <= UMBRAL_RESERVA_COMBUSTIBLE_PORC) {
+        const galRepuestosFinal = Number((galonesCapacidad * (1 - nuevoNivel / 100)).toFixed(2))
+        const copFinal = registrarAutoTanqueoEnMemoria(v, galRepuestosFinal, nuevoKm)
+        if (copFinal > 0) {
+          costoTanqueosVeh += copFinal
+          nuevoNivel = 100
+        }
+      }
+
+      const nuevoDesgaste = Math.min(
+        100,
+        Number((v.desgasteLlantasPorc + desgasteLlantasPorc).toFixed(2))
+      )
+
+      // Agrupar mutaciones de DOC_CONFIG en memoria (sin escribir por vehículo en cada iteración)
+      // Siempre sumamos `galones` una sola vez aquí (sin duplicar con los tanqueos)
+      estado.vehiculosExtra[v.id] = {
+        ...(estado.vehiculosExtra[v.id] || {}),
+        kilometrajeActual: nuevoKm,
+        nivelCombustiblePorc: nuevoNivel,
+        desgasteLlantasPorc: nuevoDesgaste,
+        totalGalonesConsumidos: Number(((v.totalGalonesConsumidos || 0) + galones).toFixed(2)),
+        totalCostoCombustibleCOP: (v.totalCostoCombustibleCOP || 0) + costoTanqueosVeh,
+      }
+    }
+
+    mision.distanciaKmIdaYVuelta = kmReales
+    mision.estado = resultado === 'fallida_dificultad' ? 'inconclusa_repliegue' : 'completada'
+    mision.resultado = resultado
+    mision.cronicaHistoria = cronica
+    mision.resueltaPorIA = resueltaPorIA
+    mision.galonesConsumidosEstimados = Number(totalGalonesMision.toFixed(2))
+    mision.costoCombustibleEstimadoCOP = totalCostoMision
+    mision.desgasteLlantasIncrementoPorc = Number(maxDesgaste.toFixed(2))
+    mision.horaFin = new Date().toLocaleTimeString('es-CO', {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+
+    const escrituras: Array<Promise<boolean>> = [persistirOperaciones(estado)]
+    if (vehiculosParticipantes.length > 0) {
+      escrituras.push(persistirConfig(estado))
+    }
+    if (tanqueosAuto.length > 0) {
+      escrituras.push(persistirCombustible(estado))
+    }
+    await Promise.all(escrituras)
+
+    return {
+      mision,
+      tanqueosAutomaticos: tanqueosAuto,
+      cronica,
+    }
+  } finally {
+    misionesEnCierre.delete(misionId)
   }
 }
 
@@ -1859,21 +2470,31 @@ export async function ejecutarRutaHabitual(
   vehiculoIdElegido?: string
 ): Promise<{ mision: MisionComunitaria }> {
   const vehiculos = await listarVehiculosBears()
+  const disponiblesEnBase = vehiculos.filter(
+    (v) => v.disponibleParaTrabajo && v.estado === 'disponible'
+  )
 
   const vehiculo =
-    vehiculos.find((v) => v.id === (vehiculoIdElegido || ruta.vehiculoIdDefault) && v.disponibleParaTrabajo) ||
-    (vehiculos.length > 0
+    disponiblesEnBase.find((v) => v.id === (vehiculoIdElegido || ruta.vehiculoIdDefault)) ||
+    (disponiblesEnBase.length > 0
       ? seleccionarVehiculosOptimosMision(
           { titulo: ruta.nombre, tipo: 'ruta_habitual', impactoSocial: ruta.descripcion },
-          vehiculos
+          disponiblesEnBase
         ).vehiculoElegido
       : undefined)
 
+  if (!vehiculo) {
+    throw new Error(
+      'No hay vehículos habilitados y disponibles en base para ejecutar esta ruta habitual.'
+    )
+  }
+
   const hoyStr = hoyISO()
   const conductor = obtenerConductorRuta(ruta.id, hoyStr, ruta.tipoHorario)
+  const idCumplimientoFinal = idCumplimiento || construirIdCumplimientoRuta(ruta, hoyStr)
 
   const misionRuta = await crearMisionOperativa({
-    id: `rut-mis-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    id: `rut-mis-${Date.now()}-${sufijoAleatorio()}`,
     titulo: ruta.nombre,
     tipo: 'ruta_habitual',
     prioridad: 'media',
@@ -1885,10 +2506,10 @@ export async function ejecutarRutaHabitual(
     distanciaKmIdaYVuelta: ruta.distanciaKm,
     duracionMinutos: ruta.duracionMinutos || 90,
     minutosRodamientoEstimados: ruta.minutosRodamiento || 55,
-    minutosRalentiEstimados: ruta.minutosRalenti || 35,
-    vehiculosAsignados: vehiculo
-      ? [{ id: vehiculo.id, nombre: `${vehiculo.marca} ${vehiculo.linea}`, placa: vehiculo.placa }]
-      : [],
+    minutosRalentiEstimados: ruta.minutosRalenti ?? 35,
+    vehiculosAsignados: [
+      { id: vehiculo.id, nombre: `${vehiculo.marca} ${vehiculo.linea}`, placa: vehiculo.placa },
+    ],
     tripulantesAsignados: [{ id: conductor.id, nombre: conductor.nombre }],
     galonesConsumidosEstimados: 0,
     costoCombustibleEstimadoCOP: 0,
@@ -1902,7 +2523,7 @@ export async function ejecutarRutaHabitual(
   // Guardar cumplimiento sin mutar el objeto recibido desde el estado React
   await guardarRutaHabitual({
     ...ruta,
-    ultimoCumplimientoFecha: idCumplimiento || hoyStr,
+    ultimoCumplimientoFecha: idCumplimientoFinal,
   })
 
   // La ruta habitual se cierra de inmediato generando su crónica y telemetría
@@ -1943,18 +2564,32 @@ async function ejecutarVerificacionRutasAutomaticas(): Promise<{
 
   for (const r of [...estado.rutasHabituales]) {
     if (!r.activa || !r.esAutomatica) continue
-    if (!r.diasSemana.includes(diaSemana)) continue
 
-    // Se autoejecuta cuando ya pasó la hora de salida + duración estimada
+    // Se autoejecuta cuando ya pasó la hora de salida + duración estimada (incluyendo cruce de medianoche)
     const horaCorte = horaSalidaADecimal(r.horaSalida, r.duracionMinutos || 75)
-    if (horaActualDecimal < horaCorte) continue
+    let fechaReferencia = hoy
 
-    const sufijo = r.tipoHorario || r.id
-    const idCumplimiento = `${hoy}-${sufijo}`
+    if (horaCorte >= 24) {
+      const corteDiaSiguiente = horaCorte - 24
+      if (horaActualDecimal < corteDiaSiguiente) continue
+      const ayerObj = new Date(fechaObj)
+      ayerObj.setDate(ayerObj.getDate() - 1)
+      if (!r.diasSemana.includes(ayerObj.getDay())) continue
+      fechaReferencia = isoLocal(ayerObj)
+    } else {
+      if (!r.diasSemana.includes(diaSemana)) continue
+      if (horaActualDecimal < horaCorte) continue
+    }
+
+    const idCumplimiento = construirIdCumplimientoRuta(r, fechaReferencia)
     if (r.ultimoCumplimientoFecha === idCumplimiento) continue
 
-    await ejecutarRutaHabitual(r, idCumplimiento)
-    ejecutadas.push(r.nombre)
+    try {
+      await ejecutarRutaHabitual(r, idCumplimiento)
+      ejecutadas.push(r.nombre)
+    } catch {
+      // Si no hay vehículo disponible en base en este instante, reintentará en el siguiente ciclo
+    }
   }
 
   return { rutasEjecutadas: ejecutadas }
@@ -1965,7 +2600,7 @@ async function ejecutarVerificacionRutasAutomaticas(): Promise<{
 // ---------------------------------------------------------------------------
 
 export function leerChatGema(): MensajeGema[] {
-  return obtenerCacheSincrono().chatMensajes || []
+  return [...(obtenerCacheSincrono().chatMensajes || [])]
 }
 
 export async function guardarChatGema(mensajes: MensajeGema[]): Promise<void> {

@@ -1,3 +1,5 @@
+import type { PuntoGeografico } from './geo'
+
 export type TipoCombustible = 'corriente' | 'diesel' | 'extra'
 
 export type EstadoVehiculoOperativo = 'disponible' | 'en_mision' | 'mantenimiento' | 'reserva'
@@ -111,7 +113,7 @@ export interface MisionComunitaria {
   prioridad: 'baja' | 'media' | 'alta' | 'critica_extrema'
   origen: string
   destino: string
-  departamento: 'Caldas' | 'Risaralda' | 'Tolima' | 'Antioquia' | 'Otro'
+  departamento: string
   prioridadGeografica: PrioridadGeografica
   terreno: TerrenoRuta
   distanciaKmIdaYVuelta: number
@@ -164,7 +166,7 @@ export interface RutaHabitual {
   vehiculoIdDefault?: string
   activa: boolean
   ultimoCumplimientoFecha?: string
-  coordenadasParadas?: Array<{ nombre: string; lat: number; lng: number }>
+  coordenadasParadas?: PuntoGeografico[]
 }
 
 export interface TanqueoRegistro {

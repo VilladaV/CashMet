@@ -20,8 +20,20 @@ export const PRECIOS_COMBUSTIBLE_BASE_COLOMBIA: PreciosCombustible = {
 
 let preciosEnCache: PreciosCombustible | null = null
 
+function sonPreciosValidos(precios?: PreciosCombustible | null): precios is PreciosCombustible {
+  if (!precios) return false
+  return (
+    Number.isFinite(precios.corrientePorGalon) &&
+    precios.corrientePorGalon > 0 &&
+    Number.isFinite(precios.dieselPorGalon) &&
+    precios.dieselPorGalon > 0 &&
+    Number.isFinite(precios.extraPorGalon) &&
+    precios.extraPorGalon > 0
+  )
+}
+
 export function establecerPreciosCombustibleCache(precios: PreciosCombustible | null): void {
-  preciosEnCache = precios ? { ...precios } : null
+  preciosEnCache = sonPreciosValidos(precios) ? { ...precios } : null
 }
 
 export function esPrecioDesactualizado(precios?: PreciosCombustible | null, ahora = Date.now()): boolean {
@@ -36,8 +48,8 @@ export function esPrecioDesactualizado(precios?: PreciosCombustible | null, ahor
  * Si aún no se han cargado desde Firestore, devuelve la referencia base sin simular que está auto-actualizada.
  */
 export function obtenerPreciosCombustibleActuales(): PreciosCombustible {
-  if (preciosEnCache && preciosEnCache.corrientePorGalon > 0) {
-    return preciosEnCache
+  if (sonPreciosValidos(preciosEnCache)) {
+    return { ...preciosEnCache }
   }
   return {
     ...PRECIOS_COMBUSTIBLE_BASE_COLOMBIA,
@@ -84,11 +96,16 @@ export function calcularConsumoMision(
 ): { galones: number; costoEstimadoCOP: number; desgasteLlantasPorc: number } {
   const km = Number.isFinite(distanciaKm) ? Math.max(0, distanciaKm) : 0
   const baseKmGalon =
-    rendimientoPersonalizadoKmGalon && rendimientoPersonalizadoKmGalon > 0
+    typeof rendimientoPersonalizadoKmGalon === 'number' &&
+    Number.isFinite(rendimientoPersonalizadoKmGalon) &&
+    rendimientoPersonalizadoKmGalon > 0
       ? rendimientoPersonalizadoKmGalon
       : RENDIMIENTO_BASE_KM_GALON[tipoVehiculo] || 22
   const factor = FACTOR_TERRENO_CONSUMO[terreno] || 1.25
-  const kmEfectivosPorGalon = Math.max(3, baseKmGalon / factor)
+  // Camiones pesados con rendimiento nominal real (>= 2 km/gal) en trocha extrema pueden bajar hasta 1.5 km/gal
+  const pisoEfectivo =
+    tipoVehiculo === 'camion' && terreno === 'trocha_extrema_barrizal' && baseKmGalon >= 2 ? 1.5 : 3
+  const kmEfectivosPorGalon = Math.max(pisoEfectivo, baseKmGalon / factor)
 
   const galones = km > 0 ? Number((km / kmEfectivosPorGalon).toFixed(2)) : 0
 

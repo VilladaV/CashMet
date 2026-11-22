@@ -1,4 +1,5 @@
 import { Fuel, RefreshCw, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { CAPACIDAD_TANQUE_FALLBACK_GAL, UMBRAL_RESERVA_COMBUSTIBLE_PORC } from './constants'
 import type { VehiculoOperativo } from './types'
 
 interface Props {
@@ -9,10 +10,26 @@ interface Props {
 
 export default function TanqueCombustible({ vehiculo, onTanquear, busy }: Props) {
   const nivel = Math.max(0, Math.min(100, Math.round(vehiculo.nivelCombustiblePorc ?? 80)))
-  const esReserva = nivel <= 15
+  const esReserva = nivel <= UMBRAL_RESERVA_COMBUSTIBLE_PORC
   const esBajo = nivel <= 35 && !esReserva
-  const capacidad = vehiculo.capacidadTanqueGalones || 20
+  const capacidad = vehiculo.capacidadTanqueGalones || CAPACIDAD_TANQUE_FALLBACK_GAL
   const galonesActuales = Number(((nivel / 100) * capacidad).toFixed(1))
+  const bloqueadoPorEstado =
+    vehiculo.estado === 'en_mision' ||
+    vehiculo.estado === 'mantenimiento' ||
+    !vehiculo.disponibleParaTrabajo
+  const deshabilitadoTanquear = Boolean(busy) || nivel >= 99 || bloqueadoPorEstado
+
+  const etiquetaBoton =
+    vehiculo.estado === 'en_mision'
+      ? 'En misión'
+      : vehiculo.estado === 'mantenimiento'
+        ? 'En mantenimiento'
+        : !vehiculo.disponibleParaTrabajo
+          ? 'Solo CashMet'
+          : nivel >= 99
+            ? 'Tanque lleno'
+            : 'Tanquear 100%'
 
   const colorNivel = esReserva
     ? 'from-red-500 via-rose-500 to-amber-500'
@@ -76,16 +93,16 @@ export default function TanqueCombustible({ vehiculo, onTanquear, busy }: Props)
 
       <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2 text-[11px]">
         <span className="text-mist-400">
-          Rendimiento en trocha: <b className="text-white">{vehiculo.consumoKmPorGalon} km/gal</b>
+          Rendimiento estimado: <b className="text-white">{vehiculo.consumoKmPorGalon} km/gal</b>
         </span>
         <button
           type="button"
-          disabled={busy || nivel >= 98 || vehiculo.estado === 'en_mision'}
+          disabled={deshabilitadoTanquear}
           onClick={() => onTanquear(vehiculo.id)}
           className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[11px] font-bold text-amber-200 transition hover:bg-amber-400/20 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <RefreshCw className={`h-3 w-3 ${busy ? 'animate-spin' : ''}`} />
-          <span>{vehiculo.estado === 'en_mision' ? 'En misión' : 'Tanquear 100%'}</span>
+          <span>{etiquetaBoton}</span>
         </button>
       </div>
     </div>

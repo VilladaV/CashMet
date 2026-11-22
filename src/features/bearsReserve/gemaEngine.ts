@@ -1,15 +1,106 @@
 import { hoyISO, isoLocal } from '@/lib/fechas'
-import { TTL_LLAMADA_COMUNITARIA_MS } from './gemaAI'
+import {
+  CAPACIDAD_TANQUE_FALLBACK_GAL,
+  TTL_LLAMADA_COMUNITARIA_MS,
+  UMBRAL_LLANTAS_CRITICO_PORC,
+  UMBRAL_RESERVA_COMBUSTIBLE_PORC,
+  galonesALitros,
+} from './constants'
+import { calcularCombustibleRalenti } from './geo'
+import { FACTOR_TERRENO_CONSUMO } from './preciosCombustible'
 import type {
   EmpleadoOperativo,
   EventoRadarLocal,
   MisionComunitaria,
   PreciosCombustible,
   RutaHabitual,
+  TerrenoRuta,
   TipoCombustible,
   TurnoSemanal,
   VehiculoOperativo,
 } from './types'
+
+export interface CapacidadesVehiculo {
+  esCamionPesado: boolean
+  tiene4x4: boolean
+  tienePasajeros: boolean
+  esMoto: boolean
+  esBusOPasajerosPesado: boolean
+}
+
+/**
+ * Clasificación táctica unificada de un vehículo (compartida entre flota, tripulación y evaluación).
+ */
+export function clasificarCapacidadesVehiculo(v: VehiculoOperativo): CapacidadesVehiculo {
+  const corpusBase = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''}`.toLowerCase()
+  const corpusV =
+    `${corpusBase} ${v.notasCashmet || ''} ${v.fichaInvestigadaNota || ''} ${v.capacidadTexto || ''}`.toLowerCase()
+
+  const esMoto =
+    v.tipo === 'moto' ||
+    /\bmoto(cicleta)?\b/.test(corpusBase) ||
+    (/\bbajaj\b/.test(v.marca.toLowerCase()) && /\bboxer\b/.test(v.linea.toLowerCase()))
+
+  const esBusOPasajerosPesado = /\b(bus|buseta|kavz|coaster)\b/.test(corpusV)
+
+  const esCamionPesado =
+    !esMoto &&
+    (v.tipo === 'camion' ||
+      /\b(quinta rueda|5ta rueda|tractomula|kodiak|volqueta|camion|cami[oó]n|kraz|kamaz|ural|zil|kenworth|freightliner|gazelle|gaz 3302|furg[oó]n)\b/.test(
+        corpusV
+      ))
+
+  const tiene4x4 =
+    !esMoto &&
+    /\b(4x4|6x6|4wd|awd|winche|trocha|land cruiser|hilux|prado|fortuner|jeep|willys|patrol|montero|ranger|l200|d-?max|unimog|defender|wrangler|niva|uaz|campero|pickup)\b/.test(
+      corpusV
+    )
+
+  const tienePasajeros =
+    !esMoto &&
+    (esBusOPasajerosPesado ||
+      /\b(van|pasajero|escolar|troop carrier|suv|camioneta|campero|sed[aá]n|autom[oó]vil|station wagon|monovolumen)\b/.test(
+        corpusV
+      ) ||
+      (v.tipo === 'carro' && !esCamionPesado))
+
+  return {
+    esCamionPesado,
+    tiene4x4,
+    tienePasajeros,
+    esMoto,
+    esBusOPasajerosPesado,
+  }
+}
+
+/**
+ * Calcula la autonomía real restante en km considerando capacidad real, nivel actual
+ * (tratando correctamente 0%), consumo por terreno (`FACTOR_TERRENO_CONSUMO`) y ralentí.
+ */
+export function calcularAutonomiaRealKm(
+  vehiculo: VehiculoOperativo,
+  terreno?: TerrenoRuta | string,
+  minutosRalenti = 0
+): number {
+  const capacidad =
+    Number.isFinite(vehiculo.capacidadTanqueGalones) && vehiculo.capacidadTanqueGalones > 0
+      ? vehiculo.capacidadTanqueGalones
+      : CAPACIDAD_TANQUE_FALLBACK_GAL
+  const nivelPorc = Math.max(
+    0,
+    Math.min(100, Number.isFinite(vehiculo.nivelCombustiblePorc) ? vehiculo.nivelCombustiblePorc : 50)
+  )
+  const galActuales = capacidad * (nivelPorc / 100)
+  const galRalenti = calcularCombustibleRalenti(vehiculo.tipo, minutosRalenti)
+  const galRodamiento = Math.max(0, galActuales - galRalenti)
+  const factorTerreno = FACTOR_TERRENO_CONSUMO[terreno as TerrenoRuta] ?? 1.25
+  const consumoBase =
+    Number.isFinite(vehiculo.consumoKmPorGalon) && vehiculo.consumoKmPorGalon > 0
+      ? vehiculo.consumoKmPorGalon
+      : 20
+  const rendimientoEfectivo = Math.max(1.5, consumoBase / factorTerreno)
+  return Number((galRodamiento * rendimientoEfectivo).toFixed(1))
+}
 
 // ---------------------------------------------------------------------------
 // TRIPULACIÓN POR ROL 👥 — Gema elige quién va a cada misión
@@ -111,6 +202,8 @@ export function empleadosEnTurnoAhora(
 /**
  * Gema arma la tripulación de una misión según lo que exige la situación:
  * - Siempre 1 conductor por vehículo (si es pesado, prefiere licencia C2/C3).
+ * - Excluye personal ya desplegado en otra misión `en_curso`.
+ * - Si hay menos personal en turno que vehículos del convoy, amplía el pool con personal activo disponible.
  * - Desvare → mecánico. Barrizal/volcamiento/derrumbe → operador de winche.
  * - Accidente/herido → primeros auxilios. Trasteo/ayudas → apoyo logístico.
  */
@@ -120,58 +213,101 @@ export function seleccionarTripulacionMision(
   empleados: EmpleadoOperativo[],
   turnos: TurnoSemanal[],
   fechaISO: string,
-  horaHHMM: string
+  horaHHMM: string,
+  misionesActivas?: MisionComunitaria[]
 ): { tripulacion: Array<{ id: string; nombre: string; rol: string }>; motivo: string } {
   const texto = `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''}`.toLowerCase()
   const incluye = (...ps: string[]) => ps.some((p) => texto.includes(p))
 
   const roles: Array<{ rol: RolMision; etiqueta: string }> = []
   for (const v of vehiculosElegidos) {
-    const corpusV = `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''}`.toLowerCase()
-    const pesado =
-      v.tipo === 'camion' ||
-      /camion|camión|tractomula|kodiak|volqueta|5ta rueda|quinta rueda|\bbus\b/.test(corpusV)
+    const cap = clasificarCapacidadesVehiculo(v)
+    const pesado = cap.esCamionPesado || cap.esBusOPasajerosPesado
     roles.push({
       rol: pesado ? 'conductor_pesado' : 'conductor',
       etiqueta: `Conductor ${v.marca} ${v.linea}`,
     })
   }
   if (roles.length === 0) roles.push({ rol: 'conductor', etiqueta: 'Conductor' })
-  if (incluye('desvar', 'varad', 'mecán', 'mecan', 'motor', 'llanta', 'pinch', 'batería', 'bateria'))
+  if (
+    incluye('desvar', 'varad', 'mecán', 'mecan', 'llanta', 'pinch', 'batería', 'bateria') ||
+    /\bmotor\b/.test(texto)
+  )
     roles.push({ rol: 'mecanico', etiqueta: 'Mecánico' })
-  if (incluye('barrizal', 'barro', 'atasc', 'atrapad', 'volc', 'derrumbe', 'remolc', 'winche', 'zanja'))
+  if (
+    incluye('barrizal', 'barro', 'atasc', 'atrapad', 'derrumbe', 'remolc', 'winche', 'zanja') ||
+    /\bvolcamiento\b|\bvolcad/.test(texto)
+  )
     roles.push({ rol: 'winche', etiqueta: 'Operador de winche' })
   if (incluye('herid', 'accidente', 'lesion', 'lesión', 'enferm', 'parto', 'mordedura', 'adulto mayor'))
     roles.push({ rol: 'auxilios', etiqueta: 'Primeros auxilios' })
   if (incluye('trasteo', 'mudanza', 'mercado', 'ayudas', 'víveres', 'viveres', 'carga', 'tejas', 'donaci'))
     roles.push({ rol: 'logistica', etiqueta: 'Apoyo de carga' })
 
-  // Pool: guardia activa en ese momento → fallback a empleados activos sin restricción horaria
-  let pool = empleadosEnTurnoAhora(turnos, empleados, fechaISO, horaHHMM)
-  let fuente = 'de guardia según el cuadrante'
-  if (pool.length === 0) {
-    // Convención JS: 0=Dom, 1=Lun, ..., 6=Sab (consistente con HorarioPersonalEmpleado)
-    const [y, m, d] = fechaISO.split('-').map(Number)
-    const diaSemana = new Date(y, m - 1, d, 12, 0, 0).getDay()
-    const minActual = horaAMinutos(horaHHMM)
-    pool = empleados.filter(
-      (e) =>
-        e.activo &&
-        !e.horariosNoDisponibles.some((h) => {
-          if (h.diaSemana !== diaSemana) return false
-          const hi = horaAMinutos(h.horaInicio)
-          const hf = horaAMinutos(h.horaFin, true)
-          return hi <= minActual && minActual < hf
-        })
-    )
+  // Excluir empleados ya desplegados en misiones en_curso
+  const idsEnMisionActiva = new Set<string>()
+  for (const ma of misionesActivas || []) {
+    if (ma.estado !== 'en_curso') continue
+    for (const t of ma.tripulantesAsignados || []) {
+      if (t.id && t.id !== 'coord-user') idsEnMisionActiva.add(t.id)
+    }
+  }
+
+  const [y, m, d] = fechaISO.split('-').map(Number)
+  const diaSemana = new Date(y, m - 1, d, 12, 0, 0).getDay()
+  const diaAyer = (diaSemana + 6) % 7
+  const minActual = horaAMinutos(horaHHMM)
+
+  const sinRestriccionHoraria = (e: EmpleadoOperativo): boolean =>
+    !(e.horariosNoDisponibles || []).some((h) => {
+      const hi = horaAMinutos(h.horaInicio)
+      const hf = horaAMinutos(h.horaFin, true)
+      if (hi <= hf) {
+        return h.diaSemana === diaSemana && hi <= minActual && minActual < hf
+      }
+      // Restricción nocturna que cruza medianoche (ej. 21:00 - 05:00)
+      if (h.diaSemana === diaSemana && minActual >= hi) return true
+      if (h.diaSemana === diaAyer && minActual < hf) return true
+      return false
+    })
+
+  // Pool: guardia activa libre → si no alcanza para todos los vehículos, ampliar con personal activo fuera de turno
+  const poolTurno = empleadosEnTurnoAhora(turnos, empleados, fechaISO, horaHHMM).filter(
+    (e) => !idsEnMisionActiva.has(e.id)
+  )
+  const idsPoolTurno = new Set(poolTurno.map((e) => e.id))
+  const poolFueraTurno = empleados.filter(
+    (e) =>
+      e.activo &&
+      !idsEnMisionActiva.has(e.id) &&
+      !idsPoolTurno.has(e.id) &&
+      sinRestriccionHoraria(e)
+  )
+
+  const conductoresRequeridos = Math.max(1, vehiculosElegidos.length)
+  let pool: EmpleadoOperativo[]
+  let fuente: string
+  if (poolTurno.length >= conductoresRequeridos) {
+    pool = poolTurno
+    fuente = 'de guardia según el cuadrante'
+  } else if (poolTurno.length > 0 && poolFueraTurno.length > 0) {
+    pool = [...poolTurno, ...poolFueraTurno]
+    fuente = 'de guardia + respaldo de personal activo disponible'
+  } else if (poolTurno.length > 0) {
+    pool = poolTurno
+    fuente = 'de guardia según el cuadrante'
+  } else {
+    pool = poolFueraTurno
     fuente = 'disponibles (sin guardia específica en esa hora)'
   }
 
   const usados = new Set<string>()
   const tripulacion: Array<{ id: string; nombre: string; rol: string }> = []
   const faltantes: string[] = []
+  let coordUsado = false
 
   for (const r of roles) {
+    const esRolConductor = r.rol === 'conductor' || r.rol === 'conductor_pesado'
     const candidatos = pool
       .filter((e) => !usados.has(e.id))
       .map((e) => ({
@@ -179,32 +315,34 @@ export function seleccionarTripulacionMision(
         score:
           afinidadRol(e, r.rol) * 10 +
           (r.rol === 'conductor_pesado' ? afinidadRol(e, 'conductor') * 3 : 0),
+        enTurno: idsPoolTurno.has(e.id) ? 1 : 0,
       }))
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => {
+        if (b.enTurno !== a.enTurno) return b.enTurno - a.enTurno
+        return b.score - a.score
+      })
 
     const elegido =
-      candidatos.find((c) => c.score > 0) ||
-      (r.rol === 'conductor' || r.rol === 'conductor_pesado' ? candidatos[0] : undefined)
+      candidatos.find((c) => c.score > 0) || (esRolConductor ? candidatos[0] : undefined)
 
     if (elegido) {
       usados.add(elegido.e.id)
       tripulacion.push({ id: elegido.e.id, nombre: elegido.e.nombreCompleto, rol: r.etiqueta })
+    } else if (esRolConductor && !coordUsado) {
+      coordUsado = true
+      tripulacion.push({
+        id: 'coord-user',
+        nombre: 'Tú (Coordinador General)',
+        rol: `${r.etiqueta} (respaldo)`,
+      })
     } else {
       faltantes.push(r.etiqueta)
     }
   }
 
-  if (!tripulacion.some((t) => t.rol.startsWith('Conductor'))) {
-    tripulacion.unshift({
-      id: 'coord-user',
-      nombre: 'Tú (Coordinador General)',
-      rol: 'Conductor (respaldo)',
-    })
-  }
-
   let motivo = `Tripulación de ${tripulacion.length}: ${tripulacion.map((t) => `${t.nombre} (${t.rol})`).join(', ')}. Personal ${fuente}.`
   if (faltantes.length > 0) {
-    motivo += ` Sin personal en turno para: ${faltantes.join(', ')} — salen sin ese apoyo.`
+    motivo += ` Sin personal libre para: ${faltantes.join(', ')} — requiere ajustar tamaño de convoy o respaldo.`
   }
   return { tripulacion, motivo }
 }
@@ -249,7 +387,14 @@ export function conductorDeRutaEnCuadrante(
     }
   }
 
-  return null
+  // 3. Soporte para rutas con `tipoHorario: 'general'` (o sin franja específica)
+  const conductorGeneral = turnosDia.find(
+    (x) => x.id.includes('-cond') || x.rolGuardia.toLowerCase().includes('conduc')
+  )
+  if (conductorGeneral) {
+    return { id: conductorGeneral.empleadoId, nombre: conductorGeneral.empleadoNombre }
+  }
+  return { id: turnosDia[0].empleadoId, nombre: turnosDia[0].empleadoNombre }
 }
 
 /**
@@ -280,60 +425,75 @@ export function investigarFichaVehiculoIA(
   const cap = (capacidadTexto || '').toLowerCase().trim()
 
   const corpus = `${m} ${l} ${t} ${n} ${c} ${cap}`
+  const corpusIdentidad = `${t} ${m} ${l} ${c}`
 
-  // 0. Capacidad explícita declarada en notas de CashMet
-  const matchGal = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:gal|galones)\b/)
-  const matchLitros = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:\.\d+)?)\s*(?:l|litros|lt)\b/)
+  // 0. Capacidad explícita declarada en notas de CashMet (acepta punto o coma decimal)
+  const matchGal = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:[.,]\d+)?)\s*(?:gal|galones)\b/)
+  const matchLitros = corpus.match(/tanque(?:\s+de)?\s+(\d+(?:[.,]\d+)?)\s*(?:l|litros|lt)\b/)
 
   const detectarCombustibleEnNotas = (): TipoCombustible | null => {
     if (/\b(diesel|diésel|acpm)\b/.test(n)) return 'diesel'
-    if (/\b(extra|premium|98\s*oct)\b/.test(n)) return 'extra'
+    if (/\b((?:gasolina|combustible)\s+extra|extra\s+(?:98|oct|gasolina)|premium|98\s*oct)\b/.test(n)) {
+      return 'extra'
+    }
     if (/\b(corriente|gasolina)\b/.test(n)) return 'corriente'
     return null
   }
   const combNotas = detectarCombustibleEnNotas()
 
-  if (matchGal && Number(matchGal[1]) >= 2 && Number(matchGal[1]) <= 600) {
-    const gal = Number(matchGal[1])
-    const lit = Number((gal * 3.78541).toFixed(1))
-    const esDiesel =
-      combNotas === 'diesel' ||
-      (!combNotas &&
-        (t === 'camion' ||
-          /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
-    const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
-    return {
-      capacidadTanqueGalones: gal,
-      capacidadTanqueLitros: lit,
-      consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
-      tipoCombustible: tipoComb,
-      fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${gal} gal (${lit} L). Combustible: ${tipoComb.toUpperCase()}.`,
+  const derivarRendimientoPorTipo = (gal: number): number => {
+    if (t === 'moto' || /\bmoto(cicleta)?\b/.test(corpusIdentidad)) return gal >= 4.5 ? 65 : 105
+    if (t === 'camion' || gal > 50) return gal > 100 ? 6.5 : gal > 50 ? 9.5 : 16
+    return gal >= 20 ? 24 : 32
+  }
+
+  if (matchGal) {
+    const gal = Number(matchGal[1].replace(',', '.'))
+    if (Number.isFinite(gal) && gal >= 2 && gal <= 600) {
+      const lit = galonesALitros(gal)
+      const esDiesel =
+        combNotas === 'diesel' ||
+        (!combNotas &&
+          (t === 'camion' ||
+            /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
+      const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
+      return {
+        capacidadTanqueGalones: gal,
+        capacidadTanqueLitros: lit,
+        consumoKmPorGalon: derivarRendimientoPorTipo(gal),
+        tipoCombustible: tipoComb,
+        fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${gal} gal (${lit} L). Combustible: ${tipoComb.toUpperCase()}.`,
+      }
     }
-  } else if (matchLitros && Number(matchLitros[1]) >= 8 && Number(matchLitros[1]) <= 2200) {
-    const lit = Number(matchLitros[1])
-    const gal = Number((lit / 3.78541).toFixed(1))
-    const esDiesel =
-      combNotas === 'diesel' ||
-      (!combNotas &&
-        (t === 'camion' ||
-          /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
-    const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
-    return {
-      capacidadTanqueGalones: gal,
-      capacidadTanqueLitros: lit,
-      consumoKmPorGalon: gal > 100 ? 6.5 : gal > 50 ? 9.5 : 22,
-      tipoCombustible: tipoComb,
-      fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${lit} L (${gal} gal). Combustible: ${tipoComb.toUpperCase()}.`,
+  }
+  if (matchLitros) {
+    const lit = Number(matchLitros[1].replace(',', '.'))
+    if (Number.isFinite(lit) && lit >= 8 && lit <= 2200) {
+      const gal = Number((lit / 3.78541).toFixed(1))
+      const esDiesel =
+        combNotas === 'diesel' ||
+        (!combNotas &&
+          (t === 'camion' ||
+            /\b(diesel|acpm|camion|camión|kraz|kamaz|gaz|kenworth|scania|volvo|isuzu|hino)\b/.test(corpus)))
+      const tipoComb: TipoCombustible = combNotas ?? (esDiesel ? 'diesel' : 'corriente')
+      return {
+        capacidadTanqueGalones: gal,
+        capacidadTanqueLitros: lit,
+        consumoKmPorGalon: derivarRendimientoPorTipo(gal),
+        tipoCombustible: tipoComb,
+        fichaInvestigadaNota: `Catálogo técnico (notas CashMet): Tanque ${lit} L (${gal} gal). Combustible: ${tipoComb.toUpperCase()}.`,
+      }
     }
   }
 
-  // 1. Motocicletas
+  // 1. Motocicletas (evalúa \bmoto\b solo en tipo/marca/línea/carrocería, NO en notas; acota Boxer a Bajaj/moto)
   if (
     t === 'moto' ||
-    /\bmoto(cicleta)?\b/.test(corpus) ||
-    /\b(xtz|dr\s*\d+|pulsar|boxer|xr\s*\d+|v-?strom|akt|nkd|fz|mt-?0|cb\s*\d+)\b/.test(l)
+    /\bmoto(cicleta)?\b/.test(corpusIdentidad) ||
+    ((/\bbajaj\b/.test(m) || t === 'moto') && /\bboxer\b/.test(l)) ||
+    /\b(xtz|dr\s*\d+|pulsar|xr\s*\d+|v-?strom|akt|nkd|fz|mt-?0|cb\s*\d+)\b/.test(l)
   ) {
-    const esAltoCilindraje = /\b(600|650|700|800|900|1000|1200|1250)\b/.test(corpus)
+    const esAltoCilindraje = /\b(600|650|700|800|900|1000|1200|1250)\b/.test(corpusIdentidad)
     const gal = esAltoCilindraje ? 4.8 : 3.2
     const lit = Number((gal * 3.78541).toFixed(1))
     return {
@@ -746,8 +906,8 @@ export function investigarFichaVehiculoIA(
     }
   }
 
-  // 23. Vans y Transporte Colectivo
-  if (/\b(sprinter|master|transit|urvan|hiace)\b/.test(l)) {
+  // 23. Vans y Transporte Colectivo (incluye Peugeot Boxer / Fiat Ducato / Citroën Jumper)
+  if (/\b(sprinter|master|transit|urvan|hiace|boxer|ducato|jumper)\b/.test(l)) {
     const esSprinter = /\bsprinter\b/.test(l)
     const gal = esSprinter ? 19.8 : 21.1
     const lit = esSprinter ? 75.0 : 80.0
@@ -816,8 +976,9 @@ export function investigarFichaVehiculoIA(
 
   const galonesFinal = esPesado ? 87.0 : esCamionMediano ? 36.0 : esPickupOCampero ? 21.0 : 13.2
   const litrosFinal = Number((galonesFinal * 3.78541).toFixed(1))
+  const mencionaDiesel = /\b(diesel|diésel|acpm|turbodiesel|tdi)\b/.test(corpus)
   const tipoComb: TipoCombustible =
-    combNotas ?? (esPesado || esCamionMediano || esPickupOCampero ? 'diesel' : 'corriente')
+    combNotas ?? (esPesado || esCamionMediano || mencionaDiesel ? 'diesel' : 'corriente')
   const kmGalon = esPesado ? 8.5 : esCamionMediano ? 18 : esPickupOCampero ? 28 : 36
 
   return {
@@ -854,22 +1015,21 @@ export function seleccionarVehiculosOptimosMision(
   const habilitados = vehiculosDisponibles.filter(
     (v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento'
   )
-  const aptosLibres = habilitados.filter(
-    (v) => v.estado !== 'en_mision' && (v.nivelCombustiblePorc ?? 80) > 15
+  // Bloquear estrictamente el despacho simultáneo de vehículos que ya están `en_mision`
+  const libres = habilitados.filter((v) => v.estado !== 'en_mision')
+  const aptosLibres = libres.filter(
+    (v) => (v.nivelCombustiblePorc ?? 80) > UMBRAL_RESERVA_COMBUSTIBLE_PORC
   )
-  const libresConReserva = habilitados.filter((v) => v.estado !== 'en_mision')
-  const pool =
-    aptosLibres.length > 0
-      ? aptosLibres
-      : libresConReserva.length > 0
-        ? libresConReserva
-        : habilitados
+  const pool = aptosLibres.length > 0 ? aptosLibres : libres
 
   if (pool.length === 0) {
+    const todosEnMision = habilitados.length > 0 && libres.length === 0
     return {
       vehiculoElegido: undefined,
       vehiculosElegidos: [],
-      motivoGema: 'No hay vehículos habilitados disponibles en Bear\'s Reserve.',
+      motivoGema: todosEnMision
+        ? 'Toda la flota habilitada de Bear\'s Reserve se encuentra actualmente en misión. Espera a que retorne una unidad o programa la misión.'
+        : 'No hay vehículos habilitados disponibles en Bear\'s Reserve.',
       candidatosSecundarios: [],
     }
   }
@@ -883,7 +1043,7 @@ export function seleccionarVehiculosOptimosMision(
     )
 
   const requiere4x4ORescate =
-    /barrizal|lodo|atasc|atollam|volcamiento|suspendido|winche|remolc|derrumbe|deslizamiento|[aá]rbol|extrema|varad|inundaci|creciente|quebrada/.test(
+    /barrizal|lodo|atasc|atollam|\bvolcamiento\b|suspendido|winche|remolc|derrumbe|deslizamiento|[aá]rbol|extrema|varad|inundaci|creciente|quebrada/.test(
       textoMision
     )
 
@@ -892,11 +1052,12 @@ export function seleccionarVehiculosOptimosMision(
       textoMision
     )
 
+  const limiteConvoy = Math.min(3, Math.max(1, maxVehiculos))
   const ameritaConvoy =
-    maxVehiculos > 1 &&
+    limiteConvoy > 1 &&
     pool.length >= 2 &&
     (Boolean(mision.esEmergenciaGrave) ||
-      /volcamiento|tractomula|derrumbe|inundaci|damnificad|alerta roja|evacuaci|avalancha|bloquea|bus/.test(
+      /\bvolcamiento\b|tractomula|derrumbe|inundaci|damnificad|alerta roja|evacuaci|avalancha|bloquea|\bbus\b/.test(
         textoMision
       ))
 
@@ -906,32 +1067,18 @@ export function seleccionarVehiculosOptimosMision(
     let score = 0
     const corpusV =
       `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.fichaInvestigadaNota || ''} ${v.capacidadTexto || ''}`.toLowerCase()
-
-    const esCamionPesado =
-      v.tipo === 'camion' ||
-      /\b(quinta rueda|5ta rueda|tractomula|kodiak|volqueta|camion|cami[oó]n|kraz|kamaz|ural|zil|kenworth|freightliner|gazelle|gaz 3302|furg[oó]n)\b/.test(
-        corpusV
-      )
-
-    const tiene4x4 =
-      /\b(4x4|6x6|4wd|awd|winche|trocha|land cruiser|hilux|prado|fortuner|jeep|willys|patrol|montero|ranger|l200|d-?max|unimog|defender|wrangler|niva|uaz|campero|pickup)\b/.test(
-        corpusV
-      )
-
-    const tienePasajeros =
-      /\b(bus|buseta|van|pasajero|escolar|troop carrier|kavz|suv|camioneta|campero|sed[aá]n|autom[oó]vil|station wagon|monovolumen)\b/.test(
-        corpusV
-      ) || (v.tipo === 'carro' && !esCamionPesado)
+    const { esCamionPesado, tiene4x4, tienePasajeros, esMoto, esBusOPasajerosPesado } =
+      clasificarCapacidadesVehiculo(v)
 
     if (esTrasladoPersonasOMedico) {
       if (tienePasajeros) score += 55
-      if (esCamionPesado && !/\b(bus|buseta|kavz)\b/.test(corpusV)) score -= 35
-      if (v.tipo === 'moto') score -= 45
+      if (esCamionPesado && !esBusOPasajerosPesado) score -= 35
+      if (esMoto) score -= 45
     }
     if (requiere4x4ORescate) {
       if (tiene4x4) score += 60
       if (esCamionPesado) score += 25
-      if (v.tipo === 'moto') score -= 30
+      if (esMoto) score -= 30
     }
     if (requiereCargaPesada) {
       if (esCamionPesado) score += 45
@@ -940,37 +1087,50 @@ export function seleccionarVehiculosOptimosMision(
       }
     }
 
-    if (v.estado === 'en_mision') score -= 45
-    if ((v.nivelCombustiblePorc ?? 80) <= 15) score -= 25
-    if ((v.desgasteLlantasPorc ?? 0) >= 80) score -= 15
+    const nivelComb = v.nivelCombustiblePorc ?? 50
+    if (nivelComb <= UMBRAL_RESERVA_COMBUSTIBLE_PORC) score -= 25
+    if ((v.desgasteLlantasPorc ?? 0) >= UMBRAL_LLANTAS_CRITICO_PORC) score -= 15
 
-    // Bono de autonomía si hay distancia conocida
+    // Autonomía real considerando terreno y nivel real (sin `0 || 50`)
     if (kmObjetivo > 0) {
-      const autonomiaKm =
-        (v.capacidadTanqueGalones || 18) *
-        ((v.nivelCombustiblePorc ?? 80) / 100) *
-        (v.consumoKmPorGalon || 20)
+      const autonomiaKm = calcularAutonomiaRealKm(v, mision.terreno, 0)
       if (autonomiaKm >= kmObjetivo) score += 12
+      else if (autonomiaKm < kmObjetivo * 0.5) score -= 30
+      else score -= 18
     }
 
-    score += (v.nivelCombustiblePorc || 50) * 0.1
-    return { vehiculo: v, score, tiene4x4, tienePasajeros, esCamionPesado }
+    score += nivelComb * 0.1
+    return { vehiculo: v, score, tiene4x4, tienePasajeros, esCamionPesado, esMoto }
   })
 
   puntuados.sort((a, b) => b.score - a.score)
   const principal = puntuados[0]
   const elegidos: VehiculoOperativo[] = [principal.vehiculo]
 
-  // Si la emergencia amerita convoy, añadir un 2do vehículo complementario (ej. camión + 4x4/pasajeros)
+  // Si la emergencia amerita convoy, añadir vehículos complementarios hasta `limiteConvoy` (máx 3),
+  // excluyendo motos y unidades en reserva de combustible del complemento
   if (ameritaConvoy && puntuados.length >= 2) {
-    const complementario =
-      puntuados.slice(1).find(
+    const elegiblesComplemento = puntuados
+      .slice(1)
+      .filter(
         (p) =>
+          !p.esMoto &&
           p.vehiculo.estado !== 'en_mision' &&
-          (principal.esCamionPesado ? p.tiene4x4 || p.tienePasajeros : p.esCamionPesado || p.tiene4x4)
-      ) || puntuados.slice(1).find((p) => p.vehiculo.estado !== 'en_mision')
+          (p.vehiculo.nivelCombustiblePorc ?? 80) > UMBRAL_RESERVA_COMBUSTIBLE_PORC
+      )
 
-    if (complementario) {
+    while (elegidos.length < limiteConvoy) {
+      const yaElegidos = new Set(elegidos.map((v) => v.id))
+      const restantes = elegiblesComplemento.filter((p) => !yaElegidos.has(p.vehiculo.id))
+      if (restantes.length === 0) break
+
+      const complementario =
+        restantes.find((p) =>
+          principal.esCamionPesado
+            ? p.tiene4x4 || p.tienePasajeros
+            : p.esCamionPesado || p.tiene4x4
+        ) || restantes[0]
+
       elegidos.push(complementario.vehiculo)
     }
   }
@@ -1054,19 +1214,27 @@ const TEMAS_COMUNITARIOS: Array<{ clave: string; regex: RegExp }> = [
   { clave: 'cafetero', regex: /\bcafe|cafeter|cosecha|platano/ },
   { clave: 'desvare', regex: /\bdesvar|embrague|averia|mecanica|bateria|cardan/ },
   { clave: 'agua', regex: /\bacueduct|inundac|quebrada|creciente|vado/ },
+  { clave: 'salud', regex: /\b(salud|medic|hospital|cita|paciente|enferm|herid|adulto mayor|parto)/ },
 ]
 
-export function detectarTemaEvento(ev: Pick<EventoRadarLocal, 'titulo' | 'resumen'>): string | null {
+export function detectarTemasEvento(ev: Pick<EventoRadarLocal, 'titulo' | 'resumen'>): Set<string> {
   const txt = normalizarTextoSimple(`${ev.titulo} ${ev.resumen || ''}`)
+  const temas = new Set<string>()
   for (const t of TEMAS_COMUNITARIOS) {
-    if (t.regex.test(txt)) return t.clave
+    if (t.regex.test(txt)) temas.add(t.clave)
   }
-  return null
+  return temas
+}
+
+export function detectarTemaEvento(ev: Pick<EventoRadarLocal, 'titulo' | 'resumen'>): string | null {
+  const temas = detectarTemasEvento(ev)
+  const primero = temas.values().next()
+  return primero.done ? null : primero.value
 }
 
 export function extraerClaveVereda(lugar: string): string {
   const norm = normalizarTextoSimple(lugar)
-    .replace(/vereda|sector|municipio de|caldas|manizales|via|antigua/g, ' ')
+    .replace(/\b(vereda|sector|municipio de|caldas|manizales|via|antigua)\b/g, ' ')
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -1112,7 +1280,7 @@ export function esEventoRedundante(
   const tituloNorm = normalizarTextoSimple(candidato.titulo)
   const urlCand = String(candidato.urlFuente || '').trim()
   const veredaCand = extraerClaveVereda(candidato.lugar)
-  const temaCand = detectarTemaEvento(candidato)
+  const temasCand = detectarTemasEvento(candidato)
 
   for (const ex of existentes) {
     if (normalizarTextoSimple(ex.titulo) === tituloNorm) return true
@@ -1133,13 +1301,18 @@ export function esEventoRedundante(
       if (
         veredaCand &&
         veredaEx &&
-        (veredaCand === veredaEx || veredaCand.includes(veredaEx) || veredaEx.includes(veredaCand))
+        (veredaCand === veredaEx ||
+          (veredaCand.length >= 4 &&
+            veredaEx.length >= 4 &&
+            (veredaCand.includes(veredaEx) || veredaEx.includes(veredaCand))))
       ) {
         return true
       }
-      const temaEx = detectarTemaEvento(ex)
-      if (temaCand && temaEx && temaCand === temaEx) {
-        return true
+      if (temasCand.size > 0) {
+        const temasEx = detectarTemasEvento(ex)
+        for (const t of temasCand) {
+          if (temasEx.has(t)) return true
+        }
       }
     }
   }
@@ -1150,8 +1323,11 @@ export function esEventoRedundante(
  * Elimina duplicados dentro de una lista de eventos manteniendo el más reciente.
  */
 export function deduplicarEventosRadar(eventos: EventoRadarLocal[]): EventoRadarLocal[] {
+  const ordenados = [...(eventos || [])].sort(
+    (a, b) => (Number(b?.creadoEn) || 0) - (Number(a?.creadoEn) || 0)
+  )
   const unicos: EventoRadarLocal[] = []
-  for (const ev of eventos) {
+  for (const ev of ordenados) {
     if (!ev || !ev.id) continue
     if (esEventoRedundante(ev, unicos)) continue
     unicos.push(ev)
@@ -1169,7 +1345,7 @@ export function filtrarEventosRadarVigentes(
 ): EventoRadarLocal[] {
   return (eventos || []).filter((e) => {
     if (!e || !e.id) return false
-    if (e.id === 'rad-sim-6' || String(e.titulo || '').toLowerCase().includes('standby')) return false
+    if (e.id === 'rad-sim-6') return false
     if (typeof e.expiraEn === 'number' && Number.isFinite(e.expiraEn)) {
       if (e.expiraEn <= ahora) return false
     }
@@ -1295,8 +1471,19 @@ const POOL_LLAMADAS_COMUNITARIAS_RESPALDO: Array<
   },
 ]
 
+function barajarFisherYates<T>(lista: T[]): T[] {
+  const arr = [...lista]
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = arr[i]
+    arr[i] = arr[j]
+    arr[j] = tmp
+  }
+  return arr
+}
+
 /**
- * Respaldo local (sin internet/Gemini) para generar llamadas comunitarias frescas con caducidad de ~28h.
+ * Respaldo local (sin internet/Gemini) para generar llamadas comunitarias frescas con caducidad de ~24h.
  * Evita repetir veredas y temáticas que ya están activas en el radar.
  * NUNCA inventa `esNoticiaWebReal: true`.
  */
@@ -1309,13 +1496,14 @@ export function generarLlamadasComunitariasRespaldo(
   const elegidos: EventoRadarLocal[] = []
   const acumulados: EventoRadarLocal[] = [...eventosActuales]
 
-  const mezcla = [...POOL_LLAMADAS_COMUNITARIAS_RESPALDO].sort(() => Math.random() - 0.5)
+  const mezcla = barajarFisherYates(POOL_LLAMADAS_COMUNITARIAS_RESPALDO)
   for (const item of mezcla) {
     if (elegidos.length >= cantidad) break
     if (esEventoRedundante(item, acumulados)) continue
+    const sufijo = Math.random().toString(36).slice(2, 6)
     const nuevo: EventoRadarLocal = {
       ...item,
-      id: `rad-com-${ahora}-${elegidos.length}`,
+      id: `rad-com-${ahora}-${elegidos.length}-${sufijo}`,
       fecha: hoy,
       creadoEn: ahora,
       expiraEn: ahora + TTL_LLAMADA_COMUNITARIA_MS,
@@ -1327,12 +1515,6 @@ export function generarLlamadasComunitariasRespaldo(
 
   return elegidos
 }
-
-/**
- * Compatibilidad: devuelve llamadas comunitarias frescas (sin noticias web falsas).
- */
-export const EVENTOS_RADAR_PREDETERMINADOS: EventoRadarLocal[] =
-  generarLlamadasComunitariasRespaldo([], 3)
 
 export function escanearNuevosEventosRadarIA(eventosActuales: EventoRadarLocal[]): {
   nuevosEventos: EventoRadarLocal[]
@@ -1354,19 +1536,51 @@ export function escanearNuevosEventosRadarIA(eventosActuales: EventoRadarLocal[]
 export function evaluarDesenlaceMisionLocal(
   mision: MisionComunitaria,
   vehiculosParticipantes: VehiculoOperativo[],
-  tripulantesNombres: string[]
+  tripulantesNombres: string[],
+  resultadoForzado?: 'exito' | 'parcial' | 'fallida_dificultad'
 ): {
   resultado: 'exito' | 'parcial' | 'fallida_dificultad'
   factorDistanciaReal: number
   cronicaHistoria: string
 } {
+  const nombresVehs = vehiculosParticipantes.map((v) => `${v.marca} ${v.linea}`)
+
+  if (resultadoForzado) {
+    const factorDistanciaReal =
+      resultadoForzado === 'fallida_dificultad'
+        ? 0.65
+        : resultadoForzado === 'parcial'
+          ? 0.92
+          : 1.0
+    const kmReales = Math.max(
+      0,
+      Number((mision.distanciaKmIdaYVuelta * factorDistanciaReal).toFixed(1))
+    )
+    return {
+      resultado: resultadoForzado,
+      factorDistanciaReal,
+      cronicaHistoria: generarCronicaMisionNarrativa(
+        mision,
+        nombresVehs,
+        tripulantesNombres,
+        resultadoForzado,
+        kmReales
+      ),
+    }
+  }
+
   // Rutas habituales (escolares / mercado) casi siempre concluyen con éxito
   if (mision.tipo === 'ruta_habitual') {
-    const nombresVehs = vehiculosParticipantes.map((v) => `${v.marca} ${v.linea}`)
     return {
       resultado: 'exito',
       factorDistanciaReal: 1.0,
-      cronicaHistoria: generarCronicaMisionNarrativa(mision, nombresVehs, tripulantesNombres, 'exito'),
+      cronicaHistoria: generarCronicaMisionNarrativa(
+        mision,
+        nombresVehs,
+        tripulantesNombres,
+        'exito',
+        mision.distanciaKmIdaYVuelta
+      ),
     }
   }
 
@@ -1377,13 +1591,15 @@ export function evaluarDesenlaceMisionLocal(
   if (mision.prioridad === 'critica_extrema') riesgo += 0.12
 
   const tieneEquipoAdecuado = vehiculosParticipantes.some((v) => {
-    const corpus = `${v.marca} ${v.linea} ${v.tipo} ${v.notasCashmet || ''}`.toLowerCase()
-    return v.tipo === 'camion' || /4x4|6x6|winche|trocha|land cruiser|hilux|unimog/.test(corpus)
+    const cap = clasificarCapacidadesVehiculo(v)
+    return cap.esCamionPesado || cap.tiene4x4
   })
   if (tieneEquipoAdecuado) riesgo -= 0.16
   else if (mision.terreno === 'trocha_extrema_barrizal') riesgo += 0.22
 
-  const llantasCriticas = vehiculosParticipantes.some((v) => v.desgasteLlantasPorc >= 75)
+  const llantasCriticas = vehiculosParticipantes.some(
+    (v) => (v.desgasteLlantasPorc ?? 0) >= UMBRAL_LLANTAS_CRITICO_PORC
+  )
   if (llantasCriticas) riesgo += 0.14
 
   const r = Math.random()
@@ -1401,11 +1617,20 @@ export function evaluarDesenlaceMisionLocal(
     factorDistanciaReal = 1.0
   }
 
-  const nombresVehs = vehiculosParticipantes.map((v) => `${v.marca} ${v.linea}`)
+  const kmReales = Math.max(
+    0,
+    Number((mision.distanciaKmIdaYVuelta * factorDistanciaReal).toFixed(1))
+  )
   return {
     resultado,
     factorDistanciaReal,
-    cronicaHistoria: generarCronicaMisionNarrativa(mision, nombresVehs, tripulantesNombres, resultado),
+    cronicaHistoria: generarCronicaMisionNarrativa(
+      mision,
+      nombresVehs,
+      tripulantesNombres,
+      resultado,
+      kmReales
+    ),
   }
 }
 
@@ -1413,39 +1638,58 @@ export function generarCronicaMisionNarrativa(
   mision: MisionComunitaria,
   vehiculosNombres: string[],
   tripulantesNombres: string[],
-  resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito'
+  resultado: 'exito' | 'parcial' | 'fallida_dificultad' = 'exito',
+  kmReales?: number
 ): string {
   const duracionTexto =
     mision.duracionMinutos < 60
       ? `${mision.duracionMinutos} minutos`
       : `${(mision.duracionMinutos / 60).toFixed(1)} horas`
 
+  const distanciaMostrar =
+    typeof kmReales === 'number' && Number.isFinite(kmReales)
+      ? kmReales
+      : mision.distanciaKmIdaYVuelta
+
   const flotaTexto =
     vehiculosNombres.length > 0 ? vehiculosNombres.join(' y ') : 'vehículo de la reserva'
   const equipoTexto =
     tripulantesNombres.length > 0 ? tripulantesNombres.join(', ') : 'equipo de guardia'
 
+  const esPavimento = mision.terreno === 'pavimento'
+  const esMixto = mision.terreno === 'mixto_montaña'
+
   if (resultado === 'exito') {
     return (
       `Relato de Operaciones · Salida desde Finca El Guadual hacia ${mision.destino}. ` +
-      `La operación duró ${duracionTexto} con un recorrido de ${mision.distanciaKmIdaYVuelta} km sobre ${mision.terreno.replace(/_/g, ' ')}. ` +
+      `La operación duró ${duracionTexto} con un recorrido de ${distanciaMostrar} km sobre ${mision.terreno.replace(/_/g, ' ')}. ` +
       `A cargo estuvieron ${equipoTexto}, empleando ${flotaTexto}. ` +
       `Se coordinó directamente con la comunidad en terreno y se completó el objetivo sin novedades mecánicas graves, retornando a base listos para el siguiente turno.`
     )
   }
 
   if (resultado === 'parcial') {
+    const dificultadTerreno = esPavimento
+      ? 'La vía pavimentada presentó congestión severa, paso restringido y lluvia intensa que exigieron maniobras controladas'
+      : esMixto
+        ? 'El tramo de montaña presentó neblina densa, calzada húmeda y reducción a un carril que exigieron avance prudente'
+        : 'El terreno presentó lodazal e inclinación exigente que requirió maniobras lentas y anclajes'
     return (
-      `Bitácora de Intervención Compleja · Despliegue hacia ${mision.destino} (${duracionTexto}, ${mision.distanciaKmIdaYVuelta} km). ` +
-      `Participaron ${equipoTexto} con ${flotaTexto}. El terreno presentó lodazal e inclinación exigente que requirió maniobras lentas y anclajes. ` +
-      `Se aseguró y trasladó la carga principal a zona firme; el tramo final se coordinó con líderes veredales por riesgo de banca inestable. Equipo de vuelta en base sin lesionados.`
+      `Bitácora de Intervención Compleja · Despliegue hacia ${mision.destino} (${duracionTexto}, ${distanciaMostrar} km). ` +
+      `Participaron ${equipoTexto} con ${flotaTexto}. ${dificultadTerreno}. ` +
+      `Se aseguró y atendió el objetivo principal en zona segura; el tramo final se coordinó con líderes locales. Equipo de vuelta en base sin lesionados.`
     )
   }
 
+  const motivoRepliegue = esPavimento
+    ? 'cierre total de la calzada y paso bloqueado por las autoridades en carretera'
+    : esMixto
+      ? 'condiciones críticas de deslizamiento y bloqueo vial en la ruta de montaña'
+      : 'condiciones críticas de derrumbe activo y piso inestable en la trocha'
   return (
-    `Reporte de Repliegue Táctico · Desplazamiento hacia ${mision.destino} durante ${duracionTexto}. ` +
-    `La tripulación (${equipoTexto}) a bordo de ${flotaTexto} encontró condiciones críticas de derrumbe activo y piso inestable en la trocha. ` +
-    `Priorizando la seguridad del personal y la integridad del vehículo, se suspendió el ingreso final, se entregó apoyo inmediato a pie a los vecinos del sector y se retornó con precaución a la base central.`
+    `Reporte de Repliegue Táctico · Desplazamiento hacia ${mision.destino} (${duracionTexto}, ${distanciaMostrar} km recorridos). ` +
+    `La tripulación (${equipoTexto}) a bordo de ${flotaTexto} encontró ${motivoRepliegue}. ` +
+    `Priorizando la seguridad del personal y la integridad del vehículo, se suspendió el ingreso final, se entregó apoyo inmediato posible a los vecinos del sector y se retornó con precaución a la base central.`
   )
 }
 
@@ -1480,6 +1724,29 @@ export function generarTurnosSemanalesIA(
   // Rotación circular que cambia en cada clic para cualquier n > 1 (incluyendo n = 3, 6, 9)
   const shift = n > 1 ? Math.abs(rotacionOffset) % n : 0
   const poolRotado = [...empleadosActivos.slice(shift), ...empleadosActivos.slice(0, shift)]
+  const indiceRotado = new Map<string, number>(poolRotado.map((e, i) => [e.id, i]))
+  const afinidadCondMapa = new Map<string, number>(poolRotado.map((e) => [e.id, afinidadConductor(e)]))
+  const afinidadMecMapa = new Map<string, number>(poolRotado.map((e) => [e.id, afinidadMecanico(e)]))
+
+  // Distribuir 2 días de descanso escalonados por empleado para garantizar cobertura también sáb/dom en equipos pequeños (2-4)
+  const diasDescansoPorEmpleado: Record<string, Set<number>> = {}
+  const patronesDescanso = [
+    [5, 6], // Sáb-Dom
+    [3, 4], // Jue-Vie
+    [1, 2], // Mar-Mié
+    [4, 5], // Vie-Sáb
+    [2, 3], // Mié-Jue
+    [0, 1], // Lun-Mar
+    [6, 0], // Dom-Lun
+  ]
+  poolRotado.forEach((e, idx) => {
+    if (n >= 2) {
+      const par = patronesDescanso[idx % patronesDescanso.length]
+      diasDescansoPorEmpleado[e.id] = new Set(par)
+    } else {
+      diasDescansoPorEmpleado[e.id] = new Set([5, 6])
+    }
+  })
 
   const horasAsignadas: Record<string, number> = {}
   const turnosPorEmpleado: Record<string, number> = {}
@@ -1520,6 +1787,7 @@ export function generarTurnosSemanalesIA(
 
   // Rutas habituales activas mapeadas por día de semana y franja
   const rutasActivas = rutasHabituales.filter((r) => r.activa !== false)
+  const usarFallbackRutasPorDefecto = rutasHabituales.length === 0
   const buscarRutaParaFranja = (
     diaSemana: number,
     franja: 'manana' | 'tarde'
@@ -1540,23 +1808,35 @@ export function generarTurnosSemanalesIA(
     })
   }
 
+  const descomponerTramo = (
+    dia: number,
+    ini: number,
+    fin: number
+  ): Array<{ dia: number; ini: number; fin: number }> => {
+    if (ini <= fin) return [{ dia, ini, fin }]
+    return [
+      { dia, ini, fin: 24 * 60 },
+      { dia: (dia + 1) % 7, ini: 0, fin },
+    ]
+  }
+
   const tieneConflictoHorario = (
     emp: EmpleadoOperativo,
     diaInfo: (typeof diasInfo)[number],
-    franja: 'manana' | 'tarde' | 'noche'
+    horaInicio: string,
+    horaFin: string
   ): boolean => {
+    const sIni = horaAMinutos(horaInicio)
+    const sFin = horaAMinutos(horaFin, true)
+    const tramosTurno = descomponerTramo(diaInfo.diaSemanaRestriccion, sIni, sFin)
+
     return (emp.horariosNoDisponibles || []).some((h) => {
       const hIni = horaAMinutos(h.horaInicio)
       const hFin = horaAMinutos(h.horaFin, true)
-      if (franja === 'noche') {
-        const chocaNoche = h.diaSemana === diaInfo.diaSemanaRestriccion && hFin > 22 * 60
-        const chocaMadrugada = h.diaSemana === diaInfo.diaSemanaSiguiente && hIni < 6 * 60
-        return chocaNoche || chocaMadrugada
-      }
-      if (franja === 'manana') {
-        return h.diaSemana === diaInfo.diaSemanaRestriccion && hIni < 14 * 60 && hFin > 6 * 60
-      }
-      return h.diaSemana === diaInfo.diaSemanaRestriccion && hIni < 22 * 60 && hFin > 14 * 60
+      const tramosRestriccion = descomponerTramo(h.diaSemana, hIni, hFin)
+      return tramosTurno.some((tt) =>
+        tramosRestriccion.some((tr) => tt.dia === tr.dia && tt.ini < tr.fin && tr.ini < tt.fin)
+      )
     })
   }
 
@@ -1564,13 +1844,17 @@ export function generarTurnosSemanalesIA(
     emp: EmpleadoOperativo,
     d: number,
     franja: 'manana' | 'tarde' | 'noche',
-    duracionHoras: number
+    duracionHoras: number,
+    horaInicio: string,
+    horaFin: string,
+    respetarDescanso = false
   ): boolean => {
     const tope = Math.min(42, emp.maxHorasSemanales || 42)
     if ((horasAsignadas[emp.id] || 0) + duracionHoras > tope) return false
     if (diasOcupadosPorEmpleado[emp.id]?.has(d)) return false
+    if (respetarDescanso && diasDescansoPorEmpleado[emp.id]?.has(d)) return false
     if (franja === 'manana' && d > 0 && nocheTrabajadaPorDia[d - 1]?.has(emp.id)) return false
-    if (tieneConflictoHorario(emp, diasInfo[d], franja)) return false
+    if (tieneConflictoHorario(emp, diasInfo[d], horaInicio, horaFin)) return false
     return true
   }
 
@@ -1608,6 +1892,15 @@ export function generarTurnosSemanalesIA(
     })
   }
 
+  const ordenarCandidatosConRotacion = (lista: EmpleadoOperativo[]): EmpleadoOperativo[] => {
+    return [...lista].sort((a, b) => {
+      const hA = horasAsignadas[a.id] || 0
+      const hB = horasAsignadas[b.id] || 0
+      if (hA !== hB) return hA - hB
+      return (indiceRotado.get(a.id) ?? 0) - (indiceRotado.get(b.id) ?? 0)
+    })
+  }
+
   // =========================================================================
   // FASE 1: CONDUCTORES TRONCALES Y RUTAS HABITUALES (21 franjas L-D)
   // =========================================================================
@@ -1616,13 +1909,24 @@ export function generarTurnosSemanalesIA(
     const rutaManana = buscarRutaParaFranja(diaSemanaRestriccion, 'manana')
     const rutaTarde = buscarRutaParaFranja(diaSemanaRestriccion, 'tarde')
 
+    // Solo usar IDs fallback por defecto si no se pasaron rutasHabituales; nunca reinyectar rutas deshabilitadas
     const rutaMananaId =
       rutaManana?.id ??
-      (d <= 4 ? 'rut-escolar-manana' : d === 5 ? 'rut-mercado-campesino' : undefined)
-    const rutaTardeId = rutaTarde?.id ?? (d <= 4 ? 'rut-escolar-tarde' : undefined)
+      (usarFallbackRutasPorDefecto
+        ? d <= 4
+          ? 'rut-escolar-manana'
+          : d === 5
+            ? 'rut-mercado-campesino'
+            : undefined
+        : undefined)
+    const rutaTardeId =
+      rutaTarde?.id ?? (usarFallbackRutasPorDefecto && d <= 4 ? 'rut-escolar-tarde' : undefined)
 
     const horaMananaIni = rutaManana?.horaSalida === '05:30' ? '05:30' : '06:00'
     const horaMananaFin = horaMananaIni === '05:30' ? '13:30' : '14:00'
+    // Cerrar la brecha de 30 min del sábado (13:30-14:00) ajustando la tarde a 13:30-22:00 (8.5h, <=42h)
+    const horaTardeIni = horaMananaFin === '13:30' ? '13:30' : '14:00'
+    const horasTarde = horaTardeIni === '13:30' ? 8.5 : 8
 
     const franjasCond: Array<{
       franja: 'manana' | 'tarde' | 'noche'
@@ -1640,9 +1944,9 @@ export function generarTurnosSemanalesIA(
         horas: 8,
         rol: rutaManana
           ? `🚌 Conducción ${rutaManana.nombre} (${rutaManana.horaSalida || horaMananaIni}) + Guardia Base (${nombreDia})`
-          : d <= 4
+          : usarFallbackRutasPorDefecto && d <= 4
             ? `🚌 Conducción Ruta Escolar Matutina 06:00 + Guardia Base (${nombreDia})`
-            : d === 5
+            : usarFallbackRutasPorDefecto && d === 5
               ? `🧺 Conducción Ruta Solidaria Mercado Campesino 05:30 + Guardia Base (${nombreDia})`
               : `🚗 Conductor de Guardia Matutina & Base Central (${nombreDia})`,
         rutaHabitualId: rutaMananaId,
@@ -1650,12 +1954,12 @@ export function generarTurnosSemanalesIA(
       },
       {
         franja: 'tarde',
-        horaInicio: '14:00',
+        horaInicio: horaTardeIni,
         horaFin: '22:00',
-        horas: 8,
+        horas: horasTarde,
         rol: rutaTarde
           ? `🚌 Conducción ${rutaTarde.nombre} (${rutaTarde.horaSalida || '15:00'}) + Guardia Base (${nombreDia})`
-          : d <= 4
+          : usarFallbackRutasPorDefecto && d <= 4
             ? `🚌 Conducción Ruta Escolar Vespertina 15:00 + Guardia Base (${nombreDia})`
             : `🚗 Conductor de Guardia Vespertina & Auxilio Veredal (${nombreDia})`,
         rutaHabitualId: rutaTardeId,
@@ -1672,15 +1976,23 @@ export function generarTurnosSemanalesIA(
     ]
 
     for (const fc of franjasCond) {
-      // Prioriza quienes tienen afinidad de conductor; si no hay ninguno libre, acepta cualquier activo disponible
-      const disponibles = poolRotado.filter((emp) => puedeAsignarse(emp, d, fc.franja, fc.horas))
-      const conAfinidad = disponibles.filter((emp) => afinidadConductor(emp) > 0)
-      const candidatos = (conAfinidad.length > 0 ? conAfinidad : disponibles).sort((a, b) => {
-        const hA = horasAsignadas[a.id] || 0
-        const hB = horasAsignadas[b.id] || 0
-        if (hA !== hB) return hA - hB
-        return afinidadConductor(b) - afinidadConductor(a)
-      })
+      // Respetar descansos escalonados para preservar cobertura sáb/dom en equipos pequeños
+      const disponiblesDesc = poolRotado.filter((emp) =>
+        puedeAsignarse(emp, d, fc.franja, fc.horas, fc.horaInicio, fc.horaFin, true)
+      )
+      const disponibles =
+        disponiblesDesc.length > 0
+          ? disponiblesDesc
+          : fc.rutaHabitualId
+            ? poolRotado.filter((emp) =>
+                puedeAsignarse(emp, d, fc.franja, fc.horas, fc.horaInicio, fc.horaFin, false)
+              )
+            : []
+
+      const conAfinidad = disponibles.filter((emp) => (afinidadCondMapa.get(emp.id) ?? 0) > 0)
+      const candidatos = ordenarCandidatosConRotacion(
+        conAfinidad.length > 0 ? conAfinidad : disponibles
+      )
 
       if (candidatos[0]) {
         asignarTurno(
@@ -1702,7 +2014,10 @@ export function generarTurnosSemanalesIA(
   // FASE 2: MECÁNICOS / SOPORTE EN BASE (hasta 21 franjas L-D)
   // =========================================================================
   for (const diaInfo of diasInfo) {
-    const { d, nombreDia } = diaInfo
+    const { d, nombreDia, diaSemanaRestriccion } = diaInfo
+    const rutaManana = buscarRutaParaFranja(diaSemanaRestriccion, 'manana')
+    const horaTardeIni = rutaManana?.horaSalida === '05:30' ? '13:30' : '14:00'
+    const horasTarde = horaTardeIni === '13:30' ? 8.5 : 8
 
     const franjasMec: Array<{
       franja: 'manana' | 'tarde' | 'noche'
@@ -1724,9 +2039,9 @@ export function generarTurnosSemanalesIA(
       },
       {
         franja: 'tarde',
-        horaInicio: '14:00',
+        horaInicio: horaTardeIni,
         horaFin: '22:00',
-        horas: 8,
+        horas: horasTarde,
         rolMec: `🔧 Mecánico / Mantenimiento de Trocha & Winches (${nombreDia})`,
         rolApoyo: `🛡️ Guardia de Base & Apoyo Veredal Vespertino (${nombreDia})`,
         idSufijo: 'mec-tarde',
@@ -1743,17 +2058,16 @@ export function generarTurnosSemanalesIA(
     ]
 
     for (const fm of franjasMec) {
-      const disponibles = poolRotado.filter((emp) => puedeAsignarse(emp, d, fm.franja, fm.horas))
-      const conAfinidad = disponibles.filter((emp) => afinidadMecanico(emp) > 0)
-      const candidatos = (conAfinidad.length > 0 ? conAfinidad : disponibles).sort((a, b) => {
-        const hA = horasAsignadas[a.id] || 0
-        const hB = horasAsignadas[b.id] || 0
-        if (hA !== hB) return hA - hB
-        return afinidadMecanico(b) - afinidadMecanico(a)
-      })
+      const disponibles = poolRotado.filter((emp) =>
+        puedeAsignarse(emp, d, fm.franja, fm.horas, fm.horaInicio, fm.horaFin, true)
+      )
+      const conAfinidad = disponibles.filter((emp) => (afinidadMecMapa.get(emp.id) ?? 0) > 0)
+      const candidatos = ordenarCandidatosConRotacion(
+        conAfinidad.length > 0 ? conAfinidad : disponibles
+      )
 
       if (candidatos[0]) {
-        const esMec = afinidadMecanico(candidatos[0]) > 0
+        const esMec = (afinidadMecMapa.get(candidatos[0].id) ?? 0) > 0
         asignarTurno(
           candidatos[0],
           d,
@@ -1774,47 +2088,47 @@ export function generarTurnosSemanalesIA(
   let intentos = 0
   while (intentos < n * 7) {
     intentos++
-    const pendientes = poolRotado
-      .filter((e) => (turnosPorEmpleado[e.id] || 0) < 5 && (horasAsignadas[e.id] || 0) <= 34)
-      .sort((a, b) => (horasAsignadas[a.id] || 0) - (horasAsignadas[b.id] || 0))
+    const pendientes = ordenarCandidatosConRotacion(
+      poolRotado.filter(
+        (e) =>
+          (turnosPorEmpleado[e.id] || 0) < 5 &&
+          (horasAsignadas[e.id] || 0) + 8 <= Math.min(42, e.maxHorasSemanales || 42)
+      )
+    )
 
     if (pendientes.length === 0) break
 
     let progresoEnCiclo = false
     for (const emp of pendientes) {
       let asignado = false
-      const esCond = afinidadConductor(emp) > 0
-      const esMec = afinidadMecanico(emp) > 0
+      const esCond = (afinidadCondMapa.get(emp.id) ?? 0) > 0
+      const esMec = (afinidadMecMapa.get(emp.id) ?? 0) > 0
 
-      for (const franja of ['manana', 'tarde', 'noche'] as const) {
-        for (const diaInfo of diasInfo) {
-          const { d, nombreDia } = diaInfo
-          if (!puedeAsignarse(emp, d, franja, 8)) continue
+      for (const respetarDescanso of [true, false]) {
+        for (const franja of ['manana', 'tarde', 'noche'] as const) {
+          const hIni = franja === 'manana' ? '06:00' : franja === 'tarde' ? '14:00' : '22:00'
+          const hFin = franja === 'manana' ? '14:00' : franja === 'tarde' ? '22:00' : '06:00'
+          for (const diaInfo of diasInfo) {
+            const { d, nombreDia } = diaInfo
+            if (!puedeAsignarse(emp, d, franja, 8, hIni, hFin, respetarDescanso)) continue
 
-          const rolTexto =
-            franja === 'noche'
-              ? `🛡️ Guardia Nocturna de Apoyo (${nombreDia})`
-              : esCond
-                ? franja === 'manana'
-                  ? `🚗 Conductor de Apoyo / Guardia Rápida Veredal (${nombreDia})`
-                  : `🚗 Conductor de Asistencia Comunitaria (${nombreDia})`
-                : esMec
-                  ? `🔧 Soporte Técnico & Taller Preventivo (${nombreDia})`
-                  : `🛡️ Apoyo Logístico & Enlace Comunitario (${nombreDia})`
+            const rolTexto =
+              franja === 'noche'
+                ? `🛡️ Guardia Nocturna de Apoyo (${nombreDia})`
+                : esCond
+                  ? franja === 'manana'
+                    ? `🚗 Conductor de Apoyo / Guardia Rápida Veredal (${nombreDia})`
+                    : `🚗 Conductor de Asistencia Comunitaria (${nombreDia})`
+                  : esMec
+                    ? `🔧 Soporte Técnico & Taller Preventivo (${nombreDia})`
+                    : `🛡️ Apoyo Logístico & Enlace Comunitario (${nombreDia})`
 
-          asignarTurno(
-            emp,
-            d,
-            franja,
-            franja === 'manana' ? '06:00' : franja === 'tarde' ? '14:00' : '22:00',
-            franja === 'manana' ? '14:00' : franja === 'tarde' ? '22:00' : '06:00',
-            8,
-            rolTexto,
-            `apoyo-${d}`
-          )
-          asignado = true
-          progresoEnCiclo = true
-          break
+            asignarTurno(emp, d, franja, hIni, hFin, 8, rolTexto, `apoyo-${d}`)
+            asignado = true
+            progresoEnCiclo = true
+            break
+          }
+          if (asignado) break
         }
         if (asignado) break
       }
@@ -1847,7 +2161,9 @@ export function generarInformeDiarioOperaciones(contexto: {
   const misionesCompletadas = misionesHoy.filter(
     (m) => m.estado === 'completada' || m.estado === 'inconclusa_repliegue'
   )
-  const misionesEnCurso = misionesHoy.filter((m) => m.estado === 'en_curso')
+  // Incluir misiones en curso aunque hayan iniciado en días previos
+  const misionesEnCurso = contexto.misiones.filter((m) => m.estado === 'en_curso')
+  const misionesProgramadasHoy = misionesHoy.filter((m) => m.estado === 'programada')
   const turnosHoy = contexto.turnos.filter((t) => t.fecha === hoy)
   const vehiculosTrabajo = contexto.vehiculos.filter((v) => v.disponibleParaTrabajo)
   const alertasVigentes = filtrarEventosRadarVigentes(contexto.eventosRadar || [])
@@ -1869,8 +2185,16 @@ export function generarInformeDiarioOperaciones(contexto: {
     informe += `• No hay vehículos habilitados para Bear's Reserve aún.\n`
   } else {
     vehiculosTrabajo.forEach((v) => {
-      const estadoTanque = v.nivelCombustiblePorc <= 20 ? '⚠️ En reserva' : '✅ Óptimo'
-      const estadoOp = v.estado === 'en_mision' ? '🚨 En misión' : 'En base'
+      const estadoTanque =
+        v.nivelCombustiblePorc <= UMBRAL_RESERVA_COMBUSTIBLE_PORC ? '⚠️ En reserva' : '✅ Óptimo'
+      const estadoOp =
+        v.estado === 'en_mision'
+          ? '🚨 En misión'
+          : v.estado === 'mantenimiento'
+            ? '🔧 Mantenimiento'
+            : v.estado === 'reserva'
+              ? '⛽ En reserva'
+              : '✅ En base'
       informe += `• **${v.marca} ${v.linea}** (${v.placa || 'Sin placa'}): ${estadoOp} · Tanque ${v.nivelCombustiblePorc}% (${estadoTanque}) · Odómetro: ${v.kilometrajeActual.toLocaleString('es-CO')} km · Llantas: ${v.desgasteLlantasPorc}%\n`
     })
   }
@@ -1884,12 +2208,19 @@ export function generarInformeDiarioOperaciones(contexto: {
     })
   }
 
-  informe += `\n🏔️ **Misiones de Hoy**:\n`
-  if (misionesHoy.length === 0) {
+  informe += `\n🏔️ **Misiones de Hoy y Activas**:\n`
+  if (
+    misionesEnCurso.length === 0 &&
+    misionesProgramadasHoy.length === 0 &&
+    misionesCompletadas.length === 0
+  ) {
     informe += `• Sin salidas registradas hoy. Flota en guardia preventiva.\n`
   } else {
     if (misionesEnCurso.length > 0) {
       informe += `• 🚨 **En Curso**: ${misionesEnCurso.map((m) => m.titulo).join('; ')}\n`
+    }
+    if (misionesProgramadasHoy.length > 0) {
+      informe += `• 🗓️ **Programadas Hoy**: ${misionesProgramadasHoy.map((m) => `${m.titulo}${m.horaInicio ? ` (${m.horaInicio})` : ''}`).join('; ')}\n`
     }
     if (misionesCompletadas.length > 0) {
       informe += `• 🏁 **Cerradas**: ${misionesCompletadas.map((m) => `${m.titulo} (${m.distanciaKmIdaYVuelta} km)`).join('; ')}\n`
@@ -1903,7 +2234,7 @@ export function generarInformeDiarioOperaciones(contexto: {
 /**
  * Motor local de respaldo para Radio Gema (solo cuando Gemini no está disponible).
  * Orden de prioridades corregido: "rotar" tiene prioridad sobre "turno",
- * y responde también alertas viales, precios, rutas y crónicas.
+ * normaliza acentos y soporta tanqueo local, alertas viales, precios, rutas y crónicas.
  */
 export function responderGema(
   mensaje: string,
@@ -1925,7 +2256,7 @@ export function responderGema(
     | { tipo: 'escanear_radar' }
     | { tipo: 'actualizar_precios' }
 } {
-  const q = mensaje.toLowerCase().trim()
+  const q = normalizarTextoSimple(mensaje)
 
   // 1. Rotación de turnos (ANTES de la consulta general de "turno")
   if (
@@ -1941,7 +2272,37 @@ export function responderGema(
     }
   }
 
-  // 2. Informe diario
+  // 2. Tanquear vehículo explícito en modo respaldo local
+  if (
+    /\b(tanquear|tanquea|llenar tanque|recargar combustible|poner gasolina|poner diesel|poner acpm)\b/.test(
+      q
+    )
+  ) {
+    const habilitados = contexto.vehiculos.filter(
+      (v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento'
+    )
+    const coincidente = habilitados.find((v) => {
+      const placa = normalizarTextoSimple(v.placa || '')
+      const marca = normalizarTextoSimple(v.marca)
+      const linea = normalizarTextoSimple(v.linea)
+      return (
+        (placa.length >= 3 && q.includes(placa)) ||
+        (linea.length >= 3 && q.includes(linea)) ||
+        (marca.length >= 3 && q.includes(marca))
+      )
+    })
+    if (coincidente) {
+      return {
+        respuesta: `⛽ Solicitando tanqueo al 100% para **${coincidente.marca} ${coincidente.linea}**${coincidente.placa ? ` (${coincidente.placa})` : ''} y cargando el consumo a la tarjeta mensual.`,
+        accion: { tipo: 'tanquear_vehiculo', vehiculoId: coincidente.id },
+      }
+    }
+    return {
+      respuesta: `⛽ Indícame la placa o el modelo del vehículo habilitado que deseas tanquear (flota habilitada: ${habilitados.map((v) => `${v.marca} ${v.linea}${v.placa ? ` (${v.placa})` : ''}`).join(', ') || 'ninguno'}).`,
+    }
+  }
+
+  // 3. Informe diario
   if (q.includes('informe') || q.includes('reporte') || q.includes('resumen') || q.includes('novedades')) {
     return {
       respuesta: generarInformeDiarioOperaciones(contexto),
@@ -1949,13 +2310,12 @@ export function responderGema(
     }
   }
 
-  // 3. Alertas viales / radar / noticias
+  // 4. Alertas viales / radar / noticias
   if (
     q.includes('alerta') ||
     q.includes('radar') ||
     q.includes('vial') ||
-    q.includes('vía') ||
-    q.includes('via ') ||
+    /\bvia\b/.test(q) ||
     q.includes('noticia') ||
     q.includes('emergencia') ||
     q.includes('derrumbe') ||
@@ -1984,9 +2344,8 @@ export function responderGema(
     }
   }
 
-  // 4. Consulta de turnos / guardia hoy
+  // 5. Consulta de turnos / guardia hoy
   if (
-    q.includes('quién está') ||
     q.includes('quien esta') ||
     q.includes('trabajando') ||
     q.includes('guardia') ||
@@ -1994,6 +2353,11 @@ export function responderGema(
   ) {
     const hoy = hoyISO()
     const turnosHoy = contexto.turnos.filter((t) => t.fecha === hoy)
+    const horasPorEmp = new Map<string, number>()
+    for (const t of contexto.turnos) {
+      horasPorEmp.set(t.empleadoId, (horasPorEmp.get(t.empleadoId) || 0) + t.horas)
+    }
+
     let detalleTurnos = ''
     if (turnosHoy.length) {
       detalleTurnos = turnosHoy
@@ -2003,25 +2367,29 @@ export function responderGema(
         )
         .join('\n')
     } else {
-      const horasPorEmp = new Map<string, number>()
-      for (const t of contexto.turnos) {
-        horasPorEmp.set(t.empleadoId, (horasPorEmp.get(t.empleadoId) || 0) + t.horas)
-      }
       detalleTurnos = contexto.empleados
         .filter((e) => e.activo)
         .map(
           (e) =>
-            `• 👤 **${e.nombreCompleto}** (${e.cargo}): ${horasPorEmp.get(e.id) || 0}/42h asignadas`
+            `• 👤 **${e.nombreCompleto}** (${e.cargo}): ${horasPorEmp.get(e.id) || 0}/${e.maxHorasSemanales || 42}h asignadas`
         )
         .join('\n')
     }
 
+    const excedidos = contexto.empleados.filter(
+      (e) => e.activo && (horasPorEmp.get(e.id) || 0) > (e.maxHorasSemanales || 42)
+    )
+    const notaTope =
+      excedidos.length > 0
+        ? `⚠️ Atención: ${excedidos.map((e) => `${e.nombreCompleto} (${horasPorEmp.get(e.id)}h)`).join(', ')} supera(n) su tope semanal.`
+        : '💎 Ningún colaborador supera las 42 horas semanales.'
+
     return {
-      respuesta: `🐻 **Estado de guardia para hoy (${hoy}):**\n\n${detalleTurnos || '• No hay personal activo en Bear\'s Reserve.'}\n\n💎 Ningún colaborador supera las 42 horas semanales.`,
+      respuesta: `🐻 **Estado de guardia para hoy (${hoy}):**\n\n${detalleTurnos || '• No hay personal activo en Bear\'s Reserve.'}\n\n${notaTope}`,
     }
   }
 
-  // 5. Consulta de precios / flota / combustible / llantas
+  // 6. Consulta de precios / flota / combustible / llantas
   if (
     q.includes('precio') ||
     q.includes('combustible') ||
@@ -2042,8 +2410,14 @@ export function responderGema(
     const detalleFlota = habilitados.length
       ? habilitados
           .map((v) => {
-            const alertaReserva = v.nivelCombustiblePorc <= 20 ? ' ⚠️ (En reserva)' : ''
-            const estadoOp = v.estado === 'en_mision' ? ' [EN MISIÓN]' : ''
+            const alertaReserva =
+              v.nivelCombustiblePorc <= UMBRAL_RESERVA_COMBUSTIBLE_PORC ? ' ⚠️ (En reserva)' : ''
+            const estadoOp =
+              v.estado === 'en_mision'
+                ? ' [EN MISIÓN]'
+                : v.estado === 'mantenimiento'
+                  ? ' [MANTENIMIENTO]'
+                  : ''
             return `• 🚚 **${v.marca} ${v.linea}** (${v.placa || 'Sin placa'})${estadoOp}: Tanque **${v.nivelCombustiblePorc}%** (${v.capacidadTanqueGalones} gal ${v.tipoCombustible.toUpperCase()}) · Odómetro: **${v.kilometrajeActual.toLocaleString('es-CO')} km** · Llantas: **${v.desgasteLlantasPorc}%**${alertaReserva}`
           })
           .join('\n')
@@ -2058,7 +2432,7 @@ export function responderGema(
     }
   }
 
-  // 6. Rutas habituales / escolares / crónicas
+  // 7. Rutas habituales / escolares / crónicas
   if (q.includes('ruta') || q.includes('escolar') || q.includes('mercado')) {
     const rutas = contexto.rutasHabituales || []
     const hoy = hoyISO()
@@ -2073,8 +2447,8 @@ export function responderGema(
     }
   }
 
-  // 7. Saludo o consulta general
+  // 8. Saludo o consulta general
   return {
-    respuesta: `💎 ¡Hola! Soy **Gema**, oficial de operaciones de **Bear's Reserve** 🐻.\n\nPuedo ayudarte en tiempo real con:\n• 📋 **Informe diario** de operaciones y novedades.\n• 📅 **Guardia de hoy y rotación de turnos** (tope 42h).\n• 🚨 **Alertas viales y radar** de Caldas y la región.\n• ⛽ **Estado de flota, combustible, llantas y precios**.\n• 🚌 **Rutas escolares y habituales** con sus conductores.\n\n*(Modo respaldo local activo mientras Gemini responde).*`,
+    respuesta: `💎 ¡Hola! Soy **Gema**, oficial de operaciones de **Bear's Reserve** 🐻.\n\nPuedo ayudarte en tiempo real con:\n• 📋 **Informe diario** de operaciones y novedades.\n• 📅 **Guardia de hoy y rotación de turnos** (tope 42h).\n• 🚨 **Alertas viales y radar** de Caldas y la región.\n• ⛽ **Estado de flota, combustible, llantas y precios** (o dime "tanquear <vehículo>").\n• 🚌 **Rutas escolares y habituales** con sus conductores.\n\n*(Modo respaldo local activo mientras Gemini responde).*`,
   }
 }

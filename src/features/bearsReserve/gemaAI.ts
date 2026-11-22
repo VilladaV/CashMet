@@ -17,10 +17,17 @@ import {
 import { hoyISO, isoLocal } from '@/lib/fechas'
 import { BASE_BEARS_RESERVE, resolverCoordenadasLugar, type EstimacionLogisticaMision } from './geo'
 import {
+  CAPACIDAD_TANQUE_FALLBACK_GAL,
+  TTL_LLAMADA_COMUNITARIA_MS,
+  TTL_NOTICIA_WEB_MS,
+} from './constants'
+import {
+  calcularAutonomiaRealKm,
   detectarTemaEvento,
   esEventoRedundante,
   esFechaNoticiaReciente,
   extraerClaveVereda,
+  filtrarEventosRadarVigentes,
 } from './gemaEngine'
 import type {
   EmpleadoOperativo,
@@ -34,8 +41,7 @@ import type {
   VehiculoOperativo,
 } from './types'
 
-export const TTL_NOTICIA_WEB_MS = 36 * 60 * 60 * 1000 // 36 horas (1.5 días)
-export const TTL_LLAMADA_COMUNITARIA_MS = 28 * 60 * 60 * 1000 // 28 horas (~1.2 días)
+export { TTL_NOTICIA_WEB_MS, TTL_LLAMADA_COMUNITARIA_MS } from './constants'
 
 interface GeminiCandidateResponse {
   candidates?: Array<{
@@ -91,6 +97,7 @@ function parsearRssXml(xmlText: string): RssNewsItem[] {
   if (typeof DOMParser === 'undefined') return []
   try {
     const doc = new DOMParser().parseFromString(xmlText, 'text/xml')
+    if (doc.querySelector('parsererror')) return []
     const nodes = Array.from(doc.querySelectorAll('item'))
     return nodes.map((n) => ({
       title: n.querySelector('title')?.textContent || '',
@@ -104,6 +111,18 @@ function parsearRssXml(xmlText: string): RssNewsItem[] {
   }
 }
 
+function parsearFechaRssISO(pubDate?: string): string {
+  const s = String(pubDate || '').trim()
+  if (!s) return ''
+  // Formato MySQL/rss2json sin zona horaria: "YYYY-MM-DD HH:mm:ss" (UTC)
+  const cadenaFecha = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(:\d{2})?$/.test(s)
+    ? `${s.replace(' ', 'T')}Z`
+    : s
+  const parsedDate = new Date(cadenaFecha)
+  if (Number.isNaN(parsedDate.getTime())) return ''
+  return isoLocal(parsedDate)
+}
+
 interface MedioRssColombia {
   nombre: string
   rssUrl: string
@@ -112,9 +131,10 @@ interface MedioRssColombia {
 
 /**
  * Medios colombianos reales verificados en vivo (HTTP 200, <700ms, CORS abierto vía rss2json / allorigins).
- * Cubren todo el país (Nacional, Regiones, Caldas, Antioquia, Valle/Pacífico).
+ * Prioriza La Patria (Caldas/Manizales) primero para que la prensa regional nunca quede fuera del tope.
  */
 const MEDIOS_RSS_COLOMBIA: MedioRssColombia[] = [
+  { nombre: 'La Patria', rssUrl: 'https://www.lapatria.com/rss.xml', alcance: 'regional' },
   { nombre: 'El Tiempo CO', rssUrl: 'https://www.eltiempo.com/rss/colombia.xml', alcance: 'nacional' },
   {
     nombre: 'El Tiempo Regiones',
@@ -136,7 +156,6 @@ const MEDIOS_RSS_COLOMBIA: MedioRssColombia[] = [
     rssUrl: 'https://caracol.com.co/arc/outboundfeeds/rss/?outputType=xml',
     alcance: 'nacional',
   },
-  { nombre: 'La Patria', rssUrl: 'https://www.lapatria.com/rss.xml', alcance: 'regional' },
 ]
 
 const REGEX_SENAL_OPERATIVA =
@@ -149,13 +168,12 @@ async function obtenerItemsMedioRss(
   const fallos: string[] = []
 
   // Canal 1 (primario, ~300-600ms con CORS nativo para medios colombianos): rss2json.com
+  const c1 = new AbortController()
+  const t1 = setTimeout(() => c1.abort(), 7000)
   try {
-    const c1 = new AbortController()
-    const t1 = setTimeout(() => c1.abort(), 7000)
     const r1 = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encoded}`, {
       signal: c1.signal,
     })
-    clearTimeout(t1)
     if (r1.ok) {
       const json = (await r1.json()) as { status?: string; items?: RssNewsItem[] }
       if (json.status === 'ok' && Array.isArray(json.items)) {
@@ -167,14 +185,15 @@ async function obtenerItemsMedioRss(
     }
   } catch {
     fallos.push('rss2json timeout')
+  } finally {
+    clearTimeout(t1)
   }
 
   // Canal 2 (respaldo directo XML): allorigins /raw
+  const c2 = new AbortController()
+  const t2 = setTimeout(() => c2.abort(), 7000)
   try {
-    const c2 = new AbortController()
-    const t2 = setTimeout(() => c2.abort(), 7000)
     const r2 = await fetch(`https://api.allorigins.win/raw?url=${encoded}`, { signal: c2.signal })
-    clearTimeout(t2)
     if (r2.ok) {
       const xml = await r2.text()
       const items = parsearRssXml(xml)
@@ -187,6 +206,8 @@ async function obtenerItemsMedioRss(
     }
   } catch {
     fallos.push('allorigins timeout')
+  } finally {
+    clearTimeout(t2)
   }
 
   return { items: [], ok: false, detalle: `${medio.nombre} (${fallos.join(', ')})` }
@@ -194,27 +215,17 @@ async function obtenerItemsMedioRss(
 
 async function fetchMedioColombia(
   medio: MedioRssColombia
-): Promise<{ items: CandidatoNoticiaRaw[]; totalRecientes: number; ok: boolean; detalle: string }> {
+): Promise<{ items: CandidatoNoticiaRaw[]; totalRecientes: number; ok: boolean; detalle: string; alcance: 'regional' | 'nacional' }> {
   const hoy = hoyISO()
   const { items: rawItems, ok, detalle } = await obtenerItemsMedioRss(medio)
-  if (!ok) return { items: [], totalRecientes: 0, ok: false, detalle }
+  if (!ok) return { items: [], totalRecientes: 0, ok: false, detalle, alcance: medio.alcance }
 
   const recientes: CandidatoNoticiaRaw[] = []
   for (const item of rawItems) {
     const titulo = String(item.title || '').trim()
     if (!titulo) continue
 
-    let fechaPub = ''
-    if (item.pubDate) {
-      const parsedDate = new Date(
-        item.pubDate.includes('GMT') || item.pubDate.includes('Z') || item.pubDate.includes('+')
-          ? item.pubDate
-          : item.pubDate.replace(' ', 'T') + 'Z'
-      )
-      if (!Number.isNaN(parsedDate.getTime())) {
-        fechaPub = isoLocal(parsedDate)
-      }
-    }
+    const fechaPub = parsearFechaRssISO(item.pubDate)
     if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
 
     const resumenRaw = String(item.description || '')
@@ -237,7 +248,7 @@ async function fetchMedioColombia(
   const conSenal = recientes.filter((it) =>
     REGEX_SENAL_OPERATIVA.test(`${it.titulo} ${it.resumenRaw}`)
   )
-  return { items: conSenal, totalRecientes: recientes.length, ok: true, detalle }
+  return { items: conSenal, totalRecientes: recientes.length, ok: true, detalle, alcance: medio.alcance }
 }
 
 /**
@@ -273,12 +284,17 @@ async function buscarNoticiasFuentesAbiertasColombia(
   const totalArticulosRecientes = exitosos.reduce((acc, r) => acc + r.totalRecientes, 0)
   const detalleFuentes = `${exitosos.length}/${MEDIOS_RSS_COLOMBIA.length} medios CO (${totalArticulosRecientes} notas <48h)`
 
-  // Combinar y pre-deduplicar candidatas con señal operativa contra las existentes
+  // Combinar y pre-deduplicar candidatas aplicando cuotas por medio (priorizando prensa regional Caldas)
   const combinadas: CandidatoNoticiaRaw[] = []
   const yaVistas: EventoRadarLocal[] = [...eventosExistentes]
-  for (const res of exitosos) {
+  const exitososPriorizados = [...exitosos].sort((a, b) =>
+    a.alcance === b.alcance ? 0 : a.alcance === 'regional' ? -1 : 1
+  )
+
+  const agregarDeMedio = (res: (typeof exitososPriorizados)[number], maxPorMedio: number) => {
+    let agregadasMedio = 0
     for (const item of res.items) {
-      if (combinadas.length >= 18) break
+      if (combinadas.length >= 18 || agregadasMedio >= maxPorMedio) break
       const temp: EventoRadarLocal = {
         id: 'tmp',
         titulo: item.titulo,
@@ -297,6 +313,18 @@ async function buscarNoticiasFuentesAbiertasColombia(
       if (esEventoRedundante(temp, yaVistas)) continue
       combinadas.push(item)
       yaVistas.push(temp)
+      agregadasMedio++
+    }
+  }
+
+  // Ronda 1: cuota balanceada (máx 6 para regional La Patria, máx 4 por medio nacional)
+  for (const res of exitososPriorizados) {
+    agregarDeMedio(res, res.alcance === 'regional' ? 6 : 4)
+  }
+  // Ronda 2: completar hasta 18 si sobraron cupos
+  if (combinadas.length < 18) {
+    for (const res of exitososPriorizados) {
+      agregarDeMedio(res, 18)
     }
   }
 
@@ -638,8 +666,9 @@ Si no hay ninguna emergencia accionable entre ${desdeISO} y ${hoy}, responde "SI
       false
     )
 
-    if (!resPaso1 || !usoBusqueda) {
-      // Fuentes web abiertas de todo Colombia: GDELT 2.0 (directo CORS) + Google News RSS (mirrors) + Curador Gemini IA
+    const ejecutarFallbackFuentesAbiertas = async (
+      motivoFallback?: string
+    ): Promise<ResultadoBusquedaNoticiasWeb> => {
       const abiertas = await buscarNoticiasFuentesAbiertasColombia(eventosExistentes)
       const horaTxt = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
 
@@ -659,20 +688,21 @@ Si no hay ninguna emergencia accionable entre ${desdeISO} y ${hoy}, responde "SI
         eventos: [],
         busquedaWebActiva: false,
         descartadasPorViejas: 0,
-        diagnostico: `⚠️ Fuentes web no respondieron (${horaTxt}): ${abiertas.detalleFuentes || errorBusqueda || 'sin conexión'}.`,
+        diagnostico: `⚠️ Fuentes web no respondieron (${horaTxt}): ${abiertas.detalleFuentes || motivoFallback || 'sin conexión'}.`,
       }
+    }
+
+    if (!resPaso1 || !usoBusqueda) {
+      return await ejecutarFallbackFuentesAbiertas(errorBusqueda)
     }
 
     const data1 = (await resPaso1.json()) as GeminiCandidateResponse
     const { texto: textoBuscado, fuentesWeb, consultasWeb } = extraerTextoYFuentes(data1)
 
     if (!textoBuscado || (fuentesWeb.length === 0 && consultasWeb.length === 0)) {
-      return {
-        eventos: [],
-        busquedaWebActiva: false,
-        descartadasPorViejas: 0,
-        diagnostico: 'Google Search no devolvió resultados verificables para esta consulta.',
-      }
+      return await ejecutarFallbackFuentesAbiertas(
+        'Google Search no devolvió fuentes verificables para esta consulta'
+      )
     }
 
     if (textoBuscado.includes('SIN_NOVEDADES_RECIENTES')) {
@@ -781,21 +811,23 @@ Responde ÚNICAMENTE con un JSON válido:
       const coordsFallback = resolverCoordenadasLugar(lugar, departamento)
       const latNum = Number(e.lat)
       const lngNum = Number(e.lng)
+      // Bounding box completo de Colombia (incluye Amazonas/Leticia, Nariño/Ipiales y San Andrés)
       const coordsValidas =
         Number.isFinite(latNum) &&
         Number.isFinite(lngNum) &&
-        latNum >= 1 &&
-        latNum <= 12 &&
-        lngNum >= -79 &&
-        lngNum <= -67
+        latNum >= -4.5 &&
+        latNum <= 13.5 &&
+        lngNum >= -82 &&
+        lngNum <= -66.5
 
-      const idxFuente =
-        typeof e.indiceFuenteWeb === 'number' &&
-        e.indiceFuenteWeb >= 0 &&
-        e.indiceFuenteWeb < fuentesWeb.length
-          ? e.indiceFuenteWeb
-          : i
-      const fuenteObj = fuentesWeb[idxFuente] || fuentesWeb[0]
+      const idxFuenteRaw =
+        e.indiceFuenteWeb !== undefined && e.indiceFuenteWeb !== null
+          ? Number(e.indiceFuenteWeb)
+          : Number.NaN
+      const fuenteObj =
+        Number.isInteger(idxFuenteRaw) && idxFuenteRaw >= 0 && idxFuenteRaw < fuentesWeb.length
+          ? fuentesWeb[idxFuenteRaw]
+          : undefined
 
       // Caducidad calculada desde la fecha real de publicación (máx 48h desde el día publicado)
       const [yP, mP, dP] = fechaPub.split('-').map(Number)
@@ -1048,12 +1080,15 @@ Responde ÚNICAMENTE con un JSON válido:
         : 'exito'
 
     const factorRaw = Number(parsed.factorDistanciaReal)
-    const factorDistanciaReal =
-      Number.isFinite(factorRaw) && factorRaw >= 0.45 && factorRaw <= 1.2
-        ? Number(factorRaw.toFixed(2))
-        : resultado === 'fallida_dificultad'
-          ? 0.65
-          : 1.0
+    const [minFactor, maxFactor, defaultFactor] =
+      resultado === 'fallida_dificultad'
+        ? [0.45, 0.8, 0.65]
+        : resultado === 'parcial'
+          ? [0.75, 1.05, 0.92]
+          : [0.9, 1.15, 1.0]
+    const factorDistanciaReal = Number.isFinite(factorRaw)
+      ? Number(Math.min(maxFactor, Math.max(minFactor, factorRaw)).toFixed(2))
+      : defaultFactor
 
     const cronicaHistoria = String(parsed.cronicaHistoria || '').trim()
     if (!cronicaHistoria) return null
@@ -1107,6 +1142,8 @@ ACCIONES EJECUTABLES (solo inclúyelas cuando el usuario lo pida explícitamente
 Responde SIEMPRE con un único objeto JSON válido, sin bloques markdown:
 {"respuesta":"Tu respuesta humana y completa aquí","acciones":[]}`
 
+const DIAS_SEMANA_CORTO = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+
 function construirSnapshotGema(ctx: ContextoGemaCompleto): string {
   const hoy = hoyISO()
   const hora = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
@@ -1117,17 +1154,18 @@ function construirSnapshotGema(ctx: ContextoGemaCompleto): string {
     horasPorEmp.set(t.empleadoId, (horasPorEmp.get(t.empleadoId) || 0) + t.horas)
   }
 
+  // Ocultar [id: ...] en vehículos no habilitados para que Gemini nunca intente tanquearlos
   const flotaTxt = ctx.vehiculos
     .map(
       (v) =>
-        `- ${v.marca} ${v.linea} ${v.placa ? `(${v.placa})` : ''} [id: ${v.id}] | ${v.disponibleParaTrabajo ? 'Habilitado' : 'Solo CashMet'} | Estado: ${v.estado} | Tanque: ${v.nivelCombustiblePorc}% de ${v.capacidadTanqueGalones} gal (${v.tipoCombustible}, ${v.consumoKmPorGalon} km/gal) | Odómetro: ${v.kilometrajeActual.toLocaleString('es-CO')} km | Llantas: ${v.desgasteLlantasPorc}% desgaste${v.notasCashmet ? ` | Notas: ${v.notasCashmet}` : ''}`
+        `- ${v.marca} ${v.linea} ${v.placa ? `(${v.placa})` : ''}${v.disponibleParaTrabajo ? ` [id: ${v.id}]` : ''} | ${v.disponibleParaTrabajo ? 'Habilitado' : 'Solo CashMet (no operable)'} | Estado: ${v.estado} | Tanque: ${v.nivelCombustiblePorc}% de ${v.capacidadTanqueGalones} gal (${v.tipoCombustible}, ${v.consumoKmPorGalon} km/gal) | Odómetro: ${v.kilometrajeActual.toLocaleString('es-CO')} km | Llantas: ${v.desgasteLlantasPorc}% desgaste${v.notasCashmet ? ` | Notas: ${v.notasCashmet}` : ''}`
     )
     .join('\n')
 
   const personalTxt = ctx.empleados
     .map(
       (e) =>
-        `- ${e.nombreCompleto} (${e.cargo}) | ${e.activo ? 'En Reserva' : 'Excluido'} | ${horasPorEmp.get(e.id) || 0}/42h esta semana${e.horariosNoDisponibles.length ? ` | Restricciones: ${e.horariosNoDisponibles.map((h) => `día ${h.diaSemana} ${h.horaInicio}-${h.horaFin} (${h.motivo})`).join(', ')}` : ''}`
+        `- ${e.nombreCompleto} (${e.cargo}) | ${e.activo ? 'En Reserva' : 'Excluido'} | ${horasPorEmp.get(e.id) || 0}/${e.maxHorasSemanales || 42}h esta semana${e.horariosNoDisponibles.length ? ` | Restricciones: ${e.horariosNoDisponibles.map((h) => `${DIAS_SEMANA_CORTO[h.diaSemana] ?? `día ${h.diaSemana}`} ${h.horaInicio}-${h.horaFin} (${h.motivo})`).join(', ')}` : ''}`
     )
     .join('\n')
 
@@ -1146,8 +1184,9 @@ function construirSnapshotGema(ctx: ContextoGemaCompleto): string {
     )
     .join('\n')
 
-  const radarTxt = ctx.eventosRadar.length
-    ? ctx.eventosRadar
+  const radarVigente = filtrarEventosRadarVigentes(ctx.eventosRadar)
+  const radarTxt = radarVigente.length
+    ? radarVigente
         .map(
           (ev) =>
             `- [${ev.esNoticiaWebReal ? 'Noticia Web Real ✓' : 'Llamada Comunitaria'}] ${ev.titulo} · ${ev.lugar} (${ev.departamento}) | Prioridad: ${ev.recomendacionGema} | ${ev.resumen}${ev.despachado ? ' [YA DESPACHADO]' : ''}`
@@ -1178,10 +1217,13 @@ function construirSnapshotGema(ctx: ContextoGemaCompleto): string {
         .join('\n')
     : '- Aún no hay crónicas archivadas.'
 
-  const saldoPendiente = Math.max(
-    0,
-    ctx.tarjetaCombustible.saldoAcumuladoCOP - (ctx.tarjetaCombustible.saldoLiquidadoCOP || 0)
-  )
+  const montoLiquidado =
+    typeof ctx.tarjetaCombustible.saldoLiquidadoCOP === 'number'
+      ? ctx.tarjetaCombustible.saldoLiquidadoCOP
+      : ctx.tarjetaCombustible.liquidadoEnCashmet
+        ? ctx.tarjetaCombustible.saldoAcumuladoCOP
+        : 0
+  const saldoPendiente = Math.max(0, Math.round(ctx.tarjetaCombustible.saldoAcumuladoCOP - montoLiquidado))
 
   return `ESTADO EN VIVO BEAR'S RESERVE (${hoy} · ${hora}):
 
@@ -1198,12 +1240,12 @@ ${flotaTxt || '- Sin vehículos'}
 
 COMBUSTIBLE Y TARJETA (${ctx.tarjetaCombustible.mes}):
 - Precios vigentes (${ctx.preciosCombustible.fuente}): Corriente $${ctx.preciosCombustible.corrientePorGalon.toLocaleString('es-CO')}, ACPM $${ctx.preciosCombustible.dieselPorGalon.toLocaleString('es-CO')}, Extra $${ctx.preciosCombustible.extraPorGalon.toLocaleString('es-CO')}
-- Tarjeta mes: Acumulado $${ctx.tarjetaCombustible.saldoAcumuladoCOP.toLocaleString('es-CO')} COP (${ctx.tarjetaCombustible.totalGalonesMes} gal) | Liquidado: $${(ctx.tarjetaCombustible.saldoLiquidadoCOP || 0).toLocaleString('es-CO')} COP | Pendiente por liquidar: $${saldoPendiente.toLocaleString('es-CO')} COP
+- Tarjeta mes: Acumulado $${ctx.tarjetaCombustible.saldoAcumuladoCOP.toLocaleString('es-CO')} COP (${ctx.tarjetaCombustible.totalGalonesMes} gal) | Liquidado: $${montoLiquidado.toLocaleString('es-CO')} COP | Pendiente por liquidar: $${saldoPendiente.toLocaleString('es-CO')} COP
 
 RUTAS HABITUALES:
 ${rutasTxt}
 
-RADAR DE CONTINGENCIAS (${ctx.eventosRadar.length}):
+RADAR DE CONTINGENCIAS (${radarVigente.length}):
 ${radarTxt}
 
 MISIONES ACTIVAS / PROGRAMADAS:
@@ -1221,6 +1263,7 @@ export async function conversarConGemaAI(
   if (!geminiDisponible) return null
 
   const snapshot = construirSnapshotGema(contexto)
+  const mensajeLimpio = String(mensaje || '').trim()
   const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = []
 
   for (const m of historial.slice(-10)) {
@@ -1233,10 +1276,22 @@ export async function conversarConGemaAI(
   }
   while (contents.length && contents[0].role !== 'user') contents.shift()
 
-  contents.push({
-    role: 'user',
-    parts: [{ text: `${snapshot}\n\nMensaje del coordinador: ${mensaje}` }],
-  })
+  // Evitar doble turno consecutivo `role: 'user'` (ej. cuando la UI ya agregó el mensaje actual al historial)
+  const turnoNuevoTexto = `${snapshot}\n\nMensaje del coordinador: ${mensajeLimpio}`
+  const ultimoContenido = contents[contents.length - 1]
+  if (ultimoContenido && ultimoContenido.role === 'user') {
+    const ultimoTexto = ultimoContenido.parts[ultimoContenido.parts.length - 1]?.text?.trim()
+    if (ultimoTexto === mensajeLimpio) {
+      ultimoContenido.parts[ultimoContenido.parts.length - 1] = { text: turnoNuevoTexto }
+    } else {
+      ultimoContenido.parts.push({ text: turnoNuevoTexto })
+    }
+  } else {
+    contents.push({
+      role: 'user',
+      parts: [{ text: turnoNuevoTexto }],
+    })
+  }
 
   try {
     const { res } = await llamarGemini({
@@ -1259,7 +1314,13 @@ export async function conversarConGemaAI(
     const respuesta = String(parsed.respuesta ?? parsed.mensaje ?? '').trim()
     if (!respuesta) return null
 
+    const vehiculosHabilitados = new Set(
+      contexto.vehiculos
+        .filter((v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento')
+        .map((v) => v.id)
+    )
     const acciones: AccionGema[] = []
+    const accionesVistas = new Set<string>()
     if (Array.isArray(parsed.acciones)) {
       for (const a of parsed.acciones) {
         if (
@@ -1267,10 +1328,17 @@ export async function conversarConGemaAI(
           a.tipo === 'escanear_radar' ||
           a.tipo === 'actualizar_precios'
         ) {
-          acciones.push({ tipo: a.tipo })
+          if (!accionesVistas.has(a.tipo)) {
+            accionesVistas.add(a.tipo)
+            acciones.push({ tipo: a.tipo })
+          }
         } else if (a.tipo === 'tanquear_vehiculo') {
           const vid = String(a.vehiculoId ?? a.params?.vehiculoId ?? '').trim()
-          if (vid) acciones.push({ tipo: 'tanquear_vehiculo', vehiculoId: vid })
+          const clave = `tanquear_vehiculo:${vid}`
+          if (vid && vehiculosHabilitados.has(vid) && !accionesVistas.has(clave)) {
+            accionesVistas.add(clave)
+            acciones.push({ tipo: 'tanquear_vehiculo', vehiculoId: vid })
+          }
         }
       }
     }
@@ -1312,12 +1380,20 @@ export async function seleccionarConvoyMisionConIA(
 
   const maxConvoy = Math.min(3, candidatos.length, Math.max(1, personalActivoDisponible))
 
+  const terrenoBaseAutonomia =
+    logistica.categoriaDistancia === 'nacional' ? 'mixto_montaña' : 'trocha_moderada'
+
   const catalogoFlota = candidatos
     .map((v) => {
-      const galActuales = Number(
-        ((v.capacidadTanqueGalones || 18) * ((v.nivelCombustiblePorc ?? 80) / 100)).toFixed(1)
+      const nivel = Number.isFinite(v.nivelCombustiblePorc) ? v.nivelCombustiblePorc : 50
+      const capGal =
+        Number.isFinite(v.capacidadTanqueGalones) && v.capacidadTanqueGalones > 0
+          ? v.capacidadTanqueGalones
+          : CAPACIDAD_TANQUE_FALLBACK_GAL
+      const galActuales = Number((capGal * (nivel / 100)).toFixed(1))
+      const autonomiaKm = Math.round(
+        calcularAutonomiaRealKm(v, terrenoBaseAutonomia, logistica.minutosRalenti)
       )
-      const autonomiaKm = Math.round(galActuales * (v.consumoKmPorGalon || 20))
       const extras = [
         v.carroceria ? `carrocería: ${v.carroceria}` : '',
         v.capacidadTexto ? `capacidad: ${v.capacidadTexto}` : '',
@@ -1327,7 +1403,7 @@ export async function seleccionarConvoyMisionConIA(
         .filter(Boolean)
         .join(' | ')
 
-      return `- id="${v.id}" | ${v.marca} ${v.linea}${v.modelo ? ` (${v.modelo})` : ''} | tipo=${v.tipo} | comb=${v.tipoCombustible} | tanque=${v.nivelCombustiblePorc}% (${galActuales}/${v.capacidadTanqueGalones} gal, autonomía actual ~${autonomiaKm} km) | llantas desgaste=${v.desgasteLlantasPorc}%${extras ? ` | ${extras}` : ''}`
+      return `- id="${v.id}" | ${v.marca} ${v.linea}${v.modelo ? ` (${v.modelo})` : ''} | tipo=${v.tipo} | comb=${v.tipoCombustible} | tanque=${nivel}% (${galActuales}/${capGal} gal, autonomía real estimada ~${autonomiaKm} km) | llantas desgaste=${v.desgasteLlantasPorc}%${extras ? ` | ${extras}` : ''}`
     })
     .join('\n')
 

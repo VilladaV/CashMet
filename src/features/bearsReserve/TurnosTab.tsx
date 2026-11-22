@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { EmpleadoOperativo, TurnoSemanal } from './types'
 import {
   Sparkles,
@@ -23,6 +23,7 @@ interface Props {
 }
 
 const NOMBRES_DIAS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+const FORMATO_HORA_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 
 const FRANJAS_24H = [
   {
@@ -52,11 +53,20 @@ const FRANJAS_24H = [
 ]
 
 function calcularDiasSemana(refSemanaISO?: string) {
-  let base: Date
-  if (refSemanaISO) {
+  let base: Date | null = null
+  if (refSemanaISO && /^\d{4}-\d{2}-\d{2}$/.test(refSemanaISO)) {
     const [y, m, d] = refSemanaISO.split('-').map(Number)
-    base = new Date(y, m - 1, d, 12, 0, 0)
-  } else {
+    const candidato = new Date(y, m - 1, d, 12, 0, 0)
+    if (
+      !Number.isNaN(candidato.getTime()) &&
+      candidato.getFullYear() === y &&
+      candidato.getMonth() === m - 1 &&
+      candidato.getDate() === d
+    ) {
+      base = candidato
+    }
+  }
+  if (!base) {
     const hoyD = new Date()
     base = new Date(
       hoyD.getFullYear(),
@@ -101,7 +111,31 @@ export default function TurnosTab({
   const [motivo, setMotivo] = useState('Universidad / Clases')
   const [vista, setVista] = useState<'horario' | 'tarjetas'>('horario')
   const [animandoRotacion, setAnimandoRotacion] = useState(false)
-  const [mensajeRotacion, setMensajeRotacion] = useState<string | null>(null)
+  const [busyEmpleadoId, setBusyEmpleadoId] = useState<string | null>(null)
+  const [guardandoRestriccion, setGuardandoRestriccion] = useState(false)
+  const [errorRestriccion, setErrorRestriccion] = useState('')
+  const [mensajeRotacion, setMensajeRotacion] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(
+    null
+  )
+
+  const animTimerRef = useRef<number | null>(null)
+  const msgTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (animTimerRef.current !== null) window.clearTimeout(animTimerRef.current)
+      if (msgTimerRef.current !== null) window.clearTimeout(msgTimerRef.current)
+    }
+  }, [])
+
+  const mostrarMensaje = (tipo: 'ok' | 'error', texto: string, ms = 4500) => {
+    if (msgTimerRef.current !== null) window.clearTimeout(msgTimerRef.current)
+    setMensajeRotacion({ tipo, texto })
+    msgTimerRef.current = window.setTimeout(() => {
+      setMensajeRotacion(null)
+      msgTimerRef.current = null
+    }, ms)
+  }
 
   const empSeleccionado = useMemo(
     () => empleados.find((e) => e.id === empSeleccionadoId) || null,
@@ -109,39 +143,113 @@ export default function TurnosTab({
   )
 
   const handleRotar = async () => {
+    if (animandoRotacion) return
     setAnimandoRotacion(true)
     try {
       await onRotarTurnosPorIA()
-      setMensajeRotacion(
+      mostrarMensaje(
+        'ok',
         '✨ ¡Turnos rotados por Gema y guardados en Firestore! Se reorganizó la cuadrilla respetando el tope de 42h.'
       )
+    } catch (e: unknown) {
+      mostrarMensaje(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo rotar el cuadrante en este momento.'
+      )
     } finally {
-      window.setTimeout(() => setAnimandoRotacion(false), 450)
-      window.setTimeout(() => setMensajeRotacion(null), 4500)
+      if (animTimerRef.current !== null) window.clearTimeout(animTimerRef.current)
+      animTimerRef.current = window.setTimeout(() => {
+        setAnimandoRotacion(false)
+        animTimerRef.current = null
+      }, 450)
+    }
+  }
+
+  const handleToggleActivo = async (emp: EmpleadoOperativo) => {
+    if (emp.activoEnCashmet === false || busyEmpleadoId === emp.id) return
+    const activoActual = emp.activo !== false
+    setBusyEmpleadoId(emp.id)
+    try {
+      await onActualizarEmpleado(emp.id, { activo: !activoActual })
+    } catch (e: unknown) {
+      mostrarMensaje(
+        'error',
+        e instanceof Error
+          ? e.message
+          : `No se pudo actualizar el estado de ${emp.nombreCompleto}.`
+      )
+    } finally {
+      setBusyEmpleadoId(null)
     }
   }
 
   const agregarRestriccionHorario = async () => {
-    if (!empSeleccionado) return
-    const actual = empSeleccionado.horariosNoDisponibles || []
-    const nueva = {
-      diaSemana: nuevoDiaSemana,
-      horaInicio,
-      horaFin,
-      motivo: motivo.trim() || 'Estudio / Personal',
+    if (!empSeleccionado || guardandoRestriccion || busyEmpleadoId === empSeleccionado.id) return
+    const hi = horaInicio.trim()
+    const hf = horaFin.trim()
+    if (!FORMATO_HORA_RE.test(hi) || !FORMATO_HORA_RE.test(hf)) {
+      setErrorRestriccion('Ingresa horas válidas en formato HH:MM (ej. 18:00).')
+      return
     }
-    const actualizados = [...actual, nueva]
-    await onActualizarEmpleado(empSeleccionado.id, { horariosNoDisponibles: actualizados })
-    setMensajeRotacion(
-      `📅 Horario de ${empSeleccionado.nombreCompleto} actualizado y cuadrante reajustado automáticamente.`
+    if (hi >= hf) {
+      setErrorRestriccion('La hora de inicio debe ser estrictamente menor que la hora de fin.')
+      return
+    }
+    const actual = empSeleccionado.horariosNoDisponibles || []
+    const duplicado = actual.some(
+      (h) => h.diaSemana === nuevoDiaSemana && h.horaInicio === hi && h.horaFin === hf
     )
-    window.setTimeout(() => setMensajeRotacion(null), 4000)
+    if (duplicado) {
+      setErrorRestriccion('Ya existe exactamente esa restricción horaria para ese día.')
+      return
+    }
+
+    setErrorRestriccion('')
+    setGuardandoRestriccion(true)
+    setBusyEmpleadoId(empSeleccionado.id)
+    try {
+      const nueva = {
+        diaSemana: nuevoDiaSemana,
+        horaInicio: hi,
+        horaFin: hf,
+        motivo: motivo.trim() || 'Estudio / Personal',
+      }
+      const actualizados = [...actual, nueva]
+      await onActualizarEmpleado(empSeleccionado.id, { horariosNoDisponibles: actualizados })
+      mostrarMensaje(
+        'ok',
+        `📅 Horario de ${empSeleccionado.nombreCompleto} actualizado y cuadrante reajustado automáticamente.`,
+        4000
+      )
+    } catch (e: unknown) {
+      setErrorRestriccion(
+        e instanceof Error ? e.message : 'No se pudo guardar la restricción horaria.'
+      )
+    } finally {
+      setGuardandoRestriccion(false)
+      setBusyEmpleadoId(null)
+    }
   }
 
   const borrarRestriccion = async (idx: number) => {
-    if (!empSeleccionado) return
-    const actualizados = (empSeleccionado.horariosNoDisponibles || []).filter((_, i) => i !== idx)
-    await onActualizarEmpleado(empSeleccionado.id, { horariosNoDisponibles: actualizados })
+    if (!empSeleccionado || busyEmpleadoId === empSeleccionado.id) return
+    setBusyEmpleadoId(empSeleccionado.id)
+    try {
+      const actualizados = (empSeleccionado.horariosNoDisponibles || []).filter((_, i) => i !== idx)
+      await onActualizarEmpleado(empSeleccionado.id, { horariosNoDisponibles: actualizados })
+      mostrarMensaje(
+        'ok',
+        `📅 Restricción eliminada de ${empSeleccionado.nombreCompleto} y cuadrante recalculado.`,
+        3500
+      )
+    } catch (e: unknown) {
+      mostrarMensaje(
+        'error',
+        e instanceof Error ? e.message : 'No se pudo eliminar la restricción horaria.'
+      )
+    } finally {
+      setBusyEmpleadoId(null)
+    }
   }
 
   const diasSemana = useMemo(() => calcularDiasSemana(turnos[0]?.semanaISO), [turnos])
@@ -152,14 +260,23 @@ export default function TurnosTab({
   )
 
   const empleadosActivos = empleados.filter((e) => e.activo !== false)
-  const totalHorasProgramadas = turnosSemanaActual.reduce((acc, t) => acc + t.horas, 0)
+  const totalHorasProgramadas = Number(
+    turnosSemanaActual
+      .filter((t) => !t.esRespaldoCoordinador)
+      .reduce((acc, t) => acc + t.horas, 0)
+      .toFixed(1)
+  )
 
-  // Cobertura real de las 21 franjas (7 días x 3 franjas)
+  // Cobertura real de las 21 franjas (7 días x 3 franjas), excluyendo respaldos sin personal
   const franjasCubiertas = useMemo(() => {
     let cubiertas = 0
     for (const d of diasSemana) {
       for (const f of FRANJAS_24H) {
-        if (turnosSemanaActual.some((t) => t.fecha === d.fechaISO && t.franja === f.clave)) {
+        if (
+          turnosSemanaActual.some(
+            (t) => !t.esRespaldoCoordinador && t.fecha === d.fechaISO && t.franja === f.clave
+          )
+        ) {
           cubiertas++
         }
       }
@@ -223,8 +340,14 @@ export default function TurnosTab({
       </div>
 
       {mensajeRotacion && (
-        <div className="rounded-2xl border border-emerald-400/40 bg-emerald-500/15 p-2.5 text-center text-xs font-bold text-emerald-200 shadow-md">
-          {mensajeRotacion}
+        <div
+          className={`rounded-2xl border p-2.5 text-center text-xs font-bold shadow-md ${
+            mensajeRotacion.tipo === 'error'
+              ? 'border-red-400/40 bg-red-500/15 text-red-200'
+              : 'border-emerald-400/40 bg-emerald-500/15 text-emerald-200'
+          }`}
+        >
+          {mensajeRotacion.texto}
         </div>
       )}
 
@@ -244,124 +367,154 @@ export default function TurnosTab({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-          {empleados.map((emp) => {
-            const activo = emp.activo !== false
-            const inactivoEnCashmet = emp.activoEnCashmet === false
-            const horasSemana = Number(
-              turnosSemanaActual
-                .filter((t) => t.empleadoId === emp.id)
-                .reduce((s, t) => s + t.horas, 0)
-                .toFixed(1)
-            )
-            const porcHoras = Math.min(100, Math.round((horasSemana / 42) * 100))
-            const esSeleccionado = empSeleccionado?.id === emp.id
+        {empleados.length === 0 ? (
+          <div className="rounded-2xl border border-white/10 bg-black/30 p-6 text-center text-mist-400">
+            <p className="font-bold text-white">No hay colaboradores registrados en Nómina.</p>
+            <p className="mt-1 text-[11px] text-mist-500">
+              Agrega colaboradores activos en el módulo Nómina de CashMet para programar turnos 24/7.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+            {empleados.map((emp) => {
+              const activo = emp.activo !== false
+              const inactivoEnCashmet = emp.activoEnCashmet === false
+              const ocupado = busyEmpleadoId === emp.id
+              const maxHoras = Math.min(42, emp.maxHorasSemanales || 42)
+              const horasSemana = Number(
+                turnosSemanaActual
+                  .filter((t) => t.empleadoId === emp.id)
+                  .reduce((s, t) => s + t.horas, 0)
+                  .toFixed(1)
+              )
+              const porcHoras = Math.min(100, Math.round((horasSemana / Math.max(1, maxHoras)) * 100))
+              const esSeleccionado = empSeleccionado?.id === emp.id
+              const restricciones = emp.horariosNoDisponibles || []
 
-            return (
-              <div
-                key={emp.id}
-                className={`rounded-2xl border p-3 transition ${
-                  !activo
-                    ? 'border-white/[0.05] bg-white/[0.01] opacity-65'
-                    : esSeleccionado
-                      ? 'border-sky-400/50 bg-sky-400/10 shadow-md'
-                      : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div
-                    onClick={() => setEmpSeleccionadoId(emp.id)}
-                    className="flex-1 cursor-pointer select-none"
-                  >
-                    <div className="flex items-center gap-2 font-bold text-white">
-                      {activo ? (
-                        <UserCheck className="h-4 w-4 text-emerald-400 shrink-0" />
-                      ) : (
-                        <UserX className="h-4 w-4 text-mist-500 shrink-0" />
-                      )}
-                      <span className="truncate">{emp.nombreCompleto}</span>
+              return (
+                <div
+                  key={emp.id}
+                  className={`rounded-2xl border p-3 transition ${
+                    !activo
+                      ? 'border-white/[0.05] bg-white/[0.01] opacity-65'
+                      : esSeleccionado
+                        ? 'border-sky-400/50 bg-sky-400/10 shadow-md'
+                        : 'border-white/[0.08] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setErrorRestriccion('')
+                        setEmpSeleccionadoId(emp.id)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setErrorRestriccion('')
+                          setEmpSeleccionadoId(emp.id)
+                        }
+                      }}
+                      className="flex-1 cursor-pointer select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-sky-400 rounded-lg"
+                    >
+                      <div className="flex items-center gap-2 font-bold text-white">
+                        {activo ? (
+                          <UserCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+                        ) : (
+                          <UserX className="h-4 w-4 text-mist-500 shrink-0" />
+                        )}
+                        <span className="truncate">{emp.nombreCompleto}</span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-mist-400">{emp.cargo}</div>
                     </div>
-                    <div className="mt-0.5 text-[11px] text-mist-400">{emp.cargo}</div>
+
+                    {/* Switch manual para habilitar/deshabilitar en Bear's Reserve */}
+                    <button
+                      type="button"
+                      disabled={inactivoEnCashmet || ocupado}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void handleToggleActivo(emp)
+                      }}
+                      className={`shrink-0 rounded-xl px-2.5 py-1 text-[10px] font-extrabold transition shadow-sm disabled:opacity-50 ${
+                        inactivoEnCashmet
+                          ? 'cursor-not-allowed border border-red-400/20 bg-red-500/10 text-red-300/70'
+                          : activo
+                            ? 'cursor-pointer border border-emerald-400/40 bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25'
+                            : 'cursor-pointer border border-mist-600/30 bg-mist-800/40 text-mist-400 hover:bg-mist-700/50'
+                      }`}
+                      title={
+                        inactivoEnCashmet
+                          ? 'Inactivo en la Nómina de CashMet'
+                          : activo
+                            ? 'Clic para desactivar de Bear\'s Reserve'
+                            : 'Clic para activar en Bear\'s Reserve'
+                      }
+                    >
+                      {inactivoEnCashmet
+                        ? '⛔ Inactivo CashMet'
+                        : ocupado
+                          ? 'Actualizando...'
+                          : activo
+                            ? '✅ En Reserva'
+                            : '⏸️ Desactivado'}
+                    </button>
                   </div>
 
-                  {/* Switch manual para habilitar/deshabilitar en Bear's Reserve */}
-                  <button
-                    type="button"
-                    disabled={inactivoEnCashmet}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      void onActualizarEmpleado(emp.id, { activo: !activo })
-                    }}
-                    className={`shrink-0 rounded-xl px-2.5 py-1 text-[10px] font-extrabold transition shadow-sm ${
-                      inactivoEnCashmet
-                        ? 'cursor-not-allowed border border-red-400/20 bg-red-500/10 text-red-300/70'
-                        : activo
-                          ? 'cursor-pointer border border-emerald-400/40 bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25'
-                          : 'cursor-pointer border border-mist-600/30 bg-mist-800/40 text-mist-400 hover:bg-mist-700/50'
-                    }`}
-                    title={
-                      inactivoEnCashmet
-                        ? 'Inactivo en la Nómina de CashMet'
-                        : activo
-                          ? 'Clic para desactivar de Bear\'s Reserve'
-                          : 'Clic para activar en Bear\'s Reserve'
-                    }
-                  >
-                    {inactivoEnCashmet ? '⛔ Inactivo CashMet' : activo ? '✅ En Reserva' : '⏸️ Desactivado'}
-                  </button>
+                  {/* Barra de horas reales */}
+                  {activo ? (
+                    <div className="mt-2.5 space-y-1">
+                      <div className="flex justify-between text-[10px] text-mist-400">
+                        <span>Carga asignada esta semana:</span>
+                        <b
+                          className={`font-mono ${
+                            horasSemana >= Math.min(40, maxHoras)
+                              ? 'text-emerald-300 font-bold'
+                              : horasSemana > 0
+                                ? 'text-white'
+                                : 'text-mist-500'
+                          }`}
+                        >
+                          {horasSemana} / {maxHoras}h
+                        </b>
+                      </div>
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            horasSemana >= Math.min(40, maxHoras)
+                              ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]'
+                              : 'bg-sky-400'
+                          }`}
+                          style={{ width: `${porcHoras}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-2.5 rounded-lg border border-dashed border-white/10 px-2 py-1 text-[10px] text-mist-500 text-center">
+                      Desactivado de la asignación operativa de guardia
+                    </div>
+                  )}
+
+                  {restricciones.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {restricciones.map((h, i) => (
+                        <span
+                          key={`${h.diaSemana}-${h.horaInicio}-${h.horaFin}-${i}`}
+                          className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-black/40 px-1.5 py-0.5 text-[9px] text-mist-300"
+                        >
+                          <BookOpen className="h-2.5 w-2.5 text-sky-300" />
+                          {NOMBRES_DIAS[h.diaSemana % 7]} {h.horaInicio}-{h.horaFin}: {h.motivo}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
-
-                {/* Barra de horas reales */}
-                {activo ? (
-                  <div className="mt-2.5 space-y-1">
-                    <div className="flex justify-between text-[10px] text-mist-400">
-                      <span>Carga asignada esta semana:</span>
-                      <b
-                        className={`font-mono ${
-                          horasSemana >= 40
-                            ? 'text-emerald-300 font-bold'
-                            : horasSemana > 0
-                              ? 'text-white'
-                              : 'text-mist-500'
-                        }`}
-                      >
-                        {horasSemana} / 42h
-                      </b>
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
-                      <div
-                        className={`h-full rounded-full transition-all ${
-                          horasSemana >= 40
-                            ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]'
-                            : 'bg-sky-400'
-                        }`}
-                        style={{ width: `${porcHoras}%` }}
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-2.5 rounded-lg border border-dashed border-white/10 px-2 py-1 text-[10px] text-mist-500 text-center">
-                    Desactivado de la asignación operativa de guardia
-                  </div>
-                )}
-
-                {emp.horariosNoDisponibles.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {emp.horariosNoDisponibles.map((h, i) => (
-                      <span
-                        key={i}
-                        className="inline-flex items-center gap-1 rounded-md border border-white/10 bg-black/40 px-1.5 py-0.5 text-[9px] text-mist-300"
-                      >
-                        <BookOpen className="h-2.5 w-2.5 text-sky-300" />
-                        {NOMBRES_DIAS[h.diaSemana % 7]} {h.horaInicio}-{h.horaFin}: {h.motivo}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* Editor de Horarios Personales / Clases Universitarias */}
@@ -406,7 +559,10 @@ export default function TurnosTab({
               <input
                 type="time"
                 value={horaInicio}
-                onChange={(e) => setHoraInicio(e.target.value)}
+                onChange={(e) => {
+                  setHoraInicio(e.target.value)
+                  if (errorRestriccion) setErrorRestriccion('')
+                }}
                 className="field-dark h-9 rounded-xl px-2 text-xs"
               />
             </label>
@@ -416,7 +572,10 @@ export default function TurnosTab({
               <input
                 type="time"
                 value={horaFin}
-                onChange={(e) => setHoraFin(e.target.value)}
+                onChange={(e) => {
+                  setHoraFin(e.target.value)
+                  if (errorRestriccion) setErrorRestriccion('')
+                }}
                 className="field-dark h-9 rounded-xl px-2 text-xs"
               />
             </label>
@@ -433,13 +592,18 @@ export default function TurnosTab({
             </label>
           </div>
 
-          <div className="mt-3 flex items-center justify-between">
+          {errorRestriccion && (
+            <p className="mt-2 text-[11px] font-bold text-red-400">{errorRestriccion}</p>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
             <button
               type="button"
+              disabled={guardandoRestriccion || busyEmpleadoId === empSeleccionado.id}
               onClick={() => void agregarRestriccionHorario()}
-              className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-sky-400/20 px-3 py-1.5 font-bold text-sky-200 transition hover:bg-sky-400/30"
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-sky-400/20 px-3 py-1.5 font-bold text-sky-200 transition hover:bg-sky-400/30 disabled:opacity-40"
             >
-              <span>+ Añadir horario no disponible</span>
+              <span>{guardandoRestriccion ? 'Guardando...' : '+ Añadir horario no disponible'}</span>
             </button>
             <span className="text-[11px] text-mist-500">
               Al guardar se reajusta el cuadrante automáticamente
@@ -449,14 +613,15 @@ export default function TurnosTab({
           <div className="mt-3 flex flex-wrap gap-2">
             {(empSeleccionado.horariosNoDisponibles || []).map((h, i) => (
               <span
-                key={i}
+                key={`${h.diaSemana}-${h.horaInicio}-${h.horaFin}-${i}`}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-black/40 px-2.5 py-1 text-[11px] text-mist-300"
               >
                 <b>{NOMBRES_DIAS[h.diaSemana % 7]}</b>: {h.horaInicio} - {h.horaFin} ({h.motivo})
                 <button
                   type="button"
+                  disabled={busyEmpleadoId === empSeleccionado.id}
                   onClick={() => void borrarRestriccion(i)}
-                  className="cursor-pointer text-red-400 hover:text-red-300"
+                  className="cursor-pointer text-red-400 hover:text-red-300 disabled:opacity-40"
                   title="Eliminar restricción"
                 >
                   ✕
@@ -538,7 +703,7 @@ export default function TurnosTab({
                       <div className="flex items-center justify-center gap-1.5 text-[12px] font-extrabold text-white">
                         <span>{dia.nombre}</span>
                         {dia.esHoy && (
-                          <span className="rounded-full bg-sky-400/30 px-1.5 py-0.2 text-[8px] font-extrabold text-sky-200 animate-pulse">
+                          <span className="rounded-full bg-sky-400/30 px-1.5 py-0.5 text-[8px] font-extrabold text-sky-200 animate-pulse">
                             HOY
                           </span>
                         )}
@@ -596,6 +761,8 @@ export default function TurnosTab({
                                   t.id.includes('-mec') ||
                                   t.rolGuardia.toLowerCase().includes('mec')
                                 const esRuta = Boolean(t.rutaHabitualId)
+                                const horarioTurno = `${t.horaInicio} - ${t.horaFin}`
+                                const horarioDiferente = horarioTurno !== franja.horario
 
                                 return (
                                   <div
@@ -609,7 +776,7 @@ export default function TurnosTab({
                                             ? 'border-blue-400/25 bg-blue-500/[0.08] text-white'
                                             : esMecanico
                                               ? 'border-emerald-400/25 bg-emerald-500/[0.08] text-white'
-                                              : 'border-white/15 bg-white/[0.04] text-white'
+                                              : 'border-amber-400/20 bg-white/[0.04] text-white'
                                     }`}
                                   >
                                     <div className="flex items-center justify-between gap-1">
@@ -621,7 +788,9 @@ export default function TurnosTab({
                                               ? 'text-sky-300'
                                               : esConductor
                                                 ? 'text-blue-200'
-                                                : 'text-emerald-200'
+                                                : esMecanico
+                                                  ? 'text-emerald-200'
+                                                  : 'text-amber-200'
                                         }`}
                                       >
                                         <span>
@@ -630,6 +799,11 @@ export default function TurnosTab({
                                         <span className="truncate">{t.empleadoNombre}</span>
                                       </span>
                                     </div>
+                                    {horarioDiferente && (
+                                      <div className="font-mono text-[9px] font-bold text-amber-300/90">
+                                        ⏰ {horarioTurno}
+                                      </div>
+                                    )}
                                     <div className="text-[9px] text-mist-400 line-clamp-2 leading-tight">
                                       {t.rolGuardia}
                                     </div>

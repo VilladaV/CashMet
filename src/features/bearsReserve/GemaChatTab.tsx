@@ -83,16 +83,60 @@ export default function GemaChatTab({
   )
   const [input, setInput] = useState('')
   const [escribiendo, setEscribiendo] = useState(false)
+  const firmaPersistidos =
+    mensajesPersistidos.length > 0
+      ? `${mensajesPersistidos.length}:${mensajesPersistidos[mensajesPersistidos.length - 1]?.id ?? ''}`
+      : ''
+  const [ultimaFirmaPersistida, setUltimaFirmaPersistida] = useState(firmaPersistidos)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const montadoRef = useRef(true)
+
+  useEffect(() => {
+    montadoRef.current = true
+    return () => {
+      montadoRef.current = false
+    }
+  }, [])
+
+  // Sincronizar historial cuando cambie externamente (p. ej. tras hidratación o reintento de Firestore)
+  if (!escribiendo && firmaPersistidos && firmaPersistidos !== ultimaFirmaPersistida) {
+    setUltimaFirmaPersistida(firmaPersistidos)
+    const ultimoPrev = mensajes[mensajes.length - 1]?.id
+    const ultimoPersistido = mensajesPersistidos[mensajesPersistidos.length - 1]?.id
+    if (mensajes.length !== mensajesPersistidos.length || ultimoPrev !== ultimoPersistido) {
+      setMensajes(mensajesPersistidos)
+    }
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [mensajes, escribiendo])
 
   const actualizarYGuardar = (nuevos: MensajeGema[]) => {
+    if (!montadoRef.current) return
     setMensajes(nuevos)
     if (onGuardarMensajes) {
-      void onGuardarMensajes(nuevos)
+      void Promise.resolve(onGuardarMensajes(nuevos)).catch(() => undefined)
+    }
+  }
+
+  const ejecutarAccionSegura = async (
+    acc: { tipo: string; vehiculoId?: string },
+    errores: string[]
+  ) => {
+    try {
+      if (acc.tipo === 'rotar_turnos') {
+        await onRotarTurnos()
+      } else if (acc.tipo === 'tanquear_vehiculo' && acc.vehiculoId && onTanquearVehiculo) {
+        await onTanquearVehiculo(acc.vehiculoId)
+      } else if (acc.tipo === 'escanear_radar' && onEscanearRadar) {
+        await onEscanearRadar()
+      } else if (acc.tipo === 'actualizar_precios' && onActualizarPrecios) {
+        await onActualizarPrecios()
+      }
+    } catch (e: unknown) {
+      const detalle = e instanceof Error ? e.message : 'Error ejecutando acción operativa.'
+      errores.push(`⚠️ No se pudo completar "${acc.tipo}": ${detalle}`)
     }
   }
 
@@ -100,6 +144,7 @@ export default function GemaChatTab({
     const textoAEnviar = (textoDirecto || input).trim()
     if (!textoAEnviar || escribiendo) return
 
+    const historialPrevio = mensajes
     const userMsg: MensajeGema = {
       id: crearMsgId('u'),
       remitente: 'usuario',
@@ -107,7 +152,7 @@ export default function GemaChatTab({
       hora: horaActual(),
     }
 
-    const historialConUsuario = [...mensajes, userMsg]
+    const historialConUsuario = [...historialPrevio, userMsg]
     actualizarYGuardar(historialConUsuario)
     if (!textoDirecto) setInput('')
     setEscribiendo(true)
@@ -115,8 +160,8 @@ export default function GemaChatTab({
     try {
       const enTurnoAhora = empleadosEnTurnoAhora(turnos, empleados, hoyISO(), horaActual24())
 
-      // 1. Intentar conversar con Gemini AI con contexto completo de Bear's Reserve
-      const resGemini = await conversarConGemaAI(textoAEnviar, historialConUsuario, {
+      // 1. Pasar historial PREVIO (sin userMsg) para no duplicar turno 'user' en Gemini
+      const resGemini = await conversarConGemaAI(textoAEnviar, historialPrevio, {
         empleados,
         vehiculos,
         turnos,
@@ -128,27 +173,28 @@ export default function GemaChatTab({
         enTurnoAhora,
       })
 
+      if (!montadoRef.current) return
+
       if (resGemini) {
+        const erroresAccion: string[] = []
+        for (const acc of resGemini.acciones) {
+          await ejecutarAccionSegura(acc, erroresAccion)
+        }
+        if (!montadoRef.current) return
+
+        const textoFinal =
+          erroresAccion.length > 0
+            ? `${resGemini.respuesta}\n\n${erroresAccion.join('\n')}`
+            : resGemini.respuesta
+
         const gemaMsg: MensajeGema = {
           id: crearMsgId('g'),
           remitente: 'gema',
-          texto: resGemini.respuesta,
+          texto: textoFinal,
           hora: horaActual(),
           fuente: 'gemini',
         }
         actualizarYGuardar([...historialConUsuario, gemaMsg])
-
-        // Ejecutar acciones estructuradas solicitadas por Gema Gemini
-        for (const acc of resGemini.acciones) {
-          if (acc.tipo === 'rotar_turnos') await onRotarTurnos()
-          else if (acc.tipo === 'tanquear_vehiculo' && acc.vehiculoId && onTanquearVehiculo) {
-            await onTanquearVehiculo(acc.vehiculoId).catch(() => undefined)
-          } else if (acc.tipo === 'escanear_radar' && onEscanearRadar) {
-            await onEscanearRadar()
-          } else if (acc.tipo === 'actualizar_precios' && onActualizarPrecios) {
-            await onActualizarPrecios()
-          }
-        }
         return
       }
 
@@ -163,26 +209,47 @@ export default function GemaChatTab({
         preciosCombustible,
       })
 
+      const erroresLocal: string[] = []
+      if (resLocal.accion) {
+        await ejecutarAccionSegura(resLocal.accion, erroresLocal)
+      }
+      if (!montadoRef.current) return
+
+      const textoLocalFinal =
+        erroresLocal.length > 0
+          ? `${resLocal.respuesta}\n\n${erroresLocal.join('\n')}`
+          : resLocal.respuesta
+
       const gemaMsg: MensajeGema = {
         id: crearMsgId('g'),
         remitente: 'gema',
-        texto: resLocal.respuesta,
+        texto: textoLocalFinal,
         hora: horaActual(),
         fuente: 'local',
       }
       actualizarYGuardar([...historialConUsuario, gemaMsg])
-
-      if (resLocal.accion?.tipo === 'rotar_turnos') {
-        await onRotarTurnos()
-      } else if (resLocal.accion?.tipo === 'escanear_radar' && onEscanearRadar) {
-        await onEscanearRadar()
-      } else if (resLocal.accion?.tipo === 'actualizar_precios' && onActualizarPrecios) {
-        await onActualizarPrecios()
+    } catch (e: unknown) {
+      if (!montadoRef.current) return
+      const detalle = e instanceof Error ? e.message : 'Error inesperado consultando a Gema.'
+      const errMsg: MensajeGema = {
+        id: crearMsgId('g'),
+        remitente: 'gema',
+        texto: `⚠️ Hubo un inconveniente al procesar tu solicitud (${detalle}). Inténtalo nuevamente.`,
+        hora: horaActual(),
+        fuente: 'local',
       }
+      actualizarYGuardar([...historialConUsuario, errMsg])
     } finally {
-      setEscribiendo(false)
+      if (montadoRef.current) {
+        setEscribiendo(false)
+      }
     }
   }
+
+  const ultimaFuenteGema = [...mensajes]
+    .reverse()
+    .find((m) => m.remitente === 'gema' && m.id !== 'gema-init')?.fuente
+  const usandoRespaldoLocal = !geminiDisponible || ultimaFuenteGema === 'local'
 
   const chips = [
     '📋 Generar informe de hoy',
@@ -204,9 +271,19 @@ export default function GemaChatTab({
             <div className="flex flex-wrap items-center gap-1.5 font-extrabold text-white">
               <span>Gema · Radio de Operaciones Bear&apos;s Reserve</span>
               <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="inline-flex items-center gap-1 rounded-full border border-sky-400/30 bg-sky-400/15 px-2 py-0.5 text-[9px] font-bold text-sky-200">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-bold ${
+                  usandoRespaldoLocal
+                    ? 'border-amber-400/30 bg-amber-400/15 text-amber-200'
+                    : 'border-sky-400/30 bg-sky-400/15 text-sky-200'
+                }`}
+              >
                 <Sparkles className="h-2.5 w-2.5" />
-                {geminiDisponible ? 'Gemini IA en vivo' : 'Modo respaldo local'}
+                {!geminiDisponible
+                  ? 'Modo respaldo local'
+                  : ultimaFuenteGema === 'local'
+                    ? 'Respaldo local (Gemini sin respuesta)'
+                    : 'Gemini IA en vivo'}
               </span>
             </div>
             <div className="text-[11px] text-mist-400">
@@ -257,6 +334,9 @@ export default function GemaChatTab({
                 >
                   {esGema && m.fuente === 'gemini' && (
                     <span className="text-sky-400/80">Gemini IA ·</span>
+                  )}
+                  {esGema && m.fuente === 'local' && m.id !== 'gema-init' && (
+                    <span className="text-amber-300/80">Local ·</span>
                   )}
                   <span>{m.hora}</span>
                 </div>
