@@ -317,7 +317,7 @@ export async function actualizarMovimiento(id: string, input: MovimientoUpdate):
     }
 
     for (const [cuentaId, delta] of deltas) {
-      if (saldos.get(cuentaId) === null) continue // la cuenta vieja ya no existe: nada que revertir
+      if (delta === 0 || saldos.get(cuentaId) === null) continue // sin cambio o cuenta eliminada
       tx.update(doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId), {
         saldoActual: increment(delta),
         actualizado: Date.now(),
@@ -332,10 +332,10 @@ export async function actualizarMovimiento(id: string, input: MovimientoUpdate):
         concepto: input.concepto,
         monto,
         categoria: input.categoria,
-        subcategoria: input.subcategoria,
-        descripcion: input.descripcion,
-        cuentaBancoId: input.cuentaBancoId,
-        cuentaDestinoId: destinoNuevo ?? deleteField(),
+        subcategoria: input.subcategoria?.trim() || deleteField(),
+        descripcion: input.descripcion?.trim() || deleteField(),
+        cuentaBancoId: input.cuentaBancoId || deleteField(),
+        cuentaDestinoId: destinoNuevo || deleteField(),
         actualizado: Date.now(),
       })
     )
@@ -353,10 +353,14 @@ export async function crearCuentaBanco(data: {
   tipo: CuentaBanco['tipo']
   saldoActual: number
 }): Promise<string> {
+  const nombre = String(data.nombre ?? '').trim()
+  if (!nombre) throw new Error('nombre_requerido: la cuenta necesita un nombre')
+  const saldoNum = Number(data.saldoActual)
+  if (!Number.isFinite(saldoNum)) throw new Error('saldo_invalido: el saldo inicial no es válido')
   const ref = await addDoc(collection(db, COLLECTIONS.CUENTAS_BANCO), {
-    nombre: data.nombre,
+    nombre,
     tipo: data.tipo,
-    saldoActual: data.saldoActual,
+    saldoActual: Math.round(saldoNum),
     moneda: 'COP',
     activa: true,
     orden: Date.now(),
@@ -510,7 +514,8 @@ export async function exportarMovimientosCompacto(): Promise<{
 }
 
 export async function actualizarCuentaBanco(id: string, data: Partial<CuentaBanco>): Promise<void> {
-  await updateDoc(doc(db, COLLECTIONS.CUENTAS_BANCO, id), limpio({ ...data, actualizado: Date.now() }))
+  const { id: _omitido, ...resto } = data as Partial<CuentaBanco> & { id?: string }
+  await updateDoc(doc(db, COLLECTIONS.CUENTAS_BANCO, id), limpio({ ...resto, actualizado: Date.now() }))
 }
 
 export async function eliminarCuentaBanco(id: string): Promise<void> {
@@ -521,13 +526,22 @@ export async function eliminarMovimiento(id: string): Promise<void> {
   const ref = doc(db, COLLECTIONS.MOVIMIENTOS, id)
 
   await runTransaction(db, async (tx) => {
+    // FASE 1: todas las lecturas antes de cualquier escritura (contrato obligatorio de Firestore).
     const documento = await tx.get(ref)
     if (!documento.exists()) return
     const datos = documento.data() as Record<string, unknown>
+
+    if (datos.estado === 'anulado') {
+      tx.delete(ref)
+      return
+    }
+
     const monto = Number(datos.monto) || 0
     const tipo = (datos.tipo as TipoMovimiento) ?? 'otro'
     const cuentaBancoId = datos.cuentaBancoId as string | undefined
     const cuentaDestinoId = (datos.cuentaDestinoId as string | undefined) ?? undefined
+    const deudaId = typeof datos.deudaId === 'string' && datos.deudaId ? datos.deudaId : undefined
+    const impuestoId = typeof datos.impuestoId === 'string' && datos.impuestoId ? datos.impuestoId : undefined
 
     const reversos = new Map<string, number>()
     const acumular = (cuentaId: string | undefined, delta: number) => {
@@ -537,11 +551,43 @@ export async function eliminarMovimiento(id: string): Promise<void> {
     acumular(cuentaBancoId, -efectoEnOrigen(tipo, monto))
     if (tipo === 'transferencia') acumular(cuentaDestinoId, -efectoEnDestino(tipo, monto))
 
+    const cuentasExistentes: Array<{ cuentaRef: ReturnType<typeof doc>; delta: number }> = []
     for (const [cuentaId, delta] of reversos) {
       const cuentaRef = doc(db, COLLECTIONS.CUENTAS_BANCO, cuentaId)
       const cuentaSnap = await tx.get(cuentaRef)
-      if (!cuentaSnap.exists()) continue
-      tx.update(cuentaRef, { saldoActual: increment(delta), actualizado: Date.now() })
+      if (cuentaSnap.exists()) cuentasExistentes.push({ cuentaRef, delta })
+    }
+
+    const deudaRef = deudaId ? doc(db, COLLECTIONS.DEUDAS, deudaId) : null
+    const deudaSnap = deudaRef ? await tx.get(deudaRef) : null
+
+    const impuestoRef = impuestoId ? doc(db, COLLECTIONS.IMPUESTOS, impuestoId) : null
+    const impuestoSnap = impuestoRef ? await tx.get(impuestoRef) : null
+
+    // FASE 2: todas las escrituras.
+    const ahora = Date.now()
+    for (const { cuentaRef, delta } of cuentasExistentes) {
+      tx.update(cuentaRef, { saldoActual: increment(delta), actualizado: ahora })
+    }
+
+    if (deudaRef && deudaSnap?.exists() && monto > 0) {
+      const d = deudaSnap.data() as Record<string, unknown>
+      const saldoPrevio = Math.round(Number(d.saldoPendiente) || 0)
+      const nuevoSaldo = saldoPrevio + Math.round(monto)
+      const cambiosDeuda: Record<string, unknown> = {
+        saldoPendiente: nuevoSaldo,
+        actualizado: ahora,
+      }
+      if (d.estado === 'pagada' && nuevoSaldo > 0) cambiosDeuda.estado = 'activa'
+      tx.update(deudaRef, cambiosDeuda)
+    }
+
+    if (impuestoRef && impuestoSnap?.exists()) {
+      tx.update(impuestoRef, {
+        pagado: false,
+        fechaPago: deleteField(),
+        actualizado: ahora,
+      })
     }
 
     tx.delete(ref)

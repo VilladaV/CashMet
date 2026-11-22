@@ -157,22 +157,79 @@ export function estimadosVehiculoCO(params: { modelo?: number; cilindraje?: numb
 
 export function interpretarMensaje(mensaje: string): Interpretacion {
   const t = normalizarTexto(mensaje)
+  const monto = parseMontoCO(mensaje)
+  const moneda = detectarMoneda(mensaje)
+  const tieneMonto = Boolean(monto && monto > 0)
 
   if (/genera\s+(el\s+)?(calendario|eventos|vencimientos)|generar\s+(el\s+)?calendario/.test(t)) {
     return { respuesta: 'Generando el calendario de vencimientos...', acciones: ['generar_calendario'] }
   }
 
+  const mencionaMes =
+    /\b(mes|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\b/.test(
+      t
+    )
   const esResumen =
     /\bresumen\b/.test(t) ||
-    (/\b(gast[eé]|gastos?|ingresos?)\b/.test(t) && /\b(mes|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/.test(t))
+    (!tieneMonto && /\b(gast[eé]|gastos?|ingresos?)\b/.test(t) && mencionaMes) ||
+    (/\b(cuanto\s+(?:gaste|ingrese|entro|salio)|total\s+(?:de\s+)?(?:gastos?|ingresos?))\b/.test(t) &&
+      mencionaMes)
   if (esResumen) {
     return { respuesta: 'Calculando el resumen...', acciones: ['resumen_mes'], params: { mes: mesParam(mensaje) } }
   }
 
+  if (
+    tieneMonto &&
+    monto &&
+    /\b(pague|pago|pagar|abone|abonar)\b/.test(t) &&
+    /\b(sueldo|nomina|salario)\b/.test(t)
+  ) {
+    const nm = mensaje.match(/\b(?:a|para)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+){0,3})/i)
+    return {
+      respuesta: 'Registrando pago de nómina...',
+      acciones: ['pago_nomina'],
+      params: { monto, fecha: parseFecha(mensaje), nombre: nm ? nm[1].trim() : undefined, moneda },
+    }
+  }
+
+  if (
+    tieneMonto &&
+    monto &&
+    parseTipo(mensaje) === 'gasto' &&
+    /\b(recurrente|mensual|mensualmente|fijo|fija|cada mes|todos los meses|bimestral|trimestral|semestral|anual)\b/.test(
+      t
+    )
+  ) {
+    const periodicidad = /\banual\b/.test(t)
+      ? 'anual'
+      : /\bsemestral\b/.test(t)
+        ? 'semestral'
+        : /\btrimestral\b/.test(t)
+          ? 'trimestral'
+          : /\bbimestral\b/.test(t)
+            ? 'bimestral'
+            : 'mensual'
+    return {
+      respuesta: 'Preparando gasto recurrente...',
+      acciones: ['crear_recurrente'],
+      params: {
+        concepto: limpiarConcepto(mensaje),
+        monto,
+        categoria: parseCategoria(mensaje, 'gasto'),
+        periodicidad,
+        diaVencimiento: extraerDiaVencimiento(mensaje),
+        moneda,
+      },
+    }
+  }
+
   const diaVenc = extraerDiaVencimiento(mensaje)
-  if (diaVenc || /\b(agenda|agendame|recuerdame|recordarme|recordatorio|evento|cita|reunion)\b/.test(t)) {
+  if (
+    diaVenc ||
+    (!tieneMonto && /\b(agenda|agendame|recuerdame|recordarme|recordatorio|evento|cita|reunion)\b/.test(t))
+  ) {
     const limpio = mensaje
-      .replace(/\bvence\s+(el\s+)?\d{1,2}\b/gi, '')
+      .replace(/\bvence\s+(?:el\s+)?\d{1,2}\b/gi, '')
       .replace(/\b(agenda|agéndame|agendame|recuérdame|recuerdame|recordarme|recordatorio|evento|cita|reunión|reunion)\b/gi, '')
     return {
       respuesta: 'Preparando el evento...',
@@ -184,48 +241,12 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     }
   }
 
-  const monto = parseMontoCO(mensaje)
-  const moneda = detectarMoneda(mensaje)
-
   if (
+    tieneMonto &&
     monto &&
-    monto > 0 &&
-    /\b(pague|pago|pagar|abone|abonar)\b/.test(t) &&
-    /\b(sueldo|nomina|salario)\b/.test(t)
-  ) {
-    const nm = mensaje.match(/\b(?:a|para)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+){1,3})/i)
-    return {
-      respuesta: 'Registrando pago de nómina...',
-      acciones: ['pago_nomina'],
-      params: { monto, fecha: parseFecha(mensaje), nombre: nm ? nm[1].trim() : undefined, moneda },
-    }
-  }
-
-  if (
-    monto &&
-    monto > 0 &&
-    parseTipo(mensaje) === 'gasto' &&
-    /\b(recurrente|mensual|mensualmente|fijo|fija|cada mes|todos los meses)\b/.test(t)
-  ) {
-    return {
-      respuesta: 'Preparando gasto recurrente...',
-      acciones: ['crear_recurrente'],
-      params: {
-        concepto: limpiarConcepto(mensaje),
-        monto,
-        categoria: parseCategoria(mensaje, 'gasto'),
-        periodicidad: 'mensual',
-        diaVencimiento: extraerDiaVencimiento(mensaje),
-        moneda,
-      },
-    }
-  }
-
-  if (
-    monto &&
-    monto > 0 &&
     /(pag(ue|o|a)|abon(a|e|o))/.test(t) &&
-    /(cuota|deuda|credito|prestamo|tarjeta|hipoteca)/.test(t)
+    /(cuota|deuda|credito|prestamo|tarjeta|hipoteca)/.test(t) &&
+    !/\bcon\s+(?:la\s+|mi\s+)?tarjeta\b/.test(t)
   ) {
     const nombre = mensaje.match(
       /(?:cuota|deuda|cr[eé]dito|pr[eé]stamo|tarjeta|hipoteca)\s*(?:de\s+|del\s+)?([a-záéíóúñü ]{2,30})/i
@@ -242,7 +263,7 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     }
   }
 
-  if (monto && monto > 0 && /(mantenimiento|aceite|frenos?|llantas?|bateria|revision|reparacion|taller|alineacion|balanceo|correa|pastillas)/.test(t)) {
+  if (tieneMonto && monto && /(mantenimiento|aceite|frenos?|llantas?|bateria|revision|reparacion|taller|alineacion|balanceo|correa|pastillas)/.test(t)) {
     const { marca, linea } = extraerMarcaLinea(mensaje)
     return {
       respuesta: 'Registrando el mantenimiento...',
@@ -271,7 +292,11 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
     }
   }
 
-  if (/(agrega|registra|anade|crea|nuevo)/.test(t) && /(vehiculo|moto|camion|carro)/.test(t)) {
+  if (
+    /(agrega|registra|anade|crea|nuevo)/.test(t) &&
+    /(vehiculo|moto|camion|carro)/.test(t) &&
+    !(tieneMonto && /\b(gaste|pague|compre)\b/.test(t))
+  ) {
     const { marca, linea } = extraerMarcaLinea(mensaje)
     if (marca) {
       const tipo = t.includes('moto') ? 'moto' : t.includes('camion') ? 'camion' : 'carro'
@@ -334,7 +359,8 @@ export function interpretarMensaje(mensaje: string): Interpretacion {
   return { respuesta: AYUDA, acciones: [] }
 }
 
-const CONECTORES_LOTE = /\s+y\s+|\s*[,;]\s*|\s+luego\s+|\s+despues\s+|\s+tambien\s+|\s+ademas\s+/i
+const CONECTORES_LOTE =
+  /\s+y\s+|(?<!\d)\s*,\s*|\s*,\s+(?!\d)|\s*;\s*|\s+luego\s+|\s+despues\s+|\s+tambien\s+|\s+ademas\s+/i
 
 export function interpretarTransferencia(mensaje: string, cuentas: string[]): Interpretacion | null {
   if (cuentas.length < 2) return null
@@ -343,14 +369,60 @@ export function interpretarTransferencia(mensaje: string, cuentas: string[]): In
   const monto = parseMontoCO(mensaje)
   if (!monto || monto <= 0) return null
 
-  const encontradas = cuentas
-    .map((nombre) => ({ nombre, indice: t.indexOf(normalizarTexto(nombre)) }))
-    .filter((x) => x.indice >= 0)
-    .sort((a, b) => a.indice - b.indice)
+  // Emparejar nombres más largos primero para evitar que "Ahorros" opaque a "Ahorros USD"
+  const ordenadasPorLargo = [...cuentas]
+    .map((nombre) => ({ nombre, norm: normalizarTexto(nombre) }))
+    .filter((c) => c.norm.length > 0)
+    .sort((a, b) => b.norm.length - a.norm.length)
 
+  const rangosOcupados: Array<[number, number]> = []
+  const encontradas: Array<{ nombre: string; indice: number; rol?: 'origen' | 'destino' }> = []
+
+  for (const c of ordenadasPorLargo) {
+    let pos = 0
+    while (pos < t.length) {
+      const idx = t.indexOf(c.norm, pos)
+      if (idx < 0) break
+      const fin = idx + c.norm.length
+      const solapa = rangosOcupados.some(([a, b]) => idx < b && fin > a)
+      if (!solapa) {
+        rangosOcupados.push([idx, fin])
+        const antes = t.slice(Math.max(0, idx - 25), idx)
+        let rol: 'origen' | 'destino' | undefined
+        if (/\b(?:de|desde|del)\s+(?:la\s+cuenta\s+|mi\s+|la\s+|el\s+)?$/.test(antes)) {
+          rol = 'origen'
+        } else if (/\b(?:a|al|hacia|para)\s+(?:la\s+cuenta\s+|mi\s+|la\s+|el\s+)?$/.test(antes)) {
+          rol = 'destino'
+        }
+        encontradas.push({ nombre: c.nombre, indice: idx, rol })
+        break
+      }
+      pos = idx + 1
+    }
+  }
+
+  encontradas.sort((a, b) => a.indice - b.indice)
   if (encontradas.length < 2) return null
-  const origen = encontradas[0].nombre
-  const destino = encontradas[1].nombre
+
+  const porRolOrigen = encontradas.find((e) => e.rol === 'origen')
+  const porRolDestino = encontradas.find((e) => e.rol === 'destino' && e.nombre !== porRolOrigen?.nombre)
+
+  let origen: string
+  let destino: string
+  if (porRolOrigen && porRolDestino) {
+    origen = porRolOrigen.nombre
+    destino = porRolDestino.nombre
+  } else if (porRolDestino && !porRolOrigen) {
+    destino = porRolDestino.nombre
+    origen = encontradas.find((e) => e.nombre !== destino)!.nombre
+  } else if (porRolOrigen && !porRolDestino) {
+    origen = porRolOrigen.nombre
+    destino = encontradas.find((e) => e.nombre !== origen)!.nombre
+  } else {
+    origen = encontradas[0].nombre
+    destino = encontradas[1].nombre
+  }
+
   if (normalizarTexto(origen) === normalizarTexto(destino)) return null
 
   return {
@@ -376,7 +448,8 @@ export function interpretarLote(mensaje: string): Interpretacion | null {
   const lote: AccionInterpretada[] = []
   for (const seg of segmentos) {
     const r = interpretarMensaje(seg)
-    if (r.acciones.includes('requiere_confirmacion') && r.borrador && r.borrador.monto >= 1000) {
+    const minMonto = r.borrador?.moneda ? 1 : 1000
+    if (r.acciones.includes('requiere_confirmacion') && r.borrador && r.borrador.monto >= minMonto) {
       lote.push({ nombre: 'requiere_confirmacion', borrador: r.borrador })
     }
   }
