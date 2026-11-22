@@ -15,7 +15,7 @@ import {
   llamarGeminiConBusqueda,
 } from '@/ai/gemini'
 import { hoyISO, isoLocal } from '@/lib/fechas'
-import { BASE_BEARS_RESERVE, resolverCoordenadasLugar } from './geo'
+import { BASE_BEARS_RESERVE, resolverCoordenadasLugar, type EstimacionLogisticaMision } from './geo'
 import {
   detectarTemaEvento,
   esEventoRedundante,
@@ -1278,6 +1278,183 @@ export async function conversarConGemaAI(
     return { respuesta, acciones, fuente: 'gemini' }
   } catch (err) {
     console.warn('Error en Radio con Gema (Gemini):', err)
+    return null
+  }
+}
+
+export interface SeleccionConvoyIA {
+  vehiculosElegidos: VehiculoOperativo[]
+  rolesPorVehiculo: Record<string, string>
+  motivoGema: string
+  tipoMision: MisionComunitaria['tipo']
+  terrenoSugerido: MisionComunitaria['terreno']
+  usoGemini: true
+}
+
+/**
+ * 5. SELECCIÓN INTELIGENTE DE VEHÍCULO O CONVOY CON GEMINI IA 🧠🚛🚙
+ * Interpreta la emergencia real, compara TODOS los vehículos habilitados y libres de Bear's Reserve
+ * (tipo, modelo, carrocería, notas de CashMet, ficha técnica, tanque, autonomía vs km ida y vuelta, desgaste)
+ * y decide si enviar 1 vehículo óptimo o un convoy de 2–3 vehículos complementarios.
+ */
+export async function seleccionarConvoyMisionConIA(
+  evento: Pick<EventoRadarLocal, 'titulo' | 'lugar' | 'departamento' | 'resumen' | 'esEmergenciaGrave'>,
+  vehiculos: VehiculoOperativo[],
+  logistica: EstimacionLogisticaMision,
+  personalActivoDisponible = 2
+): Promise<SeleccionConvoyIA | null> {
+  if (!geminiDisponible) return null
+
+  const candidatos = vehiculos.filter(
+    (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento'
+  )
+  if (candidatos.length === 0) return null
+
+  const maxConvoy = Math.min(3, candidatos.length, Math.max(1, personalActivoDisponible))
+
+  const catalogoFlota = candidatos
+    .map((v) => {
+      const galActuales = Number(
+        ((v.capacidadTanqueGalones || 18) * ((v.nivelCombustiblePorc ?? 80) / 100)).toFixed(1)
+      )
+      const autonomiaKm = Math.round(galActuales * (v.consumoKmPorGalon || 20))
+      const extras = [
+        v.carroceria ? `carrocería: ${v.carroceria}` : '',
+        v.capacidadTexto ? `capacidad: ${v.capacidadTexto}` : '',
+        v.notasCashmet ? `notas CashMet: "${v.notasCashmet}"` : '',
+        v.fichaInvestigadaNota ? `ficha: "${v.fichaInvestigadaNota}"` : '',
+      ]
+        .filter(Boolean)
+        .join(' | ')
+
+      return `- id="${v.id}" | ${v.marca} ${v.linea}${v.modelo ? ` (${v.modelo})` : ''} | tipo=${v.tipo} | comb=${v.tipoCombustible} | tanque=${v.nivelCombustiblePorc}% (${galActuales}/${v.capacidadTanqueGalones} gal, autonomía actual ~${autonomiaKm} km) | llantas desgaste=${v.desgasteLlantasPorc}%${extras ? ` | ${extras}` : ''}`
+    })
+    .join('\n')
+
+  const prompt = `Eres Gema, coordinadora táctica de flota de Bear's Reserve 🐻 (base en Finca El Guadual, Manizales, Caldas).
+Debes INTERPRETAR esta situación operativa y COMPARAR los vehículos habilitados libres para decidir cuál vehículo o qué convoy (entre 1 y ${maxConvoy} vehículos) debe salir.
+
+SITUACIÓN / MISIÓN:
+- Título: ${evento.titulo}
+- Ubicación: ${evento.lugar} (${evento.departamento})
+- Descripción: ${evento.resumen}
+- Emergencia grave: ${evento.esEmergenciaGrave ? 'SÍ' : 'No'}
+- Distancia real estimada: ${logistica.distanciaKmIda} km ida (${logistica.distanciaKmTotalIdaYVuelta} km ida y vuelta)
+- Tiempo estimado: ${logistica.minutosRodamientoTotal} min conducción + ${logistica.minutosServicioEnSitio} min servicio en sitio
+
+VEHÍCULOS HABILITADOS Y LIBRES EN BASE (${candidatos.length}):
+${catalogoFlota}
+
+CRITERIOS OPERATIVOS OBLIGATORIOS:
+1. INTERPRETA QUÉ SE NECESITA DE VERDAD:
+   - Traslado médico, adulto mayor, personas o cita de salud → prioriza SUV / campero cómodo / van / automóvil / camioneta de pasajeros. EVITA mandar camiones pesados de carga si hay un vehículo de pasajeros o 4x4 adecuado.
+   - Rescate de vehículo atascado, barrizal, volcamiento, derrumbe o remolque pesado → prioriza 4x4, camión con tracción/winche o vehículo de fuerza/rescate según lo que indiquen modelo, carrocería y notas.
+   - Transporte de víveres, agua, ayudas humanitarias, insumos o mudanza campesina → prioriza camionetas de platón, furgones o camiones de carga adecuados a la trocha/carretera.
+   - Emergencias grandes o complejas (volcamiento de camión/tractomula, inundación con familias damnificadas, derrumbe grave, rescate + evacuación) → si hay varios vehículos complementarios libres y personal suficiente (máximo ${maxConvoy}), ARMA UN CONVOY de 2 o 3 vehículos con roles complementarios (ej. vehículo pesado/rescate + 4x4 de apoyo/evacuación o enlace rápido).
+   - Situaciones puntuales o sencillas (1 traslado médico, 1 desvare menor, 1 entrega pequeña) → envía SOLO 1 vehículo bien elegido (no desperdicies flota).
+2. COMPARA AUTONOMÍA, TERRENO Y ESTADO:
+   - Revisa la autonomía actual vs los ${logistica.distanciaKmTotalIdaYVuelta} km ida y vuelta (prefiere vehículos con buen nivel de tanque y menor desgaste de llantas; evita enviar vehículos con tanque <=15% si hay otro apto).
+   - En veredas/trochas prefiere despeje al suelo y tracción (4x4/campero/camión rural); en autopista nacional larga distancia prefiere vehículos confiables y con buena autonomía.
+3. USA ÚNICAMENTE IDs EXACTOS de la lista anterior (entre 1 y ${maxConvoy} IDs, sin repetir).
+
+Responde ÚNICAMENTE con un JSON válido:
+{
+  "vehiculosIds": ["id_exacto_1"],
+  "rolesPorVehiculo": {
+    "id_exacto_1": "Rol breve de este vehículo en la misión"
+  },
+  "tipoMision": "auxilio_comunitario | desvarado_rural | rescate_barrizal | transporte_humanitario | apoyo_vial",
+  "terrenoSugerido": "pavimento | trocha_moderada | trocha_extrema_barrizal | mixto_montaña",
+  "motivoGema": "Explicación concreta en 1-2 frases comparando por qué elegiste este vehículo (o convoy) frente a los demás disponibles."
+}`
+
+  try {
+    const { res } = await llamarGemini({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+    })
+    if (!res) return null
+
+    const data = (await res.json()) as GeminiCandidateResponse
+    const { texto } = extraerTextoYFuentes(data)
+    if (!texto) return null
+
+    const parsed = JSON.parse(limpiarJson(texto)) as {
+      vehiculosIds?: unknown
+      rolesPorVehiculo?: Record<string, string>
+      tipoMision?: string
+      terrenoSugerido?: string
+      motivoGema?: string
+    }
+
+    const idsRaw = Array.isArray(parsed.vehiculosIds) ? parsed.vehiculosIds : []
+    const mapaCand = new Map(candidatos.map((v) => [v.id, v]))
+    const elegidos: VehiculoOperativo[] = []
+    const vistos = new Set<string>()
+
+    for (const raw of idsRaw) {
+      const id = String(raw || '').trim()
+      if (!id || vistos.has(id)) continue
+      const veh = mapaCand.get(id)
+      if (veh) {
+        elegidos.push(veh)
+        vistos.add(id)
+        if (elegidos.length >= maxConvoy) break
+      }
+    }
+
+    if (elegidos.length === 0) return null
+
+    const tiposValidos: Array<MisionComunitaria['tipo']> = [
+      'auxilio_comunitario',
+      'desvarado_rural',
+      'rescate_barrizal',
+      'transporte_humanitario',
+      'apoyo_vial',
+    ]
+    const tipoMision: MisionComunitaria['tipo'] = tiposValidos.includes(
+      parsed.tipoMision as MisionComunitaria['tipo']
+    )
+      ? (parsed.tipoMision as MisionComunitaria['tipo'])
+      : 'auxilio_comunitario'
+
+    const terrenosValidos: Array<MisionComunitaria['terreno']> = [
+      'pavimento',
+      'trocha_moderada',
+      'trocha_extrema_barrizal',
+      'mixto_montaña',
+    ]
+    const terrenoSugerido: MisionComunitaria['terreno'] = terrenosValidos.includes(
+      parsed.terrenoSugerido as MisionComunitaria['terreno']
+    )
+      ? (parsed.terrenoSugerido as MisionComunitaria['terreno'])
+      : logistica.categoriaDistancia === 'nacional'
+        ? 'mixto_montaña'
+        : 'trocha_moderada'
+
+    const rolesPorVehiculo: Record<string, string> = {}
+    if (parsed.rolesPorVehiculo && typeof parsed.rolesPorVehiculo === 'object') {
+      for (const v of elegidos) {
+        const rol = String(parsed.rolesPorVehiculo[v.id] || '').trim()
+        if (rol) rolesPorVehiculo[v.id] = rol
+      }
+    }
+
+    const nombres = elegidos.map((v) => `${v.marca} ${v.linea}`).join(' + ')
+    const motivoGema =
+      String(parsed.motivoGema || '').trim() ||
+      `Gema IA seleccionó ${nombres} tras evaluar la situación y comparar la flota disponible.`
+
+    return {
+      vehiculosElegidos: elegidos,
+      rolesPorVehiculo,
+      motivoGema,
+      tipoMision,
+      terrenoSugerido,
+      usoGemini: true,
+    }
+  } catch (err) {
+    console.warn('Error seleccionando convoy con Gemini IA:', err)
     return null
   }
 }

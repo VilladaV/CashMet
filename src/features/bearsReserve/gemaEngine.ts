@@ -830,108 +830,176 @@ export function investigarFichaVehiculoIA(
 }
 
 /**
- * Inteligencia de Selección y Asignación de Vehículos para Misiones 🧠🚚
+ * Respaldo local de Selección y Asignación de Vehículo o Convoy para Misiones 🧠🚚🚙
+ * Se usa cuando Gemini IA no responde o para rutas habituales.
+ * NUNCA selecciona vehículos que no estén habilitados para Bear's Reserve (`disponibleParaTrabajo`).
  */
 export function seleccionarVehiculosOptimosMision(
-  mision: { titulo: string; tipo: string; impactoSocial?: string; terreno?: string },
-  vehiculosDisponibles: VehiculoOperativo[]
+  mision: {
+    titulo: string
+    tipo: string
+    impactoSocial?: string
+    terreno?: string
+    esEmergenciaGrave?: boolean
+    distanciaKmTotal?: number
+  },
+  vehiculosDisponibles: VehiculoOperativo[],
+  maxVehiculos = 2
 ): {
-  vehiculoElegido: VehiculoOperativo
+  vehiculoElegido: VehiculoOperativo | undefined
+  vehiculosElegidos: VehiculoOperativo[]
   motivoGema: string
   candidatosSecundarios: VehiculoOperativo[]
 } {
-  const aptosLibres = vehiculosDisponibles.filter(
-    (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento' && v.nivelCombustiblePorc > 15
+  const habilitados = vehiculosDisponibles.filter(
+    (v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento'
   )
-  const aptos =
+  const aptosLibres = habilitados.filter(
+    (v) => v.estado !== 'en_mision' && (v.nivelCombustiblePorc ?? 80) > 15
+  )
+  const libresConReserva = habilitados.filter((v) => v.estado !== 'en_mision')
+  const pool =
     aptosLibres.length > 0
       ? aptosLibres
-      : vehiculosDisponibles.filter((v) => v.disponibleParaTrabajo && v.estado !== 'mantenimiento')
-  const pool = aptos.length > 0 ? aptos : vehiculosDisponibles
+      : libresConReserva.length > 0
+        ? libresConReserva
+        : habilitados
+
+  if (pool.length === 0) {
+    return {
+      vehiculoElegido: undefined,
+      vehiculosElegidos: [],
+      motivoGema: 'No hay vehículos habilitados disponibles en Bear\'s Reserve.',
+      candidatosSecundarios: [],
+    }
+  }
 
   const textoMision =
     `${mision.titulo} ${mision.tipo} ${mision.impactoSocial || ''} ${mision.terreno || ''}`.toLowerCase()
 
-  const requierePasajeros =
-    textoMision.includes('escolar') ||
-    textoMision.includes('niños') ||
-    textoMision.includes('colegio') ||
-    textoMision.includes('estudiantes') ||
-    textoMision.includes('familia')
+  const esTrasladoPersonasOMedico =
+    /escolar|ni[ñn]os|colegio|estudiantes|adulto mayor|m[eé]dic|salud|hospital|cita|paciente|herid|evacuac|personas|familia|traslado/.test(
+      textoMision
+    )
 
   const requiere4x4ORescate =
-    textoMision.includes('barrizal') ||
-    textoMision.includes('lodo') ||
-    textoMision.includes('atasco') ||
-    textoMision.includes('camión') ||
-    textoMision.includes('winche') ||
-    textoMision.includes('remolque') ||
-    textoMision.includes('derrumbe') ||
-    textoMision.includes('extrema')
+    /barrizal|lodo|atasc|atollam|volcamiento|suspendido|winche|remolc|derrumbe|deslizamiento|[aá]rbol|extrema|varad|inundaci|creciente|quebrada/.test(
+      textoMision
+    )
 
   const requiereCargaPesada =
-    textoMision.includes('trasteo') ||
-    textoMision.includes('mudanza') ||
-    textoMision.includes('leche') ||
-    textoMision.includes('ganado') ||
-    textoMision.includes('mercado') ||
-    textoMision.includes('tejas')
+    /trasteo|mudanza|leche|ganado|mercado|tejas|v[ií]veres|agua|insumos|ayudas|escombros|tractomula|cami[oó]n/.test(
+      textoMision
+    )
+
+  const ameritaConvoy =
+    maxVehiculos > 1 &&
+    pool.length >= 2 &&
+    (Boolean(mision.esEmergenciaGrave) ||
+      /volcamiento|tractomula|derrumbe|inundaci|damnificad|alerta roja|evacuaci|avalancha|bloquea|bus/.test(
+        textoMision
+      ))
+
+  const kmObjetivo = mision.distanciaKmTotal || 0
 
   const puntuados = pool.map((v) => {
     let score = 0
     const corpusV =
-      `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.capacidadTexto || ''}`.toLowerCase()
+      `${v.marca} ${v.linea} ${v.tipo} ${v.carroceria || ''} ${v.notasCashmet || ''} ${v.fichaInvestigadaNota || ''} ${v.capacidadTexto || ''}`.toLowerCase()
+
+    const esCamionPesado =
+      v.tipo === 'camion' ||
+      /\b(quinta rueda|5ta rueda|tractomula|kodiak|volqueta|camion|cami[oó]n|kraz|kamaz|ural|zil|kenworth|freightliner|gazelle|gaz 3302|furg[oó]n)\b/.test(
+        corpusV
+      )
 
     const tiene4x4 =
-      corpusV.includes('4x4') ||
-      corpusV.includes('6x6') ||
-      corpusV.includes('winche') ||
-      corpusV.includes('trocha') ||
-      corpusV.includes('land cruiser') ||
-      corpusV.includes('hilux')
-    const tienePasajeros =
-      corpusV.includes('bus') ||
-      corpusV.includes('buseta') ||
-      corpusV.includes('van') ||
-      corpusV.includes('pasajero') ||
-      corpusV.includes('escolar') ||
-      corpusV.includes('troop carrier') ||
-      corpusV.includes('kavz')
-    const tienePesado =
-      corpusV.includes('quinta rueda') ||
-      corpusV.includes('5ta rueda') ||
-      corpusV.includes('tractomula') ||
-      corpusV.includes('kodiak') ||
-      corpusV.includes('camion') ||
-      v.tipo === 'camion'
+      /\b(4x4|6x6|4wd|awd|winche|trocha|land cruiser|hilux|prado|fortuner|jeep|willys|patrol|montero|ranger|l200|d-?max|unimog|defender|wrangler|niva|uaz|campero|pickup)\b/.test(
+        corpusV
+      )
 
-    if (requierePasajeros && tienePasajeros) score += 50
-    if (requiere4x4ORescate && tiene4x4) score += 60
-    if (requiereCargaPesada && tienePesado) score += 40
-    if (v.estado === 'en_mision') score -= 40
+    const tienePasajeros =
+      /\b(bus|buseta|van|pasajero|escolar|troop carrier|kavz|suv|camioneta|campero|sed[aá]n|autom[oó]vil|station wagon|monovolumen)\b/.test(
+        corpusV
+      ) || (v.tipo === 'carro' && !esCamionPesado)
+
+    if (esTrasladoPersonasOMedico) {
+      if (tienePasajeros) score += 55
+      if (esCamionPesado && !/\b(bus|buseta|kavz)\b/.test(corpusV)) score -= 35
+      if (v.tipo === 'moto') score -= 45
+    }
+    if (requiere4x4ORescate) {
+      if (tiene4x4) score += 60
+      if (esCamionPesado) score += 25
+      if (v.tipo === 'moto') score -= 30
+    }
+    if (requiereCargaPesada) {
+      if (esCamionPesado) score += 45
+      if (/\b(pickup|plat[oó]n|estacas|furg[oó]n|hilux|ranger|l200|d-?max|camioneta)\b/.test(corpusV)) {
+        score += 30
+      }
+    }
+
+    if (v.estado === 'en_mision') score -= 45
+    if ((v.nivelCombustiblePorc ?? 80) <= 15) score -= 25
+    if ((v.desgasteLlantasPorc ?? 0) >= 80) score -= 15
+
+    // Bono de autonomía si hay distancia conocida
+    if (kmObjetivo > 0) {
+      const autonomiaKm =
+        (v.capacidadTanqueGalones || 18) *
+        ((v.nivelCombustiblePorc ?? 80) / 100) *
+        (v.consumoKmPorGalon || 20)
+      if (autonomiaKm >= kmObjetivo) score += 12
+    }
 
     score += (v.nivelCombustiblePorc || 50) * 0.1
-    return { vehiculo: v, score, tiene4x4, tienePasajeros, tienePesado }
+    return { vehiculo: v, score, tiene4x4, tienePasajeros, esCamionPesado }
   })
 
   puntuados.sort((a, b) => b.score - a.score)
-  const mejor = puntuados[0]?.vehiculo || pool[0]
+  const principal = puntuados[0]
+  const elegidos: VehiculoOperativo[] = [principal.vehiculo]
 
-  let motivo = `Gema seleccionó ${mejor.marca} ${mejor.linea}`
-  if (requierePasajeros && (mejor.notasCashmet || '').toLowerCase().includes('pasajero')) {
-    motivo += ` porque tus notas en CashMet indican capacidad de pasajeros, ideal para la ruta escolar.`
-  } else if (requiere4x4ORescate && (mejor.notasCashmet || '').toLowerCase().includes('winche')) {
-    motivo += ` porque tus notas en CashMet confirman winche y tracción para terrenos de alto barro.`
-  } else if (requiereCargaPesada) {
-    motivo += ` por su volumen de carga y torque para transporte campesino.`
-  } else {
-    motivo += ` por estar listo en base con tanque al ${mejor.nivelCombustiblePorc}%.`
+  // Si la emergencia amerita convoy, añadir un 2do vehículo complementario (ej. camión + 4x4/pasajeros)
+  if (ameritaConvoy && puntuados.length >= 2) {
+    const complementario =
+      puntuados.slice(1).find(
+        (p) =>
+          p.vehiculo.estado !== 'en_mision' &&
+          (principal.esCamionPesado ? p.tiene4x4 || p.tienePasajeros : p.esCamionPesado || p.tiene4x4)
+      ) || puntuados.slice(1).find((p) => p.vehiculo.estado !== 'en_mision')
+
+    if (complementario) {
+      elegidos.push(complementario.vehiculo)
+    }
   }
 
+  const nombres = elegidos.map((v) => `${v.marca} ${v.linea}`).join(' + ')
+  let motivo =
+    elegidos.length > 1
+      ? `Convoy sugerido (${elegidos.length} vehículos): ${nombres}`
+      : `Gema seleccionó ${nombres}`
+
+  if (esTrasladoPersonasOMedico && principal.tienePasajeros) {
+    motivo += ` por ser el vehículo de pasajeros más adecuado y cómodo para este traslado.`
+  } else if (requiere4x4ORescate && (principal.tiene4x4 || principal.esCamionPesado)) {
+    motivo += ` por su tracción, fuerza y capacidad de rescate para la situación.`
+  } else if (requiereCargaPesada) {
+    motivo += ` por su capacidad de carga y autonomía disponible.`
+  } else {
+    motivo += ` por estar disponible en base con tanque al ${principal.vehiculo.nivelCombustiblePorc}%.`
+  }
+
+  const idsElegidos = new Set(elegidos.map((v) => v.id))
   return {
-    vehiculoElegido: mejor,
+    vehiculoElegido: elegidos[0],
+    vehiculosElegidos: elegidos,
     motivoGema: motivo,
-    candidatosSecundarios: puntuados.slice(1, 4).map((p) => p.vehiculo),
+    candidatosSecundarios: puntuados
+      .filter((p) => !idsElegidos.has(p.vehiculo.id))
+      .slice(0, 3)
+      .map((p) => p.vehiculo),
   }
 }
 

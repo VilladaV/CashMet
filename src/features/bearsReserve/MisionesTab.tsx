@@ -42,6 +42,7 @@ import {
   resolverCoordenadasLugar,
 } from './geo'
 import { trazarRutaCarreteraGps } from './ruteoGps'
+import { seleccionarConvoyMisionConIA } from './gemaAI'
 import {
   seleccionarVehiculosOptimosMision,
   seleccionarTripulacionMision,
@@ -302,13 +303,31 @@ export default function MisionesTab({
     )
   }
 
-  // Despacho desde evento del Radar (calcula ruta real por carretera ida + servicio en sitio + vuelta)
+  // Despacho desde evento del Radar:
+  // 1. Calcula ruta real por carretera (OSRM) ida + servicio en sitio + vuelta
+  // 2. Gemini IA interpreta la situación y compara todos los vehículos habilitados libres para armar el vehículo o convoy óptimo (1–3)
+  // 3. Asigna 1 conductor por vehículo + roles técnicos según el cuadrante
   const despacharDesdeEvento = async (ev: EventoRadarLocal) => {
     if (despachandoEventoId) return
+
+    const habilitadosLibres = vehiculos.filter(
+      (v) => v.disponibleParaTrabajo && v.estado !== 'en_mision' && v.estado !== 'mantenimiento'
+    )
+    if (habilitadosLibres.length === 0) {
+      const hayHabilitados = vehiculos.some((v) => v.disponibleParaTrabajo)
+      mostrarFeedback(
+        'error',
+        hayHabilitados
+          ? 'Todos tus vehículos habilitados están en misión o mantenimiento ahora mismo. Espera a que regrese uno o habilita otro en Flota.'
+          : 'No tienes vehículos habilitados para Bear\'s Reserve. Activa al menos uno en la pestaña Flota & Combustible.'
+      )
+      return
+    }
+
     setDespachandoEventoId(ev.id)
     try {
       const textoEv = `${ev.titulo} ${ev.resumen}`.toLowerCase()
-      const tipoDeducido =
+      const tipoFallback: MisionComunitaria['tipo'] =
         /cami[oó]n|barrizal|barro|volcamiento|atascad|atollam|suspendido/.test(textoEv)
           ? 'rescate_barrizal'
           : /trasteo|traslado|m[eé]dic|v[ií]veres|agua|insumos/.test(textoEv)
@@ -320,7 +339,7 @@ export default function MisionesTab({
           ? { lat: ev.lat, lng: ev.lng }
           : resolverCoordenadasLugar(ev.lugar, ev.departamento || 'Caldas')
 
-      // Consultar distancia/tiempo reales por carretera (OSRM) con respaldo cordillera si falla
+      // 1. Consultar distancia/tiempo reales por carretera (OSRM) con respaldo cordillera si falla
       const rutaOsrmIda = await trazarRutaCarreteraGps([
         { lat: BASE_BEARS_RESERVE.lat, lng: BASE_BEARS_RESERVE.lng },
         coordsDestino,
@@ -334,32 +353,58 @@ export default function MisionesTab({
           departamento: ev.departamento,
           titulo: ev.titulo,
           esEmergenciaGrave: ev.esEmergenciaGrave,
-          tipoMision: tipoDeducido,
+          tipoMision: tipoFallback,
         },
         rutaOsrmIda
       )
 
-      const terrenoCalculado: MisionComunitaria['terreno'] =
-        tipoDeducido === 'rescate_barrizal'
+      // 2. Gemini IA interpreta la situación y compara toda la flota habilitada libre (1 a 3 vehículos)
+      const personalActivoCount = Math.max(1, empleados.filter((e) => e.activo).length)
+      const seleccionIA = await seleccionarConvoyMisionConIA(
+        ev,
+        vehiculos,
+        logistica,
+        personalActivoCount
+      )
+
+      let vehiculosConvoy: VehiculoOperativo[] = []
+      let motivoFlota = ''
+      let tipoFinal: MisionComunitaria['tipo'] = tipoFallback
+      let terrenoCalculado: MisionComunitaria['terreno'] =
+        tipoFallback === 'rescate_barrizal'
           ? 'trocha_extrema_barrizal'
           : logistica.categoriaDistancia === 'nacional'
             ? 'mixto_montaña'
             : 'trocha_moderada'
+      let usoGeminiFlota = false
 
-      const seleccionGema = seleccionarVehiculosOptimosMision(
-        {
-          titulo: ev.titulo,
-          tipo: tipoDeducido,
-          impactoSocial: ev.resumen,
-          terreno: terrenoCalculado,
-        },
-        vehiculos
-      )
-      const vehiculoElegido = seleccionGema.vehiculoElegido
+      if (seleccionIA && seleccionIA.vehiculosElegidos.length > 0) {
+        vehiculosConvoy = seleccionIA.vehiculosElegidos
+        motivoFlota = seleccionIA.motivoGema
+        tipoFinal = seleccionIA.tipoMision
+        terrenoCalculado = seleccionIA.terrenoSugerido
+        usoGeminiFlota = true
+      } else {
+        const seleccionLocal = seleccionarVehiculosOptimosMision(
+          {
+            titulo: ev.titulo,
+            tipo: tipoFallback,
+            impactoSocial: ev.resumen,
+            terreno: terrenoCalculado,
+            esEmergenciaGrave: ev.esEmergenciaGrave,
+            distanciaKmTotal: logistica.distanciaKmTotalIdaYVuelta,
+          },
+          vehiculos,
+          Math.min(2, personalActivoCount)
+        )
+        vehiculosConvoy = seleccionLocal.vehiculosElegidos
+        motivoFlota = seleccionLocal.motivoGema
+      }
 
+      // 3. Tripulación por vehículo elegido (1 conductor por vehículo + roles técnicos)
       const seleccionTripulacion = seleccionarTripulacionMision(
-        { titulo: ev.titulo, tipo: tipoDeducido, impactoSocial: ev.resumen },
-        vehiculoElegido ? [vehiculoElegido] : [],
+        { titulo: ev.titulo, tipo: tipoFinal, impactoSocial: ev.resumen },
+        vehiculosConvoy,
         empleados,
         turnos,
         hoyISO(),
@@ -376,7 +421,7 @@ export default function MisionesTab({
       const nueva: MisionComunitaria = {
         id: crearMisionId(),
         titulo: ev.titulo,
-        tipo: tipoDeducido,
+        tipo: tipoFinal,
         prioridad: ev.esEmergenciaGrave ? 'critica_extrema' : 'alta',
         origen: BASE_BEARS_RESERVE.nombre,
         destino: ev.lugar,
@@ -389,15 +434,11 @@ export default function MisionesTab({
         minutosRalentiEstimados: logistica.minutosRalenti,
         latDestino: coordsDestino.lat,
         lngDestino: coordsDestino.lng,
-        vehiculosAsignados: vehiculoElegido
-          ? [
-              {
-                id: vehiculoElegido.id,
-                nombre: `${vehiculoElegido.marca} ${vehiculoElegido.linea}`,
-                placa: vehiculoElegido.placa,
-              },
-            ]
-          : [],
+        vehiculosAsignados: vehiculosConvoy.map((v) => ({
+          id: v.id,
+          nombre: `${v.marca} ${v.linea}`,
+          placa: v.placa,
+        })),
         tripulantesAsignados: seleccionTripulacion.tripulacion.map((t) => ({
           id: t.id,
           nombre: t.nombre,
@@ -408,15 +449,17 @@ export default function MisionesTab({
         fecha: hoyISO(),
         estado: 'en_curso',
         eventoRadarId: ev.id,
-        impactoSocial: ev.resumen,
+        impactoSocial: `${ev.resumen} · ${usoGeminiFlota ? '✨ Gema IA:' : 'Flota:'} ${motivoFlota}`,
         esNoticiaWebReal: ev.esNoticiaWebReal,
       }
 
       await onCrearMision(nueva)
       const tagRuta = logistica.fuenteCalculo === 'gps_carretera' ? 'GPS carretera' : 'estimado cordillera'
+      const tagFlota = usoGeminiFlota ? '✨ Gemini IA' : 'Respaldo local'
       mostrarFeedback(
         'ok',
-        `🚨 ¡Misión despachada (${tagRuta})! ${logistica.distanciaKmIda} km ida (${logistica.distanciaKmTotalIdaYVuelta} km total) · Ruta ${formatearDuracionCorta(logistica.minutosRodamientoTotal)} + servicio ${formatearDuracionCorta(logistica.minutosServicioEnSitio)} = ${formatearDuracionCorta(logistica.duracionTotalMinutos)}. ${seleccionGema.motivoGema}`
+        `🚨 ¡Misión despachada (${tagFlota} · ${vehiculosConvoy.length} vehículo${vehiculosConvoy.length > 1 ? 's' : ''} · ${tagRuta})! ${logistica.distanciaKmTotalIdaYVuelta} km total (~${formatearDuracionCorta(logistica.duracionTotalMinutos)}). ${motivoFlota}`,
+        8500
       )
     } finally {
       setDespachandoEventoId(null)
@@ -1016,7 +1059,9 @@ export default function MisionesTab({
                           >
                             <Truck className="h-3.5 w-3.5" />
                             <span>
-                              {despachandoEventoId === ev.id ? 'Calculando ruta...' : 'Despachar Misión'}
+                              {despachandoEventoId === ev.id
+                                ? 'Gema IA eligiendo flota...'
+                                : 'Despachar Misión'}
                             </span>
                           </button>
                         )}

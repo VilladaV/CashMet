@@ -30,6 +30,7 @@ import {
   investigarFichaVehiculoIA,
   responderGema,
   seleccionarTripulacionMision,
+  seleccionarVehiculosOptimosMision,
 } from '@/features/bearsReserve/gemaEngine'
 import { RUTAS_HABITUALES_INICIALES } from '@/features/bearsReserve/repo'
 import type { EmpleadoOperativo, EventoRadarLocal } from '@/features/bearsReserve/types'
@@ -462,5 +463,50 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
     })
     expect(buenaventura.distanciaKmIda).toBeGreaterThan(250)
     expect(buenaventura.distanciaKmIda).toBeLessThan(340)
+  })
+
+  it('elige vehículo cómodo de pasajeros para traslados médicos, arma convoy en emergencias graves y nunca toma vehículos no habilitados', () => {
+    const baseVeh = {
+      disponibleEnCashmet: true,
+      estado: 'disponible' as const,
+      tipoCombustible: 'diesel' as const,
+      capacidadTanqueGalones: 20,
+      nivelCombustiblePorc: 85,
+      consumoKmPorGalon: 20,
+      kilometrajeActual: 50000,
+      desgasteLlantasPorc: 15,
+      estadoBateriaPorc: 95,
+      totalGalonesConsumidos: 0,
+      totalCostoCombustibleCOP: 0,
+    }
+
+    const flota = [
+      { ...baseVeh, id: 'v-cam', vehiculoId: 'v-cam', marca: 'GAZ', linea: '3302 GAZelle', tipo: 'camion' as const, disponibleParaTrabajo: true, nivelCombustiblePorc: 95 },
+      { ...baseVeh, id: 'v-suv', vehiculoId: 'v-suv', marca: 'Toyota', linea: 'Land Cruiser Prado', tipo: 'carro' as const, disponibleParaTrabajo: true, nivelCombustiblePorc: 80 },
+      { ...baseVeh, id: 'v-off', vehiculoId: 'v-off', marca: 'BMW', linea: 'M2', tipo: 'carro' as const, disponibleParaTrabajo: false, nivelCombustiblePorc: 100 },
+    ]
+
+    // Traslado médico de adulto mayor -> elige Toyota Land Cruiser Prado (NO el camión GAZelle)
+    const medico = seleccionarVehiculosOptimosMision(
+      { titulo: 'Traslado de adulto mayor a cita médica', tipo: 'transporte_humanitario', impactoSocial: 'Paciente requiere traslado al hospital' },
+      flota
+    )
+    expect(medico.vehiculosElegidos.map((v) => v.id)).toEqual(['v-suv'])
+
+    // Emergencia grave (volcamiento de tractomula) -> arma convoy de 2 vehículos complementarios (y nunca usa el BMW no habilitado)
+    const grave = seleccionarVehiculosOptimosMision(
+      { titulo: 'Volcamiento de tractomula bloquea vía', tipo: 'rescate_barrizal', esEmergenciaGrave: true, impactoSocial: 'Rescate pesado y apoyo' },
+      flota,
+      2
+    )
+    expect(grave.vehiculosElegidos).toHaveLength(2)
+    expect(grave.vehiculosElegidos.some((v) => v.id === 'v-off')).toBe(false)
+
+    // Si ninguno está habilitado -> no toma vehículos personales de CashMet
+    const sinHab = seleccionarVehiculosOptimosMision(
+      { titulo: 'Auxilio rural', tipo: 'auxilio_comunitario' },
+      [{ ...flota[2] }]
+    )
+    expect(sinHab.vehiculosElegidos).toHaveLength(0)
   })
 })
