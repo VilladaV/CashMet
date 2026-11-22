@@ -62,39 +62,107 @@ const DOC_COMBUSTIBLE = 'bears_reserve_combustible'
 const DOC_CHAT = 'bears_reserve_chat'
 
 const CLAVE_STORAGE_LEGACY = 'bears_reserve_data_v2'
+const CLAVE_SNAPSHOT_COMPLETO = 'bears_reserve_snapshot_completo_v2'
 const CLAVE_SNAPSHOT_OPERACIONES = 'bears_reserve_operaciones_snap_v1'
 const INTERVALO_ESCANEO_RADAR_MS = 6 * 60 * 60 * 1000 // Auto-refrescar radar cada 6 horas
+
+export interface EstadoSyncFirestore {
+  estado: 'conectando' | 'sincronizado' | 'error'
+  ultimoError?: string
+  ultimaEscrituraOkEn?: number
+}
+
+let estadoSyncActual: EstadoSyncFirestore = { estado: 'conectando' }
+const listenersSync = new Set<(st: EstadoSyncFirestore) => void>()
+
+function emitirEstadoSync(nuevo: EstadoSyncFirestore): void {
+  estadoSyncActual = nuevo
+  for (const fn of listenersSync) {
+    try {
+      fn(nuevo)
+    } catch {
+      /* ignore listener error */
+    }
+  }
+}
+
+export function leerEstadoSyncFirestore(): EstadoSyncFirestore {
+  return estadoSyncActual
+}
+
+export function suscribirEstadoSyncFirestore(
+  cb: (st: EstadoSyncFirestore) => void
+): () => void {
+  listenersSync.add(cb)
+  cb(estadoSyncActual)
+  return () => {
+    listenersSync.delete(cb)
+  }
+}
 
 // Colas de escritura serializadas por documento para impedir sobrescrituras fuera de orden en Firestore
 const colasEscrituraDoc: Record<string, Promise<unknown>> = {}
 
-function guardarSnapshotOperacionesLocal(estado: EstadoBearsCompleto): void {
-  if (typeof localStorage === 'undefined') return
-  try {
-    localStorage.setItem(
-      CLAVE_SNAPSHOT_OPERACIONES,
-      JSON.stringify({
-        turnos: estado.turnos,
-        misiones: estado.misiones.slice(0, 250),
-        eventosRadar: estado.eventosRadar,
-        ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
-        ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
-        actualizado: Date.now(),
-      })
-    )
-  } catch {
-    /* quota o navegación privada */
+interface SnapshotLocalCompleto {
+  config?: {
+    vehiculosExtra: Record<string, Partial<VehiculoOperativo>>
+    empleadosExtra: Record<string, Partial<EmpleadoOperativo>>
+    rutasHabituales: RutaHabitual[]
+    rotacionContador: number
+    actualizado: number
+  }
+  operaciones?: {
+    turnos: TurnoSemanal[]
+    misiones: MisionComunitaria[]
+    eventosRadar: EventoRadarLocal[]
+    ultimoEscaneoRadarEn: number
+    ultimoDiagnosticoRadar: string
+    actualizado: number
+  }
+  combustible?: {
+    tarjetaCombustible: TarjetaCombustibleReserva
+    historialTarjetas: TarjetaCombustibleReserva[]
+    preciosCombustible: PreciosCombustible
+    actualizado: number
+  }
+  chat?: {
+    chatMensajes: MensajeGema[]
+    actualizado: number
   }
 }
 
-function leerSnapshotOperacionesLocal(): Partial<EstadoBearsCompleto> | null {
-  if (typeof localStorage === 'undefined') return null
+function leerSnapshotCompletoLocal(): SnapshotLocalCompleto {
+  if (typeof localStorage === 'undefined') return {}
   try {
-    const raw = localStorage.getItem(CLAVE_SNAPSHOT_OPERACIONES)
-    if (!raw) return null
-    return JSON.parse(raw) as Partial<EstadoBearsCompleto>
+    const raw = localStorage.getItem(CLAVE_SNAPSHOT_COMPLETO)
+    if (raw) return JSON.parse(raw) as SnapshotLocalCompleto
   } catch {
-    return null
+    /* ignore */
+  }
+  // Compatibilidad con snapshot v1 de operaciones
+  try {
+    const rawOp = localStorage.getItem(CLAVE_SNAPSHOT_OPERACIONES)
+    if (rawOp) {
+      const op = JSON.parse(rawOp) as SnapshotLocalCompleto['operaciones']
+      if (op) return { operaciones: op }
+    }
+  } catch {
+    /* ignore */
+  }
+  return {}
+}
+
+function guardarSeccionSnapshotLocal<K extends keyof SnapshotLocalCompleto>(
+  seccion: K,
+  valor: NonNullable<SnapshotLocalCompleto[K]>
+): void {
+  if (typeof localStorage === 'undefined') return
+  try {
+    const actual = leerSnapshotCompletoLocal()
+    actual[seccion] = valor
+    localStorage.setItem(CLAVE_SNAPSHOT_COMPLETO, JSON.stringify(actual))
+  } catch {
+    /* quota o navegación privada */
   }
 }
 
@@ -215,23 +283,32 @@ function estadoInicialVacio(): EstadoBearsCompleto {
 
 /**
  * Sanitiza recursivamente cualquier objeto para Firestore:
- * elimina `undefined` y `NaN`, pero conserva `false`, `0`, `""`, `[]` y `{}`.
+ * elimina `undefined`, `NaN`, funciones y evita arrays anidados (prohibidos por Firestore),
+ * pero conserva `false`, `0`, `""`, `[]` y `{}`.
  */
-function sanitizarFirestore<T>(valor: T): T {
+function sanitizarFirestore<T>(valor: T, dentroDeArray = false): T {
   if (valor === null || valor === undefined) return valor
+  if (typeof valor === 'function' || typeof valor === 'symbol') return undefined as unknown as T
   if (typeof valor === 'number') {
     return (Number.isFinite(valor) ? valor : 0) as unknown as T
   }
   if (Array.isArray(valor)) {
-    return valor
-      .filter((item) => item !== undefined)
-      .map((item) => sanitizarFirestore(item)) as unknown as T
+    const limpio = valor
+      .filter((item) => item !== undefined && typeof item !== 'function')
+      .map((item) => {
+        // Firestore prohíbe arrays directamente dentro de arrays
+        if (dentroDeArray && Array.isArray(item)) {
+          return JSON.stringify(item)
+        }
+        return sanitizarFirestore(item, true)
+      })
+    return limpio as unknown as T
   }
   if (typeof valor === 'object') {
     const out: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(valor as Record<string, unknown>)) {
-      if (v === undefined) continue
-      out[k] = sanitizarFirestore(v)
+      if (!k || v === undefined || typeof v === 'function' || typeof v === 'symbol') continue
+      out[k] = sanitizarFirestore(v, false)
     }
     return out as T
   }
@@ -248,6 +325,7 @@ let promesaHidratacion: Promise<EstadoBearsCompleto> | null = null
 export function __resetCacheBearsParaTests(): void {
   cacheEstado = null
   promesaHidratacion = null
+  estadoSyncActual = { estado: 'conectando' }
   establecerPreciosCombustibleCache(null)
 }
 
@@ -381,18 +459,26 @@ function leerMigracionLegacyLocalStorage(): Partial<EstadoBearsCompleto> | null 
   }
 }
 
-function persistirDoc(docId: string, data: Record<string, unknown>): Promise<void> {
+function persistirDoc(docId: string, data: Record<string, unknown>, actualizado: number): Promise<void> {
+  // Captura inmutable ANTES de encolar para evitar que mutaciones posteriores alteren esta escritura
+  const payload = sanitizarFirestore({ ...data, actualizado })
   const previa = colasEscrituraDoc[docId] || Promise.resolve()
   const tarea = previa
     .catch(() => undefined)
     .then(async () => {
       try {
-        await setDoc(
-          doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId),
-          sanitizarFirestore({ ...data, actualizado: Date.now() })
-        )
+        await setDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId), payload)
+        emitirEstadoSync({ estado: 'sincronizado', ultimaEscrituraOkEn: Date.now() })
       } catch (err) {
+        const codigo =
+          (err as { code?: string })?.code ||
+          (err instanceof Error ? err.message : 'error_desconocido')
         console.warn(`Error persistiendo ${docId} en Firestore:`, err)
+        emitirEstadoSync({
+          estado: 'error',
+          ultimoError: `${docId}: ${codigo}`,
+          ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn,
+        })
       }
     })
   colasEscrituraDoc[docId] = tarea
@@ -400,43 +486,92 @@ function persistirDoc(docId: string, data: Record<string, unknown>): Promise<voi
 }
 
 async function persistirConfig(estado: EstadoBearsCompleto): Promise<void> {
-  await persistirDoc(DOC_CONFIG, {
-    vehiculosExtra: estado.vehiculosExtra,
-    empleadosExtra: estado.empleadosExtra,
-    rutasHabituales: estado.rutasHabituales,
+  const ahora = Date.now()
+  guardarSeccionSnapshotLocal('config', {
+    vehiculosExtra: sanitizarFirestore(estado.vehiculosExtra),
+    empleadosExtra: sanitizarFirestore(estado.empleadosExtra),
+    rutasHabituales: sanitizarFirestore(estado.rutasHabituales),
     rotacionContador: estado.rotacionContador,
+    actualizado: ahora,
   })
+  await persistirDoc(
+    DOC_CONFIG,
+    {
+      vehiculosExtra: estado.vehiculosExtra,
+      empleadosExtra: estado.empleadosExtra,
+      rutasHabituales: estado.rutasHabituales,
+      rotacionContador: estado.rotacionContador,
+    },
+    ahora
+  )
 }
 
 async function persistirOperaciones(estado: EstadoBearsCompleto): Promise<void> {
-  guardarSnapshotOperacionesLocal(estado)
-  await persistirDoc(DOC_OPERACIONES, {
-    turnos: estado.turnos,
-    // Limitamos historial en el doc a las últimas 250 misiones para mantener el documento ligero
-    misiones: estado.misiones.slice(0, 250),
-    eventosRadar: estado.eventosRadar,
+  const ahora = Date.now()
+  const misionesRec = estado.misiones.slice(0, 250)
+  guardarSeccionSnapshotLocal('operaciones', {
+    turnos: sanitizarFirestore(estado.turnos),
+    misiones: sanitizarFirestore(misionesRec),
+    eventosRadar: sanitizarFirestore(estado.eventosRadar),
     ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
     ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
+    actualizado: ahora,
   })
+  await persistirDoc(
+    DOC_OPERACIONES,
+    {
+      turnos: estado.turnos,
+      misiones: misionesRec,
+      eventosRadar: estado.eventosRadar,
+      ultimoEscaneoRadarEn: estado.ultimoEscaneoRadarEn,
+      ultimoDiagnosticoRadar: estado.ultimoDiagnosticoRadar,
+    },
+    ahora
+  )
 }
 
 async function persistirCombustible(estado: EstadoBearsCompleto): Promise<void> {
-  await persistirDoc(DOC_COMBUSTIBLE, {
-    tarjetaCombustible: estado.tarjetaCombustible,
-    historialTarjetas: estado.historialTarjetas.slice(0, 24),
-    preciosCombustible: estado.preciosCombustible,
+  const ahora = Date.now()
+  const histRec = estado.historialTarjetas.slice(0, 24)
+  guardarSeccionSnapshotLocal('combustible', {
+    tarjetaCombustible: sanitizarFirestore(estado.tarjetaCombustible),
+    historialTarjetas: sanitizarFirestore(histRec),
+    preciosCombustible: sanitizarFirestore(estado.preciosCombustible),
+    actualizado: ahora,
   })
+  await persistirDoc(
+    DOC_COMBUSTIBLE,
+    {
+      tarjetaCombustible: estado.tarjetaCombustible,
+      historialTarjetas: histRec,
+      preciosCombustible: estado.preciosCombustible,
+    },
+    ahora
+  )
 }
 
 async function persistirChat(estado: EstadoBearsCompleto): Promise<void> {
-  await persistirDoc(DOC_CHAT, {
-    chatMensajes: estado.chatMensajes.slice(-60),
+  const ahora = Date.now()
+  const msgsRec = estado.chatMensajes.slice(-60)
+  guardarSeccionSnapshotLocal('chat', {
+    chatMensajes: sanitizarFirestore(msgsRec),
+    actualizado: ahora,
   })
+  await persistirDoc(
+    DOC_CHAT,
+    {
+      chatMensajes: msgsRec,
+    },
+    ahora
+  )
 }
 
 /**
- * Hidrata el estado completo de Bear's Reserve desde Firestore.
- * Si Firestore aún no tiene documentos, migra automáticamente cualquier estado legacy de localStorage.
+ * Hidrata el estado completo de Bear's Reserve desde Firestore + espejo local de seguridad.
+ * - Lee cada documento por separado (un fallo en uno no borra los demás).
+ * - Nunca sobreescribe Firestore con un estado vacío.
+ * - Si el espejo local tiene datos más recientes que Firestore (p. ej. recarga rápida F5 o error previo de red),
+ *   los fusiona y vuelve a sincronizarlos hacia Firestore.
  */
 export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCompleto> {
   if (cacheEstado && !forzar) return cacheEstado
@@ -445,108 +580,231 @@ export async function hidratarEstadoBears(forzar = false): Promise<EstadoBearsCo
   promesaHidratacion = (async () => {
     const base = estadoInicialVacio()
     let existiaEnFirestore = false
-    let errorLecturaFirestore = false
+    const erroresLectura: string[] = []
 
-    try {
-      const [snapCfg, snapOp, snapComb, snapChat] = await Promise.all([
-        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_CONFIG)),
-        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_OPERACIONES)),
-        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_COMBUSTIBLE)),
-        getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, DOC_CHAT)),
-      ])
+    const tsRemoto = { config: 0, operaciones: 0, combustible: 0, chat: 0 }
 
-      if (snapCfg.exists()) {
-        existiaEnFirestore = true
-        const d = snapCfg.data() as Partial<EstadoBearsCompleto>
-        base.vehiculosExtra = d.vehiculosExtra || {}
-        base.empleadosExtra = d.empleadosExtra || {}
-        base.rutasHabituales = normalizarRutas(d.rutasHabituales)
-        base.rotacionContador = Number(d.rotacionContador) || 0
-      }
-
-      if (snapOp.exists()) {
-        existiaEnFirestore = true
-        const d = snapOp.data() as Partial<EstadoBearsCompleto>
-        base.turnos = Array.isArray(d.turnos) ? d.turnos : []
-        base.misiones = Array.isArray(d.misiones) ? d.misiones : []
-        base.eventosRadar = deduplicarEventosRadar(filtrarEventosRadarVigentes(d.eventosRadar || []))
-        base.ultimoEscaneoRadarEn = Number(d.ultimoEscaneoRadarEn) || 0
-        base.ultimoDiagnosticoRadar = String(d.ultimoDiagnosticoRadar || '')
-      }
-
-      if (snapComb.exists()) {
-        existiaEnFirestore = true
-        const d = snapComb.data() as Partial<EstadoBearsCompleto>
-        if (d.tarjetaCombustible) base.tarjetaCombustible = d.tarjetaCombustible
-        base.historialTarjetas = Array.isArray(d.historialTarjetas) ? d.historialTarjetas : []
-        if (d.preciosCombustible && d.preciosCombustible.corrientePorGalon > 0) {
-          base.preciosCombustible = d.preciosCombustible
-        }
-      }
-
-      if (snapChat.exists()) {
-        existiaEnFirestore = true
-        const d = snapChat.data() as Partial<EstadoBearsCompleto>
-        base.chatMensajes = Array.isArray(d.chatMensajes) ? d.chatMensajes : []
-      }
-    } catch (err) {
-      errorLecturaFirestore = true
-      console.warn('Error leyendo Bear\'s Reserve desde Firestore:', err)
-      // Si Firestore falla temporalmente (red/reconexión), restauramos el último snapshot local sin pisar la nube
-      const snapLocal = leerSnapshotOperacionesLocal()
-      if (snapLocal) {
-        base.turnos = Array.isArray(snapLocal.turnos) ? snapLocal.turnos : []
-        base.misiones = Array.isArray(snapLocal.misiones) ? snapLocal.misiones : []
-        base.eventosRadar = deduplicarEventosRadar(
-          filtrarEventosRadarVigentes(snapLocal.eventosRadar || [])
-        )
-        base.ultimoEscaneoRadarEn = Number(snapLocal.ultimoEscaneoRadarEn) || 0
-        base.ultimoDiagnosticoRadar = String(snapLocal.ultimoDiagnosticoRadar || '')
+    const leerDocSeguro = async (docId: string) => {
+      try {
+        return await getDoc(doc(db, COLLECTIONS.CONFIGURACION_SISTEMA, docId))
+      } catch (err) {
+        const codigo =
+          (err as { code?: string })?.code ||
+          (err instanceof Error ? err.message : 'error_lectura')
+        erroresLectura.push(`${docId}: ${codigo}`)
+        console.warn(`Error leyendo ${docId} desde Firestore:`, err)
+        return null
       }
     }
 
-    // Migración o recuperación segura desde localStorage (NUNCA sobreescribe Firestore si hubo error de lectura)
+    const [snapCfg, snapOp, snapComb, snapChat] = await Promise.all([
+      leerDocSeguro(DOC_CONFIG),
+      leerDocSeguro(DOC_OPERACIONES),
+      leerDocSeguro(DOC_COMBUSTIBLE),
+      leerDocSeguro(DOC_CHAT),
+    ])
+
+    if (snapCfg?.exists()) {
+      existiaEnFirestore = true
+      const d = snapCfg.data() as Partial<EstadoBearsCompleto> & { actualizado?: number }
+      base.vehiculosExtra = d.vehiculosExtra || {}
+      base.empleadosExtra = d.empleadosExtra || {}
+      base.rutasHabituales = normalizarRutas(d.rutasHabituales)
+      base.rotacionContador = Number(d.rotacionContador) || 0
+      tsRemoto.config = Number(d.actualizado) || 0
+    }
+
+    if (snapOp?.exists()) {
+      existiaEnFirestore = true
+      const d = snapOp.data() as Partial<EstadoBearsCompleto> & { actualizado?: number }
+      base.turnos = Array.isArray(d.turnos) ? d.turnos : []
+      base.misiones = Array.isArray(d.misiones) ? d.misiones : []
+      base.eventosRadar = deduplicarEventosRadar(filtrarEventosRadarVigentes(d.eventosRadar || []))
+      base.ultimoEscaneoRadarEn = Number(d.ultimoEscaneoRadarEn) || 0
+      base.ultimoDiagnosticoRadar = String(d.ultimoDiagnosticoRadar || '')
+      tsRemoto.operaciones = Number(d.actualizado) || 0
+    }
+
+    if (snapComb?.exists()) {
+      existiaEnFirestore = true
+      const d = snapComb.data() as Partial<EstadoBearsCompleto> & { actualizado?: number }
+      if (d.tarjetaCombustible) base.tarjetaCombustible = d.tarjetaCombustible
+      base.historialTarjetas = Array.isArray(d.historialTarjetas) ? d.historialTarjetas : []
+      if (d.preciosCombustible && d.preciosCombustible.corrientePorGalon > 0) {
+        base.preciosCombustible = d.preciosCombustible
+      }
+      tsRemoto.combustible = Number(d.actualizado) || 0
+    }
+
+    if (snapChat?.exists()) {
+      existiaEnFirestore = true
+      const d = snapChat.data() as Partial<EstadoBearsCompleto> & { actualizado?: number }
+      base.chatMensajes = Array.isArray(d.chatMensajes) ? d.chatMensajes : []
+      tsRemoto.chat = Number(d.actualizado) || 0
+    }
+
+    // Reconciliación con el espejo local completo (evita pérdida de vehículos habilitados o misiones al recargar)
+    const snapLocal = leerSnapshotCompletoLocal()
+    let debeResincConfig = false
+    let debeResincOp = false
+    let debeResincComb = false
+    let debeResincChat = false
+
+    if (snapLocal.config) {
+      const localMasReciente = snapLocal.config.actualizado > tsRemoto.config
+      const localTieneVehiculosQueFaltan =
+        Object.keys(base.vehiculosExtra).length === 0 &&
+        Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0
+      const localTieneEmpleadosQueFaltan =
+        Object.keys(base.empleadosExtra).length === 0 &&
+        Object.keys(snapLocal.config.empleadosExtra || {}).length > 0
+
+      if (!snapCfg?.exists() || localMasReciente || localTieneVehiculosQueFaltan || localTieneEmpleadosQueFaltan) {
+        if (Object.keys(snapLocal.config.vehiculosExtra || {}).length > 0) {
+          base.vehiculosExtra = { ...base.vehiculosExtra, ...snapLocal.config.vehiculosExtra }
+          debeResincConfig = true
+        }
+        if (Object.keys(snapLocal.config.empleadosExtra || {}).length > 0) {
+          base.empleadosExtra = { ...base.empleadosExtra, ...snapLocal.config.empleadosExtra }
+          debeResincConfig = true
+        }
+        if (localMasReciente && Array.isArray(snapLocal.config.rutasHabituales) && snapLocal.config.rutasHabituales.length > 0) {
+          base.rutasHabituales = normalizarRutas(snapLocal.config.rutasHabituales)
+          base.rotacionContador = Number(snapLocal.config.rotacionContador) || base.rotacionContador
+          debeResincConfig = true
+        }
+      }
+    }
+
+    if (snapLocal.operaciones) {
+      const localMasReciente = snapLocal.operaciones.actualizado > tsRemoto.operaciones
+      const misionesLocales = Array.isArray(snapLocal.operaciones.misiones)
+        ? snapLocal.operaciones.misiones
+        : []
+      const faltanMisionesEnCurso = misionesLocales.some(
+        (ml) => ml.estado === 'en_curso' && !base.misiones.some((mr) => mr.id === ml.id)
+      )
+
+      if (!snapOp?.exists() || localMasReciente || faltanMisionesEnCurso) {
+        if (localMasReciente || !snapOp?.exists()) {
+          if (Array.isArray(snapLocal.operaciones.turnos) && snapLocal.operaciones.turnos.length > 0) {
+            base.turnos = snapLocal.operaciones.turnos
+          }
+          if (misionesLocales.length > 0) {
+            const idsRem = new Set(base.misiones.map((m) => m.id))
+            base.misiones = [
+              ...misionesLocales,
+              ...base.misiones.filter((m) => !misionesLocales.some((ml) => ml.id === m.id) && idsRem.has(m.id)),
+            ]
+          }
+          const evLocales = deduplicarEventosRadar(
+            filtrarEventosRadarVigentes(snapLocal.operaciones.eventosRadar || [])
+          )
+          if (evLocales.length > 0) {
+            base.eventosRadar = evLocales
+            base.ultimoEscaneoRadarEn = Number(snapLocal.operaciones.ultimoEscaneoRadarEn) || base.ultimoEscaneoRadarEn
+            base.ultimoDiagnosticoRadar =
+              String(snapLocal.operaciones.ultimoDiagnosticoRadar || '') || base.ultimoDiagnosticoRadar
+          }
+        } else if (faltanMisionesEnCurso) {
+          const faltantes = misionesLocales.filter(
+            (ml) => ml.estado === 'en_curso' && !base.misiones.some((mr) => mr.id === ml.id)
+          )
+          base.misiones = [...faltantes, ...base.misiones]
+        }
+        debeResincOp = true
+      }
+    }
+
+    if (snapLocal.combustible && (!snapComb?.exists() || snapLocal.combustible.actualizado > tsRemoto.combustible)) {
+      if (snapLocal.combustible.tarjetaCombustible) {
+        base.tarjetaCombustible = snapLocal.combustible.tarjetaCombustible
+      }
+      if (Array.isArray(snapLocal.combustible.historialTarjetas)) {
+        base.historialTarjetas = snapLocal.combustible.historialTarjetas
+      }
+      if (snapLocal.combustible.preciosCombustible?.corrientePorGalon > 0) {
+        base.preciosCombustible = snapLocal.combustible.preciosCombustible
+      }
+      debeResincComb = true
+    }
+
+    if (snapLocal.chat && (!snapChat?.exists() || snapLocal.chat.actualizado > tsRemoto.chat)) {
+      if (Array.isArray(snapLocal.chat.chatMensajes) && snapLocal.chat.chatMensajes.length > 0) {
+        base.chatMensajes = snapLocal.chat.chatMensajes
+        debeResincChat = true
+      }
+    }
+
+    // Recuperación legacy desde localStorage antiguo (solo si hay datos reales; NUNCA escribe documentos vacíos)
     const legacy = leerMigracionLegacyLocalStorage()
-    if (!existiaEnFirestore && !errorLecturaFirestore) {
-      if (legacy) {
-        if (legacy.vehiculosExtra) base.vehiculosExtra = legacy.vehiculosExtra
-        if (legacy.empleadosExtra) base.empleadosExtra = legacy.empleadosExtra
-        if (legacy.rutasHabituales) base.rutasHabituales = normalizarRutas(legacy.rutasHabituales)
-        if (typeof legacy.rotacionContador === 'number') base.rotacionContador = legacy.rotacionContador
-        if (legacy.turnos) base.turnos = legacy.turnos
-        if (legacy.misiones) base.misiones = legacy.misiones
-        if (legacy.eventosRadar) base.eventosRadar = legacy.eventosRadar
-        if (legacy.tarjetaCombustible) base.tarjetaCombustible = legacy.tarjetaCombustible
+    if (legacy) {
+      if (
+        Object.keys(base.vehiculosExtra).length === 0 &&
+        legacy.vehiculosExtra &&
+        Object.keys(legacy.vehiculosExtra).length > 0
+      ) {
+        base.vehiculosExtra = legacy.vehiculosExtra
+        debeResincConfig = true
       }
-      migrarMesTarjetaSiCambio(base)
-      await Promise.all([
-        persistirConfig(base),
-        persistirOperaciones(base),
-        persistirCombustible(base),
-      ])
+      if (
+        Object.keys(base.empleadosExtra).length === 0 &&
+        legacy.empleadosExtra &&
+        Object.keys(legacy.empleadosExtra).length > 0
+      ) {
+        base.empleadosExtra = legacy.empleadosExtra
+        debeResincConfig = true
+      }
+      if (!existiaEnFirestore && erroresLectura.length === 0) {
+        if (legacy.rutasHabituales) {
+          base.rutasHabituales = normalizarRutas(legacy.rutasHabituales)
+          debeResincConfig = true
+        }
+        if (typeof legacy.rotacionContador === 'number' && legacy.rotacionContador > 0) {
+          base.rotacionContador = legacy.rotacionContador
+          debeResincConfig = true
+        }
+        if (legacy.turnos?.length && base.turnos.length === 0) {
+          base.turnos = legacy.turnos
+          debeResincOp = true
+        }
+        if (legacy.misiones?.length && base.misiones.length === 0) {
+          base.misiones = legacy.misiones
+          debeResincOp = true
+        }
+        if (legacy.eventosRadar?.length && base.eventosRadar.length === 0) {
+          base.eventosRadar = legacy.eventosRadar
+          debeResincOp = true
+        }
+        if (legacy.tarjetaCombustible && base.tarjetaCombustible.tanqueos.length === 0) {
+          base.tarjetaCombustible = legacy.tarjetaCombustible
+          debeResincComb = true
+        }
+      }
+    }
+
+    const cambioMes = migrarMesTarjetaSiCambio(base)
+    if (cambioMes) debeResincComb = true
+
+    if (erroresLectura.length > 0) {
+      emitirEstadoSync({
+        estado: 'error',
+        ultimoError: erroresLectura[0],
+        ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn,
+      })
     } else {
-      let recuperoConfig = false
-      if (legacy) {
-        if (
-          Object.keys(base.vehiculosExtra).length === 0 &&
-          legacy.vehiculosExtra &&
-          Object.keys(legacy.vehiculosExtra).length > 0
-        ) {
-          base.vehiculosExtra = legacy.vehiculosExtra
-          recuperoConfig = true
-        }
-        if (
-          Object.keys(base.empleadosExtra).length === 0 &&
-          legacy.empleadosExtra &&
-          Object.keys(legacy.empleadosExtra).length > 0
-        ) {
-          base.empleadosExtra = legacy.empleadosExtra
-          recuperoConfig = true
-        }
+      emitirEstadoSync({
+        estado: 'sincronizado',
+        ultimaEscrituraOkEn: estadoSyncActual.ultimaEscrituraOkEn ?? Date.now(),
+      })
+      const tareasResinc: Promise<void>[] = []
+      if (debeResincConfig) tareasResinc.push(persistirConfig(base))
+      if (debeResincOp) tareasResinc.push(persistirOperaciones(base))
+      if (debeResincComb) tareasResinc.push(persistirCombustible(base))
+      if (debeResincChat) tareasResinc.push(persistirChat(base))
+      if (tareasResinc.length > 0) {
+        await Promise.all(tareasResinc)
       }
-      const cambioMes = migrarMesTarjetaSiCambio(base)
-      if (recuperoConfig) await persistirConfig(base)
-      if (cambioMes) await persistirCombustible(base)
     }
 
     establecerPreciosCombustibleCache(base.preciosCombustible)

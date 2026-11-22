@@ -216,4 +216,72 @@ describe("Bear's Reserve · persistencia Firestore, liquidación y auto-cierre",
     expect(v?.capacidadTanqueGalones).toBe(21.1)
     expect(v?.tipoCombustible).toBe('diesel')
   })
+
+  it('conserva vehículos habilitados y misiones en curso al recargar incluso si Firestore quedó desactualizado', async () => {
+    __seed('vehiculos', 'v-gaz', {
+      marca: 'GAZ',
+      linea: '3302 GAZelle',
+      tipo: 'camion',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 85000, tareas: [] },
+    })
+
+    await guardarExtraVehiculo('v-gaz', {
+      disponibleParaTrabajo: true,
+      investigadoIA: true,
+      capacidadTanqueGalones: 18.5,
+      tipoCombustible: 'diesel',
+    })
+
+    await crearMisionOperativa({
+      id: 'mis-activa-f5',
+      titulo: 'Traslado humanitario de adulto mayor',
+      tipo: 'transporte_humanitario',
+      prioridad: 'alta',
+      origen: 'Finca El Guadual',
+      destino: 'Vereda La Linda · Manizales',
+      departamento: 'Caldas',
+      prioridadGeografica: 'local_manizales',
+      terreno: 'trocha_moderada',
+      distanciaKmIdaYVuelta: 32.8,
+      duracionMinutos: 108,
+      vehiculosAsignados: [{ id: 'v-gaz', nombre: 'GAZ 3302 GAZelle' }],
+      tripulantesAsignados: [{ id: 'emp-1', nombre: 'Daniela' }],
+      galonesConsumidosEstimados: 0,
+      costoCombustibleEstimadoCOP: 0,
+      desgasteLlantasIncrementoPorc: 0,
+      fecha: '2026-11-21',
+      estado: 'en_curso',
+      impactoSocial: 'Traslado médico prioritario',
+    })
+
+    // Simulamos pérdida/desfase en Firestore + recarga F5 de la página (caché RAM vacía, pero espejo local intacto)
+    __reset()
+    __seed('vehiculos', 'v-gaz', {
+      marca: 'GAZ',
+      linea: '3302 GAZelle',
+      tipo: 'camion',
+      activo: true,
+      estado: 'Disponible',
+      mantenimiento: { kilometrajeActual: 85000, tareas: [] },
+    })
+    __resetCacheBearsParaTests()
+
+    await hidratarEstadoBears()
+    const vehs = await listarVehiculosBears()
+    const gaz = vehs.find((x) => x.id === 'v-gaz')
+    expect(gaz?.disponibleParaTrabajo).toBe(true)
+    expect(gaz?.investigadoIA).toBe(true)
+    expect(gaz?.estado).toBe('en_mision')
+
+    const misiones = listarMisiones()
+    expect(misiones.some((m) => m.id === 'mis-activa-f5' && m.estado === 'en_curso')).toBe(true)
+
+    // Además se volvió a sincronizar hacia Firestore automáticamente
+    const docCfg = __get('configuracion_sistema', 'bears_reserve_config')
+    const docOp = __get('configuracion_sistema', 'bears_reserve_operaciones')
+    expect((docCfg?.vehiculosExtra as Record<string, { disponibleParaTrabajo?: boolean }>)?.['v-gaz']?.disponibleParaTrabajo).toBe(true)
+    expect(Array.isArray(docOp?.misiones) && docOp.misiones.length).toBe(1)
+  })
 })

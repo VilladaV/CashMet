@@ -19,6 +19,7 @@ import {
   investigarVehiculosPendientesIA,
   leerChatGema,
   leerDiagnosticoRadar,
+  leerEstadoSyncFirestore,
   leerEventosRadar,
   leerHistorialTarjetas,
   leerPreciosCombustible,
@@ -33,9 +34,11 @@ import {
   reemplazarLlantasVehiculo,
   sincronizarPreciosCombustibleReales,
   sincronizarRadarAutomatico,
+  suscribirEstadoSyncFirestore,
   tanquearVehiculoCompleto,
   verificarYCompletarMisionesVencidas,
   verificarYCumplirRutasAutomaticas,
+  type EstadoSyncFirestore,
 } from './repo'
 import { BASE_BEARS_RESERVE } from './geo'
 import { generarTurnosSemanalesIA } from './gemaEngine'
@@ -103,10 +106,15 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
   const [cargando, setCargando] = useState(true)
   const [liquidando, setLiquidando] = useState(false)
   const [actualizandoPrecios, setActualizandoPrecios] = useState(false)
+  const [syncFirestore, setSyncFirestore] = useState<EstadoSyncFirestore>(leerEstadoSyncFirestore)
   const [avisoGlobal, setAvisoGlobal] = useState<{ tipo: 'ok' | 'error'; texto: string } | null>(
     null
   )
   const inicializadoRef = useRef(false)
+
+  useEffect(() => {
+    return suscribirEstadoSyncFirestore(setSyncFirestore)
+  }, [])
 
   const mostrarAviso = useCallback((tipo: 'ok' | 'error', texto: string, ms = 5500) => {
     setAvisoGlobal({ tipo, texto })
@@ -434,10 +442,20 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
           </div>
 
           <div className="hidden items-center gap-2 sm:flex">
-            <span className="flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-              <Radio className="h-3 w-3 animate-pulse" />
-              Firestore Sync
-            </span>
+            {syncFirestore.estado === 'error' ? (
+              <span
+                title={syncFirestore.ultimoError || 'Error sincronizando con Firestore'}
+                className="flex items-center gap-1 rounded-full border border-red-400/40 bg-red-500/15 px-2.5 py-1 text-[11px] font-semibold text-red-200"
+              >
+                <AlertTriangle className="h-3 w-3" />
+                Respaldo Local (Error Firestore)
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                <Radio className="h-3 w-3 animate-pulse" />
+                {syncFirestore.estado === 'conectando' ? 'Conectando Firestore...' : 'Firestore Sync'}
+              </span>
+            )}
             <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-[11px] font-medium text-sky-300">
               {geminiDisponible ? 'Gema 💎 Gemini IA' : 'Gema 💎 Respaldo Local'}
             </span>
@@ -447,6 +465,16 @@ export default function BearsReservePortal({ onVolverACashmet }: Props) {
 
       {/* Contenedor central */}
       <main className="mx-auto max-w-7xl space-y-4 p-4 sm:p-6">
+        {syncFirestore.estado === 'error' && (
+          <div className="flex items-center gap-2 rounded-2xl border border-red-400/40 bg-red-500/15 p-3 text-xs font-semibold text-red-200 shadow-lg">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-red-300" />
+            <span>
+              ⚠️ Firestore reportó un error ({syncFirestore.ultimoError}). Tus vehículos habilitados y
+              misiones siguen protegidos en el respaldo local de este navegador y se volverán a subir a
+              la nube apenas Firestore responda.
+            </span>
+          </div>
+        )}
         {avisoGlobal && (
           <div
             className={`flex items-center justify-between gap-2 rounded-2xl border p-3 text-xs font-bold shadow-lg ${

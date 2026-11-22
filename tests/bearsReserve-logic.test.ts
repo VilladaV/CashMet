@@ -453,5 +453,14 @@ describe("Bear's Reserve · catálogo técnico, radar con caducidad y Gema local
     expect(formatearDuracionCorta(45)).toBe('45 min')
     expect(formatearDuracionCorta(120)).toBe('2h')
     expect(formatearDuracionCorta(155)).toBe('2h 35m')
+
+    // Valle del Cauca / Buenaventura no debe colisionar con "cauca" (Popayán)
+    const buenaventura = estimarLogisticaMisionDesdeBase({
+      lugar: 'Sector Los Tubos, vía Buenaventura-Loboguerrero',
+      departamento: 'Valle del Cauca',
+      titulo: 'Volcamiento bloquea vía a Buenaventura',
+    })
+    expect(buenaventura.distanciaKmIda).toBeGreaterThan(250)
+    expect(buenaventura.distanciaKmIda).toBeLessThan(340)
   })
 })
