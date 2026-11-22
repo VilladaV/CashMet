@@ -104,26 +104,104 @@ function parsearRssXml(xmlText: string): RssNewsItem[] {
   }
 }
 
-async function obtenerItemsRssConRespaldo(rssUrl: string): Promise<{ items: RssNewsItem[]; ok: boolean }> {
-  const encoded = encodeURIComponent(rssUrl)
+interface GdeltArticle {
+  title?: string
+  url?: string
+  domain?: string
+  seendate?: string
+  language?: string
+  sourcecountry?: string
+}
 
-  // Mirror 1: rss2json.com (devuelve JSON ya parseado)
+/**
+ * Fuente web directa 1 (sin proxy, CORS abierto, gratis, sin API key):
+ * GDELT 2.0 DOC API — indexa prensa de TODA Colombia cada 15 minutos (`sourcecountry:CO`, `timespan=2d`).
+ */
+async function fetchGdeltColombia(): Promise<{
+  items: CandidatoNoticiaRaw[]
+  ok: boolean
+  detalle: string
+}> {
+  const hoy = hoyISO()
+  const q = encodeURIComponent(
+    'sourcecountry:CO (derrumbe OR deslizamiento OR inundacion OR inundaciones OR damnificados OR avalancha OR creciente OR deslizamientos)'
+  )
+  const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${q}&mode=artlist&format=json&maxrecords=20&timespan=2d&sort=datedesc`
+
+  try {
+    const c = new AbortController()
+    const t = setTimeout(() => c.abort(), 8500)
+    const r = await fetch(url, { signal: c.signal })
+    clearTimeout(t)
+    if (!r.ok) return { items: [], ok: false, detalle: `GDELT HTTP ${r.status}` }
+
+    const data = (await r.json()) as { articles?: GdeltArticle[] }
+    const articles = Array.isArray(data.articles) ? data.articles : []
+
+    const items: CandidatoNoticiaRaw[] = []
+    for (const art of articles) {
+      const titulo = String(art.title || '').trim()
+      if (!titulo) continue
+
+      // Formato GDELT seendate: "YYYYMMDDTHHMMSSZ"
+      let fechaPub = ''
+      const sd = String(art.seendate || '')
+      if (/^\d{8}T\d{6}Z$/.test(sd)) {
+        const dt = new Date(
+          `${sd.slice(0, 4)}-${sd.slice(4, 6)}-${sd.slice(6, 8)}T${sd.slice(9, 11)}:${sd.slice(11, 13)}:${sd.slice(13, 15)}Z`
+        )
+        if (!Number.isNaN(dt.getTime())) fechaPub = isoLocal(dt)
+      }
+      if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
+
+      items.push({
+        titulo,
+        fuente: String(art.domain || 'Prensa Colombia').replace(/^www\./, ''),
+        link: String(art.url || '').trim(),
+        fechaPub,
+        resumenRaw: titulo,
+        alcance: 'nacional',
+      })
+    }
+
+    return { items, ok: true, detalle: `GDELT CO (${items.length} artículos <48h)` }
+  } catch (err) {
+    return {
+      items: [],
+      ok: false,
+      detalle: `GDELT (${err instanceof Error ? err.message : 'sin conexión'})`,
+    }
+  }
+}
+
+async function obtenerItemsRssConRespaldo(
+  rssUrl: string
+): Promise<{ items: RssNewsItem[]; ok: boolean; detalle: string }> {
+  const encoded = encodeURIComponent(rssUrl)
+  const fallos: string[] = []
+
+  // Mirror 1: rss2json.com
   try {
     const c1 = new AbortController()
     const t1 = setTimeout(() => c1.abort(), 6500)
-    const r1 = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encoded}`, { signal: c1.signal })
+    const r1 = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encoded}`, {
+      signal: c1.signal,
+    })
     clearTimeout(t1)
     if (r1.ok) {
       const json = (await r1.json()) as { status?: string; items?: RssNewsItem[] }
       if (json.status === 'ok' && Array.isArray(json.items)) {
-        return { items: json.items, ok: true }
+        return { items: json.items, ok: true, detalle: `Google News CO (${json.items.length})` }
       }
+      fallos.push('rss2json sin items')
+    } else {
+      fallos.push(`rss2json HTTP ${r1.status}`)
     }
   } catch {
-    /* intenta mirror 2 */
+    fallos.push('rss2json timeout')
   }
 
-  // Mirror 2: allorigins.win (XML directo de Google News)
+  // Mirror 2: allorigins.win
   try {
     const c2 = new AbortController()
     const t2 = setTimeout(() => c2.abort(), 7500)
@@ -133,42 +211,50 @@ async function obtenerItemsRssConRespaldo(rssUrl: string): Promise<{ items: RssN
       const xml = await r2.text()
       const items = parsearRssXml(xml)
       if (items.length > 0 || xml.includes('<rss')) {
-        return { items, ok: true }
+        return { items, ok: true, detalle: `Google News CO (${items.length})` }
       }
+      fallos.push('allorigins sin XML')
+    } else {
+      fallos.push(`allorigins HTTP ${r2.status}`)
     }
   } catch {
-    /* intenta mirror 3 */
+    fallos.push('allorigins timeout')
   }
 
-  // Mirror 3: corsproxy.io (XML directo de Google News)
+  // Mirror 3: codetabs proxy
   try {
     const c3 = new AbortController()
     const t3 = setTimeout(() => c3.abort(), 7500)
-    const r3 = await fetch(`https://corsproxy.io/?url=${encoded}`, { signal: c3.signal })
+    const r3 = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, {
+      signal: c3.signal,
+    })
     clearTimeout(t3)
     if (r3.ok) {
       const xml = await r3.text()
       const items = parsearRssXml(xml)
       if (items.length > 0 || xml.includes('<rss')) {
-        return { items, ok: true }
+        return { items, ok: true, detalle: `Google News CO (${items.length})` }
       }
+      fallos.push('codetabs sin XML')
+    } else {
+      fallos.push(`codetabs HTTP ${r3.status}`)
     }
   } catch {
-    /* sin mirrors disponibles */
+    fallos.push('codetabs timeout')
   }
 
-  return { items: [], ok: false }
+  return { items: [], ok: false, detalle: fallos.join(', ') }
 }
 
 async function fetchGoogleNewsQuery(
   queryStr: string,
   alcance: 'regional' | 'nacional'
-): Promise<{ items: CandidatoNoticiaRaw[]; ok: boolean }> {
+): Promise<{ items: CandidatoNoticiaRaw[]; ok: boolean; detalle: string }> {
   const hoy = hoyISO()
   const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(queryStr)}&hl=es-419&gl=CO&ceid=CO:es-419`
 
-  const { items: rawItems, ok } = await obtenerItemsRssConRespaldo(rssUrl)
-  if (!ok) return { items: [], ok: false }
+  const { items: rawItems, ok, detalle } = await obtenerItemsRssConRespaldo(rssUrl)
+  if (!ok) return { items: [], ok: false, detalle }
 
   const items: CandidatoNoticiaRaw[] = []
   for (const item of rawItems) {
@@ -191,7 +277,6 @@ async function fetchGoogleNewsQuery(
         fechaPub = isoLocal(parsedDate)
       }
     }
-    // Candado estricto: solo noticias publicadas en los últimos 2 días
     if (!esFechaNoticiaReciente(fechaPub, hoy, 2)) continue
 
     const resumenRaw = String(item.description || '')
@@ -210,37 +295,50 @@ async function fetchGoogleNewsQuery(
     })
   }
 
-  return { items, ok: true }
+  return { items, ok: true, detalle }
 }
 
 /**
- * Fuente web real de todo Colombia (1 sola consulta limpia + mirrors CORS de respaldo):
- * 1. Consulta Google News Colombia (`when:2d`) sobre derrumbes, inundaciones, damnificados,
- *    cierres viales y emergencias invernales en todo el país (sin saturar rate-limits).
- * 2. Pasa las candidatas en 1 sola llamada a Gemini IA como CURADOR OPERATIVO ESTRICTO.
+ * Fuente web real multi-canal de TODO Colombia (sin depender de la cuota de Google Search Grounding):
+ * 1. GDELT 2.0 DOC API (directo con CORS nativo, prensa colombiana cada 15 min, últimos 2 días).
+ * 2. Google News Colombia RSS (`when:2d`) vía mirrors CORS (rss2json → allorigins → codetabs).
+ * 3. Curador operativo estricto en 1 sola llamada a Gemini IA para aprobar solo emergencias donde Bear's Reserve puede ayudar.
  */
-async function buscarNoticiasGoogleNewsRSS(
+async function buscarNoticiasFuentesAbiertasColombia(
   eventosExistentes: EventoRadarLocal[]
 ): Promise<{
   eventos: EventoRadarLocal[]
   consultado: boolean
   candidatasEvaluadas: number
   descartadasIrrelevantes: number
+  detalleFuentes: string
 }> {
-  // 1 sola petición limpia cubriendo todo Colombia (evita 429 por solicitudes paralelas en rss2json)
-  const queryUnificada =
-    'Colombia (derrumbe OR deslizamiento OR inundaciones OR damnificados OR "cierre vial" OR "emergencia invernal" OR avalancha OR "vía bloqueada") when:2d'
+  const queryGNews =
+    'Colombia (derrumbe OR deslizamiento OR inundaciones OR damnificados OR "cierre vial" OR avalancha) when:2d'
 
-  const resNac = await fetchGoogleNewsQuery(queryUnificada, 'nacional')
+  const [resGdelt, resGNews] = await Promise.all([
+    fetchGdeltColombia(),
+    fetchGoogleNewsQuery(queryGNews, 'nacional'),
+  ])
 
-  if (!resNac.ok) {
-    return { eventos: [], consultado: false, candidatasEvaluadas: 0, descartadasIrrelevantes: 0 }
+  const detallesOk = [resGdelt, resGNews].filter((r) => r.ok).map((r) => r.detalle)
+  const detallesErr = [resGdelt, resGNews].filter((r) => !r.ok).map((r) => r.detalle)
+
+  if (!resGdelt.ok && !resGNews.ok) {
+    return {
+      eventos: [],
+      consultado: false,
+      candidatasEvaluadas: 0,
+      descartadasIrrelevantes: 0,
+      detalleFuentes: detallesErr.join(' | '),
+    }
   }
 
-  // Pre-deduplicar candidatas por título/url contra las existentes
+  // Combinar y pre-deduplicar candidatas por título/url contra las existentes
   const combinadas: CandidatoNoticiaRaw[] = []
   const yaVistas: EventoRadarLocal[] = [...eventosExistentes]
-  for (const item of resNac.items.slice(0, 16)) {
+  for (const item of [...resGNews.items.slice(0, 10), ...resGdelt.items.slice(0, 12)]) {
+    if (combinadas.length >= 18) break
     const temp: EventoRadarLocal = {
       id: 'tmp',
       titulo: item.titulo,
@@ -262,7 +360,13 @@ async function buscarNoticiasGoogleNewsRSS(
   }
 
   if (combinadas.length === 0) {
-    return { eventos: [], consultado: true, candidatasEvaluadas: 0, descartadasIrrelevantes: 0 }
+    return {
+      eventos: [],
+      consultado: true,
+      candidatasEvaluadas: 0,
+      descartadasIrrelevantes: 0,
+      detalleFuentes: detallesOk.join(' + '),
+    }
   }
 
   // Sin Gemini disponible, no mostramos noticias sin curar para no meter basura irrelevante
@@ -272,6 +376,7 @@ async function buscarNoticiasGoogleNewsRSS(
       consultado: true,
       candidatasEvaluadas: combinadas.length,
       descartadasIrrelevantes: combinadas.length,
+      detalleFuentes: detallesOk.join(' + '),
     }
   }
 
@@ -320,6 +425,7 @@ Responde ÚNICAMENTE con un JSON válido:
         consultado: true,
         candidatasEvaluadas: combinadas.length,
         descartadasIrrelevantes: combinadas.length,
+        detalleFuentes: `${detallesOk.join(' + ')} (curador Gemini ocupado)`,
       }
     }
 
@@ -413,14 +519,16 @@ Responde ÚNICAMENTE con un JSON válido:
       consultado: true,
       candidatasEvaluadas: combinadas.length,
       descartadasIrrelevantes: Math.max(0, combinadas.length - eventos.length),
+      detalleFuentes: detallesOk.join(' + '),
     }
   } catch (err) {
-    console.warn('Error curando noticias de Google News con Gemini:', err)
+    console.warn('Error curando noticias con Gemini:', err)
     return {
       eventos: [],
       consultado: true,
       candidatasEvaluadas: combinadas.length,
       descartadasIrrelevantes: combinadas.length,
+      detalleFuentes: detallesOk.join(' + '),
     }
   }
 }
@@ -590,18 +698,19 @@ Si no hay ninguna emergencia accionable entre ${desdeISO} y ${hoy}, responde "SI
     )
 
     if (!resPaso1 || !usoBusqueda) {
-      // Respaldo web real (todo Colombia) vía Google News Colombia RSS (`when:2d`) + Curador Gemini IA
-      const rss = await buscarNoticiasGoogleNewsRSS(eventosExistentes)
-      if (rss.consultado) {
-        const horaTxt = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+      // Fuentes web abiertas de todo Colombia: GDELT 2.0 (directo CORS) + Google News RSS (mirrors) + Curador Gemini IA
+      const abiertas = await buscarNoticiasFuentesAbiertasColombia(eventosExistentes)
+      const horaTxt = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })
+
+      if (abiertas.consultado) {
         return {
-          eventos: rss.eventos,
+          eventos: abiertas.eventos,
           busquedaWebActiva: true,
           descartadasPorViejas: 0,
           diagnostico:
-            rss.eventos.length > 0
-              ? `🌐 Prensa nacional en vivo (${horaTxt}): ${rss.eventos.length} emergencia(s) relevante(s) aprobada(s) por Gema IA de ${rss.candidatasEvaluadas} revisadas (<48h).`
-              : `🌐 Prensa nacional revisada (${horaTxt}): se evaluaron ${rss.candidatasEvaluadas} noticia(s) <48h en Colombia; ninguna requiere apoyo operativo de Bear's Reserve ahora.`,
+            abiertas.eventos.length > 0
+              ? `🌐 Prensa nacional en vivo (${horaTxt} · ${abiertas.detalleFuentes}): ${abiertas.eventos.length} emergencia(s) relevante(s) aprobada(s) por Gema IA de ${abiertas.candidatasEvaluadas} revisadas (<48h).`
+              : `🌐 Prensa nacional revisada (${horaTxt} · ${abiertas.detalleFuentes}): se evaluaron ${abiertas.candidatasEvaluadas} noticia(s) <48h en Colombia; ninguna requiere apoyo operativo de Bear's Reserve ahora.`,
         }
       }
 
@@ -609,7 +718,7 @@ Si no hay ninguna emergencia accionable entre ${desdeISO} y ${hoy}, responde "SI
         eventos: [],
         busquedaWebActiva: false,
         descartadasPorViejas: 0,
-        diagnostico: `Búsqueda web no disponible (${errorBusqueda || 'sin acceso a Google Search Grounding'}).`,
+        diagnostico: `⚠️ Fuentes web no respondieron (${horaTxt}): ${abiertas.detalleFuentes || errorBusqueda || 'sin conexión'}.`,
       }
     }
 
